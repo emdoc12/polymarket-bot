@@ -1,13 +1,12 @@
 services:
   polybot:
-    image: polymarket-bot:latest
-    build: .
+    image: ghcr.io/emdoc12/polymarket-bot:latest
     container_name: polybot
     restart: unless-stopped
     ports:
       - "5000:5000"
     volumes:
-      - polybot-data:/data
+      - /mnt/user/appdata/polybot:/data
     environment:
       - NODE_ENV=production
       - DATA_DIR=/data
@@ -16,7 +15,3 @@ services:
       # - POLY_API_KEY=your_clob_api_key
       # - POLY_API_SECRET=your_clob_api_secret
       # - POLY_PASSPHRASE=your_clob_passphrase
-
-volumes:
-  polybot-data:
-    driver: local

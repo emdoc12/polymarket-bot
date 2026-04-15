@@ -17,61 +17,64 @@ A self-hosted web app for automating trades on [Polymarket](https://polymarket.c
 
 ---
 
-## Running with Docker
+## Unraid Setup (Compose Manager)
 
-### Quick Start
+### Step 1 — Install Compose Manager
+
+In the Unraid **Apps** tab, search for **Compose Manager** and install it.
+
+### Step 2 — Create the stack
+
+1. Go to the **Docker** tab and scroll to the bottom
+2. Click **Add New Stack**, name it `polybot`, click **Add**
+3. Click the **gear icon** next to the stack → **Edit Stack**
+4. Paste the following into the compose file editor:
+
+```yaml
+services:
+  polybot:
+    image: ghcr.io/emdoc12/polymarket-bot:latest
+    container_name: polybot
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - /mnt/user/appdata/polybot:/data
+    environment:
+      - NODE_ENV=production
+      - DATA_DIR=/data
+```
+
+5. Click **Save Changes**
+6. Click **Compose Up**
+
+### Step 3 — Access the app
+
+Open `http://[your-unraid-ip]:5000` in your browser.
+
+### Updating
+
+When a new version is available, in the Docker tab on your stack:
+1. Click **Compose Pull**
+2. Click **Compose Up**
+
+---
+
+## Running with Docker (non-Unraid)
 
 ```bash
 docker compose up -d
 ```
 
-Then open `http://localhost:5000` in your browser.
-
-### Building manually
+Or manually:
 
 ```bash
-docker build -t polymarket-bot .
 docker run -d \
   -p 5000:5000 \
   -v polybot-data:/data \
   --name polybot \
-  polymarket-bot
+  ghcr.io/emdoc12/polymarket-bot:latest
 ```
-
----
-
-## Unraid Setup
-
-### Method 1: Docker Compose (recommended)
-
-1. Install the **Community Applications** plugin if you haven't already
-2. Install the **Compose Manager** plugin from Community Applications
-3. Create a new compose stack and paste in the contents of `docker-compose.yml`
-4. Click **Deploy**
-
-### Method 2: Unraid Docker UI (manual)
-
-1. In the Unraid UI go to **Docker → Add Container**
-2. Fill in:
-   | Field | Value |
-   |---|---|
-   | Name | `polybot` |
-   | Repository | `ghcr.io/emdoc12/polymarket-bot:latest` *(or build locally)* |
-   | Network Type | Bridge |
-   | Port Mapping | Host `5000` → Container `5000` |
-   | Path Mapping | Host `/mnt/user/appdata/polybot` → Container `/data` |
-3. Add environment variables (see below)
-4. Click **Apply**
-
-### Updating
-
-When this repo gets updates, pull the latest image and restart:
-
-```bash
-docker compose pull && docker compose up -d
-```
-
-Or in Unraid: go to Docker, click the container, and choose **Update**.
 
 ---
 
@@ -93,11 +96,10 @@ Or in Unraid: go to Docker, click the container, and choose **Update**.
 Live trading requires a Polygon wallet with USDC and Polymarket CLOB API credentials.
 
 1. **Get USDC on Polygon** — Bridge USDC to the Polygon network
-2. **Approve on Polymarket** — Visit [polymarket.com](https://polymarket.com) and connect your wallet to approve the CLOB contract
-3. **Derive L2 credentials** — Use the official SDK:
+2. **Approve on Polymarket** — Visit [polymarket.com](https://polymarket.com) and connect your wallet
+3. **Derive L2 credentials** using the official SDK:
 
 ```python
-# Using py-clob-client
 from py_clob_client.client import ClobClient
 from py_clob_client.constants import POLYGON
 
@@ -106,9 +108,9 @@ creds = client.create_or_derive_api_creds()
 print(creds)  # Save API_KEY, API_SECRET, PASSPHRASE
 ```
 
-4. **Set environment variables** in `docker-compose.yml` and switch to **Live Mode** in the app's Settings page.
+4. Add credentials to your `docker-compose.yml` and switch to **Live Mode** in Settings.
 
-> ⚠️ **Warning:** Live mode executes real transactions. Always test thoroughly in Paper mode first. Never commit your private key to git.
+> ⚠️ **Warning:** Live mode executes real transactions. Always test in Paper mode first. Never commit your private key to git.
 
 ---
 
@@ -129,4 +131,4 @@ npm run dev     # starts Express + Vite on port 5000
 
 ## Data Persistence
 
-All data (strategies, trade logs, watchlist, settings) is stored in a SQLite database at `/data/data.db` inside the container. Mount a host volume to persist data across container restarts.
+All data is stored in a SQLite database at `/data/data.db` inside the container. The Unraid volume mapping (`/mnt/user/appdata/polybot`) keeps your data safe across updates.
