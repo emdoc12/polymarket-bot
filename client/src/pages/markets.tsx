@@ -74,6 +74,14 @@ export default function Markets() {
       return [];
     },
     refetchInterval: viewTab === "live" ? 30000 : false,
+    select: (data) => {
+      if (viewTab !== "live") return data;
+      const now = Date.now();
+      return data.filter((m) => {
+        if (!m.endDate) return true;
+        return new Date(m.endDate).getTime() > now;
+      });
+    },
   });
 
   const addToWatchlist = useMutation({
@@ -202,6 +210,7 @@ export default function Markets() {
               <Card
                 key={market.id || market.conditionId}
                 className="hover:bg-muted/30 transition-colors cursor-pointer"
+                onClick={() => setSelectedMarket(market)}
               >
                 <CardContent className="py-3.5 px-4">
                   <div className="flex items-start gap-3">

@@ -68,11 +68,13 @@ export async function registerRoutes(
       // Live tab: Fetch two batches in parallel:
       //   1. Newest events (catches 5-min crypto candles)
       //   2. Highest volume events (catches big prediction markets)
+      const nowIso = new Date().toISOString();
       const [newestEvents, topEvents] = await Promise.all([
         polyFetch(GAMMA_API, "/events", {
           ...baseParams,
           active: "true",
           closed: "false",
+          end_date_min: nowIso,
           order: "startDate",
           ascending: "false",
         }) as Promise<any[]>,
@@ -80,6 +82,7 @@ export async function registerRoutes(
           ...baseParams,
           active: "true",
           closed: "false",
+          end_date_min: nowIso,
           order: "volume",
           ascending: "false",
         }) as Promise<any[]>,
@@ -119,9 +122,16 @@ export async function registerRoutes(
         }
       }
 
+      // Drop any markets whose endDate is already in the past (API sometimes returns stale ones)
+      const nowMs = Date.now();
+      const liveMarkets = allMarkets.filter((m: any) => {
+        if (!m.endDate) return true;
+        return new Date(m.endDate).getTime() > nowMs;
+      });
+
       if (search) {
         const term = search.toLowerCase();
-        const filtered = allMarkets.filter((m: any) =>
+        const filtered = liveMarkets.filter((m: any) =>
           m.question?.toLowerCase().includes(term) ||
           m._eventTitle?.toLowerCase().includes(term)
         );
@@ -129,7 +139,7 @@ export async function registerRoutes(
         return;
       }
 
-      res.json(allMarkets);
+      res.json(liveMarkets);
     } catch (e: any) {
       res.status(502).json({ error: e.message });
     }
