@@ -663,68 +663,117 @@ export async function registerRoutes(
       }
 
       // Simulate strategy logic against each 5-min candle
-      let wins = 0, losses = 0, grossPnl = 0, totalFees = 0, edges: number[] = [];
+      // Correct Polymarket binary payoff model:
+      //   Buy mainBet USDC on token priced at entryProb → get mainBet/entryProb shares
+      //   Win:  profit = mainBet * (1 - entryProb) / entryProb
+      //   Loss: loss   = -mainBet
+      //   Hedge: hedgeBet USDC on opposite token at (1-entryProb)
+      //   Hedge win (= main loss): profit = hedgeBet * entryProb / (1 - entryProb)
+      //   Net on loss = -mainBet + hedgeBet * entryProb / (1 - entryProb)
+      let wins = 0, losses = 0, grossPnl = 0, totalFees = 0, netEdges: number[] = [];
 
-      for (let i = 1; i < candles.length; i++) {
-        const prev = candles[i - 1];
-        const curr = candles[i];
-        const priceChange = (curr.close - prev.close) / prev.close; // % move this candle
-        let entryProb = 0.5; // simulated Polymarket Yes probability
-        let signal = false;
-        let betUp = true;
+      // Strategy configs
+      const configs: Record<string, { mainFrac: number; hedgeFrac: number; tpPct: number; slPct: number }> = {
+        "Last-Second Momentum Snipe":       { mainFrac: 0.80, hedgeFrac: 0.20, tpPct: 0.03, slPct: 0.015 },
+        "Orderbook Arbitrage & Imbalance":  { mainFrac: 1.00, hedgeFrac: 0.00, tpPct: 0.00, slPct: 0.00 },
+        "Spot Correlation Reversion Scalp": { mainFrac: 0.875, hedgeFrac: 0.125, tpPct: 0.025, slPct: 0.00 },
+        "Oracle Lead Arbitrage":            { mainFrac: 0.70, hedgeFrac: 0.30, tpPct: 0.02, slPct: 0.00 },
+      };
+      const cfg = configs[strategyName] ?? { mainFrac: 1.0, hedgeFrac: 0.0, tpPct: 0.0, slPct: 0.0 };
+      const mainBet   = orderSize * cfg.mainFrac;
+      const hedgeBet  = orderSize * cfg.hedgeFrac;
+
+      // Rolling arrays for momentum/rebound detection
+      const WINDOW = 6; // 6 × 5-min = 30s window
+      for (let i = WINDOW; i < candles.length; i++) {
+        const prev  = candles[i - 1];
+        const curr  = candles[i];
+        const priceChange = (curr.close - prev.close) / prev.close;
+
+        let entryProb = 0.5;
+        let signal    = false;
+        let betUp     = true;
 
         if (strategyName === "Last-Second Momentum Snipe") {
-          // Signal: prev candle was up (momentum), Yes prob < 0.48
-          const prevUp = prev.close > prev.open;
-          entryProb = prevUp ? 0.44 + Math.random() * 0.06 : 0.5 + Math.random() * 0.08;
-          signal = prevUp && entryProb < 0.48;
-          betUp = true;
+          // Up-momentum: majority of last WINDOW candles are green
+          const greenCount = candles.slice(i - WINDOW, i).filter((c) => c.close > c.open).length;
+          const momentum   = greenCount / WINDOW;      // 0–1
+          // Polymarket tends to lag: when momentum is high, Up is still underpriced
+          entryProb = 0.50 - (momentum - 0.5) * 0.12; // e.g. 80% green → entryProb ~0.46
+          signal    = momentum > 0.6 && entryProb < 0.48;
+          betUp     = true;
+
         } else if (strategyName === "Orderbook Arbitrage & Imbalance") {
-          // Signal: simulated orderbook imbalance (volume skew proxy)
-          const volSkew = curr.volumeto / (prev.volumeto + 1);
-          signal = volSkew > 1.3 || volSkew < 0.7;
-          betUp = volSkew > 1.3;
-          entryProb = betUp ? 0.48 : 0.52;
+          // Volume imbalance proxy: spike relative to rolling avg
+          const recentVols = candles.slice(i - WINDOW, i).map((c) => c.volumeto);
+          const avgVol     = recentVols.reduce((a, b) => a + b, 0) / recentVols.length;
+          const volSkew    = curr.volumeto / (avgVol + 1);
+          signal    = volSkew > 1.5 || volSkew < 0.5;
+          betUp     = volSkew > 1.0;
+          entryProb = betUp ? 0.47 : 0.53; // skew implies mispricing
+
         } else if (strategyName === "Spot Correlation Reversion Scalp") {
-          // Signal: price bounced > 0.3% and Yes prob < 0.45
-          const rebound = (curr.close - prev.low) / prev.low;
-          entryProb = 0.40 + Math.random() * 0.08;
-          signal = rebound > 0.003 && entryProb < 0.45;
-          betUp = true;
+          // Price bounced off local low > 0.3% in last WINDOW candles
+          const windowLow = Math.min(...candles.slice(i - WINDOW, i).map((c) => c.low));
+          const rebound   = (curr.close - windowLow) / windowLow;
+          // When spot bounces hard, Polymarket Up is often still underpriced
+          entryProb = Math.max(0.35, 0.50 - rebound * 8); // rebound 0.3% → entryProb ~0.476
+          signal    = rebound > 0.003 && entryProb < 0.47;
+          betUp     = true;
+
         } else if (strategyName === "Oracle Lead Arbitrage") {
-          // Signal: simulate CEX delta > 0.2% ahead of implied price
+          // CEX feed leads: meaningful move in spot that hasn't yet reflected in Poly
           const cexDelta = Math.abs(priceChange);
-          signal = cexDelta > 0.002;
-          betUp = priceChange > 0;
-          entryProb = betUp ? 0.46 : 0.54;
-        } else {
-          signal = Math.random() > 0.6; // random fallback
-          betUp = Math.random() > 0.5;
+          signal    = cexDelta > 0.002; // 0.2% move
+          betUp     = priceChange > 0;
+          // The bigger the CEX move, the more Poly lags → tighter entry prob
+          entryProb = betUp
+            ? Math.max(0.38, 0.50 - cexDelta * 10)
+            : Math.min(0.62, 0.50 + cexDelta * 10);
+          if (betUp) entryProb = Math.min(entryProb, 0.47);
+          else       entryProb = Math.max(entryProb, 0.53);
         }
 
         if (!signal) continue;
 
-        // Outcome: did BTC actually go up this candle?
+        // Outcome: did BTC actually go the predicted direction?
         const actuallyUp = curr.close >= prev.close;
-        const won = betUp ? actuallyUp : !actuallyUp;
+        const mainWon    = betUp ? actuallyUp : !actuallyUp;
 
-        // P&L calculation
-        const edge = won
-          ? Math.abs(priceChange) * (1 - entryProb) / entryProb // simplified payoff
-          : -entryProb;
-        const tradePnl = orderSize * edge;
-        const fee = orderSize * feeRate * 2;
-        grossPnl += tradePnl;
-        totalFees += fee;
-        edges.push(tradePnl - fee);
-        if (won) wins++; else losses++;
+        // Correct binary payoff
+        let tradePnl: number;
+        if (mainWon) {
+          // Main wins at (1-entryProb)/entryProb; hedge loses its hedgeBet
+          const mainProfit  =  mainBet * (1 - entryProb) / entryProb;
+          const hedgeLoss   = -hedgeBet;
+          tradePnl = mainProfit + hedgeLoss;
+        } else {
+          // Main loses mainBet; hedge wins at entryProb/(1-entryProb)
+          const mainLoss    = -mainBet;
+          const oppProb     = 1 - entryProb;
+          const hedgeProfit =  hedgeBet > 0 ? hedgeBet * (1 - oppProb) / oppProb : 0;
+          tradePnl = mainLoss + hedgeProfit;
+        }
+
+        // Apply TP/SL clamps
+        if (cfg.tpPct > 0) tradePnl = Math.min(tradePnl,  orderSize * cfg.tpPct);
+        if (cfg.slPct > 0) tradePnl = Math.max(tradePnl, -orderSize * cfg.slPct);
+
+        const totalBet  = mainBet + hedgeBet; // = orderSize
+        const fee       = totalBet * feeRate * 2; // entry + exit
+        const netTrade  = tradePnl - fee;
+
+        grossPnl   += tradePnl;
+        totalFees  += fee;
+        netEdges.push(netTrade);
+        if (netTrade > 0) wins++; else losses++;
       }
 
       const totalTrades = wins + losses;
       const winRate = totalTrades > 0 ? wins / totalTrades : 0;
       const netPnl = grossPnl - totalFees;
-      const avgEdge = edges.length > 0 ? edges.reduce((a, b) => a + b, 0) / edges.length : 0;
-      const edgePct = orderSize > 0 ? (avgEdge / orderSize) * 100 : 0;
+      const avgNetEdge = netEdges.length > 0 ? netEdges.reduce((a, b) => a + b, 0) / netEdges.length : 0;
+      const edgePct = orderSize > 0 ? (avgNetEdge / orderSize) * 100 : 0;
       const meetsTarget = winRate >= 0.65 && edgePct >= 3;
 
       const run = storage.saveBacktestRun({
