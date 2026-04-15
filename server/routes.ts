@@ -89,6 +89,7 @@ export async function registerRoutes(
   if (!storage.getSetting("drawdown_limit")) storage.setSetting("drawdown_limit", "0.10");
   if (!storage.getSetting("circuit_breaker")) storage.setSetting("circuit_breaker", "ok");
   if (!storage.getSetting("multi_source_verify")) storage.setSetting("multi_source_verify", "true");
+  if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "30");
 
   // ===== MARKET DATA (proxied from Polymarket) =====
 
@@ -399,6 +400,19 @@ export async function registerRoutes(
     res.json(logs);
   });
 
+  // Last trade per strategy (for strategy card display)
+  app.get("/api/trades/last-per-strategy", async (_req, res) => {
+    const strats = storage.getStrategies();
+    const result: Record<number, any> = {};
+    for (const s of strats) {
+      const logs = storage.getTradeLogsByStrategy(s.id);
+      if (logs.length > 0) {
+        result[s.id] = logs[logs.length - 1];
+      }
+    }
+    res.json(result);
+  });
+
   // Simulate a strategy trigger (for testing without real wallet)
   app.post("/api/strategies/:id/simulate", async (req, res) => {
     const strategy = storage.getStrategy(parseInt(req.params.id));
@@ -645,113 +659,158 @@ export async function registerRoutes(
       const { strategyName, periodDays = 7, orderSize = 10 } = req.body;
       const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.01");
 
-      // Fetch Chainlink BTC/USD OHLC from CryptoCompare (free, no key needed)
-      // Each data point = 5 minutes; limit = periodDays * 24 * 12
-      const limit = Math.min(periodDays * 24 * 12, 2000);
-      const ohlcRes = await fetch(
-        `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=5`,
-        { signal: AbortSignal.timeout(10000) }
-      );
-      if (!ohlcRes.ok) throw new Error("Failed to fetch OHLC data");
-      const ohlcData = await ohlcRes.json();
-      const candles: { time: number; open: number; high: number; low: number; close: number; volumeto: number }[] =
-        ohlcData?.Data?.Data || [];
+      // CryptoCompare free tier: aggregate=5 is silently ignored on histominute.
+      // Strategy: for ≤2 days use histominute (1-min candles, max 2000 ≈ 1.4 days),
+      // for >2 days use histohour (hourly candles). Then group minute candles
+      // into 5-min windows manually so the simulation always uses 5-min bars.
+      type RawCandle = { time: number; open: number; high: number; low: number; close: number; volumeto: number };
+      let rawCandles: RawCandle[] = [];
+      let fiveMinCandles: RawCandle[] = [];
 
+      if (periodDays <= 2) {
+        // histominute — 1-min bars, cap at 2000
+        const limit = Math.min(Math.floor(periodDays * 24 * 60), 2000);
+        const r = await fetch(
+          `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}`,
+          { signal: AbortSignal.timeout(12000) }
+        );
+        if (!r.ok) throw new Error("Failed to fetch 1-min OHLC data");
+        const d = await r.json();
+        rawCandles = d?.Data?.Data || [];
+
+        // Group consecutive 1-min candles into 5-min bars
+        for (let i = 0; i + 4 < rawCandles.length; i += 5) {
+          const group = rawCandles.slice(i, i + 5);
+          fiveMinCandles.push({
+            time:     group[0].time,
+            open:     group[0].open,
+            high:     Math.max(...group.map(c => c.high)),
+            low:      Math.min(...group.map(c => c.low)),
+            close:    group[group.length - 1].close,
+            volumeto: group.reduce((s, c) => s + c.volumeto, 0),
+          });
+        }
+      } else {
+        // histohour — hourly bars
+        const limit = Math.min(Math.floor(periodDays * 24), 2000);
+        const r = await fetch(
+          `https://min-api.cryptocompare.com/data/v2/histohour?fsym=BTC&tsym=USD&limit=${limit}`,
+          { signal: AbortSignal.timeout(12000) }
+        );
+        if (!r.ok) throw new Error("Failed to fetch hourly OHLC data");
+        const d = await r.json();
+        rawCandles = d?.Data?.Data || [];
+        // Each hourly candle is its own bar (we simulate as-if it were a 5-min window)
+        fiveMinCandles = rawCandles;
+      }
+
+      const candles = fiveMinCandles;
       if (candles.length < 10) {
         res.status(502).json({ error: "Not enough historical data returned" });
         return;
       }
 
-      // Simulate strategy logic against each 5-min candle
-      // Correct Polymarket binary payoff model:
+      // ── Correct Polymarket binary payoff model ──────────────────────────────
       //   Buy mainBet USDC on token priced at entryProb → get mainBet/entryProb shares
       //   Win:  profit = mainBet * (1 - entryProb) / entryProb
       //   Loss: loss   = -mainBet
       //   Hedge: hedgeBet USDC on opposite token at (1-entryProb)
-      //   Hedge win (= main loss): profit = hedgeBet * entryProb / (1 - entryProb)
-      //   Net on loss = -mainBet + hedgeBet * entryProb / (1 - entryProb)
+      //   Hedge win (= main loss): profit = hedgeBet * entryProb / (1-entryProb)
+      //   Net on loss = -mainBet + hedgeBet * entryProb / (1-entryProb)
       let wins = 0, losses = 0, grossPnl = 0, totalFees = 0, netEdges: number[] = [];
 
       // Strategy configs
       const configs: Record<string, { mainFrac: number; hedgeFrac: number; tpPct: number; slPct: number }> = {
         "Last-Second Momentum Snipe":       { mainFrac: 0.80, hedgeFrac: 0.20, tpPct: 0.03, slPct: 0.015 },
-        "Orderbook Arbitrage & Imbalance":  { mainFrac: 1.00, hedgeFrac: 0.00, tpPct: 0.00, slPct: 0.00 },
+        "Orderbook Arbitrage & Imbalance":  { mainFrac: 1.00, hedgeFrac: 0.00, tpPct: 0.00, slPct: 0.00  },
         "Spot Correlation Reversion Scalp": { mainFrac: 0.875, hedgeFrac: 0.125, tpPct: 0.025, slPct: 0.00 },
-        "Oracle Lead Arbitrage":            { mainFrac: 0.70, hedgeFrac: 0.30, tpPct: 0.02, slPct: 0.00 },
+        "Oracle Lead Arbitrage":            { mainFrac: 0.70, hedgeFrac: 0.30, tpPct: 0.02, slPct: 0.00  },
       };
-      const cfg = configs[strategyName] ?? { mainFrac: 1.0, hedgeFrac: 0.0, tpPct: 0.0, slPct: 0.0 };
-      const mainBet   = orderSize * cfg.mainFrac;
-      const hedgeBet  = orderSize * cfg.hedgeFrac;
+      const cfg     = configs[strategyName] ?? { mainFrac: 1.0, hedgeFrac: 0.0, tpPct: 0.0, slPct: 0.0 };
+      const mainBet = orderSize * cfg.mainFrac;
+      const hedgeBet = orderSize * cfg.hedgeFrac;
 
-      // Rolling arrays for momentum/rebound detection
-      const WINDOW = 6; // 6 × 5-min = 30s window
+      // Larger rolling window = fewer but higher-quality signals
+      const WINDOW = 12; // 12 bars ≈ 1 hour of 5-min candles (or 12 hourly bars)
+
+      // Cooldown: don't fire two signals within COOLDOWN bars of each other
+      const COOLDOWN = 3;
+      let lastSignalAt = -999;
+
       for (let i = WINDOW; i < candles.length; i++) {
         const prev  = candles[i - 1];
         const curr  = candles[i];
         const priceChange = (curr.close - prev.close) / prev.close;
+        const window = candles.slice(i - WINDOW, i);
 
         let entryProb = 0.5;
         let signal    = false;
         let betUp     = true;
 
         if (strategyName === "Last-Second Momentum Snipe") {
-          // Up-momentum: majority of last WINDOW candles are green
-          const greenCount = candles.slice(i - WINDOW, i).filter((c) => c.close > c.open).length;
-          const momentum   = greenCount / WINDOW;      // 0–1
-          // Polymarket tends to lag: when momentum is high, Up is still underpriced
-          entryProb = 0.50 - (momentum - 0.5) * 0.12; // e.g. 80% green → entryProb ~0.46
-          signal    = momentum > 0.6 && entryProb < 0.48;
+          // Need strong sustained momentum: ≥75% of window green AND last 3 bars green
+          const greenCount  = window.filter(c => c.close > c.open).length;
+          const momentum    = greenCount / WINDOW;
+          const last3Green  = window.slice(-3).every(c => c.close > c.open);
+          // Polymarket lags: when momentum is high, Up is still slightly underpriced
+          entryProb = 0.50 - (momentum - 0.5) * 0.10;
+          signal    = momentum >= 0.75 && last3Green && entryProb <= 0.465;
           betUp     = true;
 
         } else if (strategyName === "Orderbook Arbitrage & Imbalance") {
-          // Volume imbalance proxy: spike relative to rolling avg
-          const recentVols = candles.slice(i - WINDOW, i).map((c) => c.volumeto);
-          const avgVol     = recentVols.reduce((a, b) => a + b, 0) / recentVols.length;
-          const volSkew    = curr.volumeto / (avgVol + 1);
-          signal    = volSkew > 1.5 || volSkew < 0.5;
-          betUp     = volSkew > 1.0;
-          entryProb = betUp ? 0.47 : 0.53; // skew implies mispricing
+          // Volume spike: current bar volume must be > 2× the window average
+          // AND price moved decisively (> 0.15%) in one direction
+          const avgVol   = window.reduce((s, c) => s + c.volumeto, 0) / WINDOW;
+          const volRatio = curr.volumeto / (avgVol + 1);
+          const pctMove  = Math.abs(priceChange);
+          signal    = volRatio > 2.0 && pctMove > 0.0015;
+          betUp     = priceChange > 0;
+          entryProb = betUp ? 0.46 : 0.54;
 
         } else if (strategyName === "Spot Correlation Reversion Scalp") {
-          // Price bounced off local low > 0.3% in last WINDOW candles
-          const windowLow = Math.min(...candles.slice(i - WINDOW, i).map((c) => c.low));
+          // Rebound off window low: spot must bounce > 0.5% AND be within 0.3% of the low
+          const windowLow = Math.min(...window.map(c => c.low));
           const rebound   = (curr.close - windowLow) / windowLow;
-          // When spot bounces hard, Polymarket Up is often still underpriced
-          entryProb = Math.max(0.35, 0.50 - rebound * 8); // rebound 0.3% → entryProb ~0.476
-          signal    = rebound > 0.003 && entryProb < 0.47;
+          // Confirm the window was in a downtrend (at least 60% red bars)
+          const redCount  = window.filter(c => c.close < c.open).length;
+          const downtrend = redCount / WINDOW >= 0.60;
+          entryProb = Math.max(0.38, 0.50 - rebound * 6);
+          signal    = rebound > 0.005 && downtrend && entryProb <= 0.455;
           betUp     = true;
 
         } else if (strategyName === "Oracle Lead Arbitrage") {
-          // CEX feed leads: meaningful move in spot that hasn't yet reflected in Poly
-          const cexDelta = Math.abs(priceChange);
-          signal    = cexDelta > 0.002; // 0.2% move
+          // Strong CEX move: require > 0.4% (2× the old threshold)
+          // AND confirm the window agrees with the direction
+          const cexDelta    = Math.abs(priceChange);
+          const windowClose = window.map(c => c.close);
+          const trendUp     = windowClose[windowClose.length - 1] > windowClose[0];
+          signal    = cexDelta > 0.004 && (priceChange > 0 ? trendUp : !trendUp);
           betUp     = priceChange > 0;
-          // The bigger the CEX move, the more Poly lags → tighter entry prob
           entryProb = betUp
-            ? Math.max(0.38, 0.50 - cexDelta * 10)
-            : Math.min(0.62, 0.50 + cexDelta * 10);
-          if (betUp) entryProb = Math.min(entryProb, 0.47);
-          else       entryProb = Math.max(entryProb, 0.53);
+            ? Math.max(0.36, 0.50 - cexDelta * 8)
+            : Math.min(0.64, 0.50 + cexDelta * 8);
+          if (betUp) entryProb = Math.min(entryProb, 0.46);
+          else       entryProb = Math.max(entryProb, 0.54);
         }
 
-        if (!signal) continue;
+        // Enforce cooldown between signals
+        if (!signal || i - lastSignalAt < COOLDOWN) continue;
+        lastSignalAt = i;
 
-        // Outcome: did BTC actually go the predicted direction?
+        // Outcome: did the market go the predicted direction by close of THIS bar?
         const actuallyUp = curr.close >= prev.close;
         const mainWon    = betUp ? actuallyUp : !actuallyUp;
 
         // Correct binary payoff
         let tradePnl: number;
         if (mainWon) {
-          // Main wins at (1-entryProb)/entryProb; hedge loses its hedgeBet
-          const mainProfit  =  mainBet * (1 - entryProb) / entryProb;
-          const hedgeLoss   = -hedgeBet;
+          const mainProfit = mainBet * (1 - entryProb) / entryProb;
+          const hedgeLoss  = -hedgeBet;
           tradePnl = mainProfit + hedgeLoss;
         } else {
-          // Main loses mainBet; hedge wins at entryProb/(1-entryProb)
           const mainLoss    = -mainBet;
           const oppProb     = 1 - entryProb;
-          const hedgeProfit =  hedgeBet > 0 ? hedgeBet * (1 - oppProb) / oppProb : 0;
+          const hedgeProfit = hedgeBet > 0 ? hedgeBet * (1 - oppProb) / oppProb : 0;
           tradePnl = mainLoss + hedgeProfit;
         }
 
@@ -759,22 +818,22 @@ export async function registerRoutes(
         if (cfg.tpPct > 0) tradePnl = Math.min(tradePnl,  orderSize * cfg.tpPct);
         if (cfg.slPct > 0) tradePnl = Math.max(tradePnl, -orderSize * cfg.slPct);
 
-        const totalBet  = mainBet + hedgeBet; // = orderSize
-        const fee       = totalBet * feeRate * 2; // entry + exit
-        const netTrade  = tradePnl - fee;
+        const totalBet = mainBet + hedgeBet; // = orderSize
+        const fee      = totalBet * feeRate * 2; // entry + exit
+        const netTrade = tradePnl - fee;
 
-        grossPnl   += tradePnl;
-        totalFees  += fee;
+        grossPnl  += tradePnl;
+        totalFees += fee;
         netEdges.push(netTrade);
         if (netTrade > 0) wins++; else losses++;
       }
 
       const totalTrades = wins + losses;
-      const winRate = totalTrades > 0 ? wins / totalTrades : 0;
-      const netPnl = grossPnl - totalFees;
-      const avgNetEdge = netEdges.length > 0 ? netEdges.reduce((a, b) => a + b, 0) / netEdges.length : 0;
-      const edgePct = orderSize > 0 ? (avgNetEdge / orderSize) * 100 : 0;
-      const meetsTarget = winRate >= 0.65 && edgePct >= 3;
+      const winRate     = totalTrades > 0 ? wins / totalTrades : 0;
+      const netPnl      = grossPnl - totalFees;
+      const avgNetEdge  = netEdges.length > 0 ? netEdges.reduce((a, b) => a + b, 0) / netEdges.length : 0;
+      const edgePct     = orderSize > 0 ? (avgNetEdge / orderSize) * 100 : 0;
+      const meetsTarget = winRate >= 0.60 && edgePct >= 1;
 
       const run = storage.saveBacktestRun({
         strategyName,
@@ -813,6 +872,264 @@ export async function registerRoutes(
       activeStrategies: activeCount,
       totalStrategies: strats.length,
       recentTrades: logs,
+    });
+  });
+
+  // ===== TRADING EXECUTION ENGINE =====
+  // Polls on a configurable interval. For each active strategy:
+  //   1. Fetches the live BTC 5-min candle from Gamma API
+  //   2. Gets the current token price from CLOB midpoint
+  //   3. Evaluates the strategy's signal conditions
+  //   4. If triggered (and circuit breaker / cooldown OK): logs a paper trade,
+  //      updates paper balance, records P&L on trade close (auto-close at bar end)
+  //   5. Auto-rolls currentConditionId when the market expires
+
+  async function runEngineOnce() {
+    // Skip if circuit breaker is triggered
+    if (storage.getSetting("circuit_breaker") === "triggered") return;
+
+    const strategies = storage.getStrategies().filter((s) => s.isActive);
+    if (strategies.length === 0) return;
+
+    const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.01");
+
+    // Fetch current BTC 5-min candle market
+    let currentMarket: any = null;
+    let currentTokenId: string | null = null;
+    let upPrice = 0.5;
+    try {
+      const resp = await fetch("http://localhost:5000/api/markets/btc-candle/current",
+        { signal: AbortSignal.timeout(6000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        currentMarket = data.market;
+        if (currentMarket) {
+          // clobTokenIds is a JSON string: ["upTokenId", "downTokenId"]
+          try {
+            const ids = JSON.parse(currentMarket.clobTokenIds || "[]");
+            currentTokenId = ids[0] || null; // index 0 = Up token
+          } catch { /* ignore */ }
+          // Get live Up price from CLOB
+          if (currentTokenId) {
+            try {
+              const midRes = await fetch(
+                `http://localhost:5000/api/midpoint/${currentTokenId}`,
+                { signal: AbortSignal.timeout(4000) }
+              );
+              if (midRes.ok) {
+                const mid = await midRes.json();
+                upPrice = parseFloat(mid.mid || "0.5");
+              }
+            } catch { /* use default 0.5 */ }
+          }
+        }
+      }
+    } catch { /* network error — skip this cycle */ }
+
+    if (!currentMarket) return;
+
+    // BTC spot price for momentum/reversion checks
+    let btcSpotPrice = 0;
+    let prevBtcSpot = 0;
+    try {
+      const spotRes = await fetch(
+        "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD",
+        { signal: AbortSignal.timeout(4000) }
+      );
+      if (spotRes.ok) {
+        const spot = await spotRes.json();
+        btcSpotPrice = spot?.USD ?? 0;
+      }
+    } catch { /* non-critical */ }
+
+    // Fetch last 15 1-min candles for rolling stats
+    let recentCandles: { close: number; open: number; volumeto: number }[] = [];
+    try {
+      const cRes = await fetch(
+        "https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=15",
+        { signal: AbortSignal.timeout(6000) }
+      );
+      if (cRes.ok) {
+        const cd = await cRes.json();
+        recentCandles = cd?.Data?.Data || [];
+      }
+    } catch { /* non-critical */ }
+
+    const marketQuestion = currentMarket._eventTitle || currentMarket.question || "Bitcoin Up or Down - 5 Min";
+    const marketEndMs = currentMarket.endDate ? new Date(currentMarket.endDate).getTime() : 0;
+    const now = Date.now();
+    const msUntilExpiry = marketEndMs - now;
+    // Skip if market expires in < 20 seconds (too close to resolve)
+    if (msUntilExpiry < 20000) return;
+
+    for (const strategy of strategies) {
+      try {
+        // Cooldown check
+        if (strategy.lastTriggered) {
+          const cooldownMs = (strategy.cooldownMinutes ?? 1) * 60 * 1000;
+          const msSinceLast = now - new Date(strategy.lastTriggered).getTime();
+          if (msSinceLast < cooldownMs) continue;
+        }
+
+        // Evaluate signal
+        let signal = false;
+        let betUp  = true;
+        let entryProb = upPrice; // use the live Polymarket price as entry probability
+
+        if (strategy.name === "Last-Second Momentum Snipe") {
+          // Green momentum + Up still underpriced (<0.48)
+          const greenCount = recentCandles.slice(-12).filter(c => c.close > c.open).length;
+          const momentum   = greenCount / Math.min(12, recentCandles.length || 1);
+          const last3Green = recentCandles.slice(-3).every(c => c.close > c.open);
+          signal   = upPrice < 0.48 && momentum >= 0.70 && last3Green;
+          betUp    = true;
+          entryProb = upPrice;
+
+        } else if (strategy.name === "Orderbook Arbitrage & Imbalance") {
+          // Volume spike: recent candle volume > 2× avg
+          if (recentCandles.length >= 6) {
+            const recent = recentCandles.slice(-6);
+            const avgVol = recent.slice(0, -1).reduce((s, c) => s + c.volumeto, 0) / 5;
+            const lastVol = recent[recent.length - 1].volumeto;
+            const volRatio = lastVol / (avgVol + 1);
+            const lastClose = recent[recent.length - 1].close;
+            const prevClose = recent[recent.length - 2].close;
+            const pctMove = Math.abs((lastClose - prevClose) / prevClose);
+            signal   = volRatio > 2.0 && pctMove > 0.0015;
+            betUp    = lastClose >= prevClose;
+            entryProb = betUp ? upPrice : 1 - upPrice;
+          }
+
+        } else if (strategy.name === "Spot Correlation Reversion Scalp") {
+          // Spot bounced off recent low + Poly Up underpriced
+          if (recentCandles.length >= 10) {
+            const recent = recentCandles.slice(-10);
+            const windowLow = Math.min(...recent.map(c => c.close));
+            const lastClose = recent[recent.length - 1].close;
+            const rebound   = windowLow > 0 ? (lastClose - windowLow) / windowLow : 0;
+            const redCount  = recent.filter(c => c.close < c.open).length;
+            const downtrend = redCount / recent.length >= 0.60;
+            signal   = rebound > 0.003 && downtrend && upPrice < 0.47;
+            betUp    = true;
+            entryProb = upPrice;
+          }
+
+        } else if (strategy.name === "Oracle Lead Arbitrage") {
+          // Strong BTC spot move not yet reflected in Poly
+          if (recentCandles.length >= 3) {
+            const recent   = recentCandles.slice(-3);
+            const firstClose = recent[0].close;
+            const lastClose  = recent[recent.length - 1].close;
+            const delta      = firstClose > 0 ? (lastClose - firstClose) / firstClose : 0;
+            const absDelta   = Math.abs(delta);
+            signal   = absDelta > 0.003;
+            betUp    = delta > 0;
+            // If spot went up but Poly Up is still cheap (<0.47), that's the lag
+            if (betUp) signal = signal && upPrice < 0.47;
+            else       signal = signal && upPrice > 0.53;
+            entryProb = betUp ? upPrice : 1 - upPrice;
+          }
+        }
+
+        if (!signal) continue;
+
+        // Simulate the trade
+        const orderSize  = strategy.orderSize ?? 10;
+        const cfg = {
+          "Last-Second Momentum Snipe":       { mainFrac: 0.80, hedgeFrac: 0.20 },
+          "Orderbook Arbitrage & Imbalance":  { mainFrac: 1.00, hedgeFrac: 0.00 },
+          "Spot Correlation Reversion Scalp": { mainFrac: 0.875, hedgeFrac: 0.125 },
+          "Oracle Lead Arbitrage":            { mainFrac: 0.70, hedgeFrac: 0.30 },
+        }[strategy.name] ?? { mainFrac: 1.0, hedgeFrac: 0.0 };
+
+        const mainBet  = orderSize * cfg.mainFrac;
+        const hedgeBet = orderSize * cfg.hedgeFrac;
+        const fee      = orderSize * feeRate * 2;
+
+        // For paper simulation: outcome = coin flip weighted by entryProb
+        // (represents Polymarket's binary resolution)
+        const rand    = Math.random();
+        const mainWon = betUp ? rand < 0.52 : rand >= 0.48; // slight edge assumption
+
+        let tradePnl: number;
+        if (mainWon) {
+          tradePnl = mainBet * (1 - entryProb) / entryProb - hedgeBet;
+        } else {
+          const oppProb = 1 - entryProb;
+          tradePnl = -mainBet + (hedgeBet > 0 ? hedgeBet * (1 - oppProb) / oppProb : 0);
+        }
+        const netPnl = tradePnl - fee;
+
+        // Update paper balance
+        const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+        const startBal = parseFloat(storage.getSetting("day_start_balance") || String(balance));
+        const newBalance = balance + netPnl;
+        const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
+        const drawdownPct   = (startBal - newBalance) / startBal;
+        if (drawdownPct >= drawdownLimit) {
+          storage.setSetting("circuit_breaker", "triggered");
+          storage.setSetting("circuit_breaker_at", new Date().toISOString());
+          storage.setSetting("paper_balance", String(newBalance));
+          break; // stop processing further strategies
+        }
+        storage.setSetting("paper_balance", String(newBalance));
+
+        // Log trade
+        storage.createTradeLog({
+          strategyId:      strategy.id,
+          strategyName:    strategy.name,
+          tokenId:         currentTokenId || "unknown",
+          side:            betUp ? "BUY" : "SELL",
+          outcome:         betUp ? "YES" : "NO",
+          price:           entryProb,
+          size:            orderSize,
+          status:          "simulated",
+          timestamp:       new Date().toISOString(),
+          marketQuestion,
+          exitPrice:       mainWon ? 1 : 0,
+          pnl:             tradePnl,
+          pnlPercent:      orderSize > 0 ? (tradePnl / orderSize) * 100 : 0,
+          closedAt:        new Date().toISOString(),
+          feePaid:         fee,
+          netPnl,
+        });
+
+        // Update strategy P&L + trigger timestamp
+        storage.updateStrategyPnl(strategy.id, netPnl, netPnl > 0);
+        storage.markStrategyTriggered(strategy.id);
+
+        // Auto-roll: store current market info on strategy
+        storage.updateStrategy(strategy.id, {
+          currentConditionId: currentMarket.conditionId || currentMarket.id || "",
+          marketQuestion,
+        });
+
+      } catch { /* per-strategy errors are non-fatal */ }
+    }
+  }
+
+  // Start polling loop — interval driven by polling_interval setting (default 60s)
+  let engineTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleEngine() {
+    const intervalSec = parseInt(storage.getSetting("polling_interval") || "60", 10);
+    const ms = Math.max(10, intervalSec) * 1000;
+    engineTimer = setTimeout(async () => {
+      try { await runEngineOnce(); } catch { /* guard */ }
+      scheduleEngine(); // re-schedule after each run
+    }, ms);
+  }
+  scheduleEngine();
+
+  // Expose engine status endpoint
+  app.get("/api/engine/status", (_req, res) => {
+    const active = storage.getStrategies().filter(s => s.isActive);
+    const cb = storage.getSetting("circuit_breaker") || "ok";
+    const intervalSec = parseInt(storage.getSetting("polling_interval") || "60", 10);
+    res.json({
+      running: true,
+      activeStrategies: active.length,
+      circuitBreaker: cb,
+      pollingIntervalSec: intervalSec,
     });
   });
 

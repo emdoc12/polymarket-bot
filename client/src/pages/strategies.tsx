@@ -15,7 +15,8 @@ import {
 } from "@/components/ui/sheet";
 import {
   Zap, BookOpen, TrendingUp, Link2,
-  Settings2, RefreshCw, Trophy, TrendingDown, Minus
+  Settings2, RefreshCw, Trophy, TrendingDown, Minus,
+  Radio, ArrowUpCircle, ArrowDownCircle
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -86,6 +87,17 @@ const STRATEGY_META = [
   },
 ];
 
+interface LastTrade {
+  id: number;
+  side: string;
+  outcome: string;
+  netPnl: number | null;
+  pnl: number | null;
+  status: string;
+  timestamp: string;
+  marketQuestion: string | null;
+}
+
 interface PnlData {
   totalPnl: number;
   totalWins: number;
@@ -116,6 +128,11 @@ export default function Strategies() {
     refetchInterval: 15000,
   });
 
+  const { data: lastTrades } = useQuery<Record<number, LastTrade>>({
+    queryKey: ["/api/trades/last-per-strategy"],
+    refetchInterval: 15000,
+  });
+
   const toggleMutation = useMutation({
     mutationFn: ({ id, isActive }: { id: number; isActive: boolean }) =>
       apiRequest("POST", `/api/strategies/${id}/toggle`, { isActive }),
@@ -132,7 +149,8 @@ export default function Strategies() {
   const cards = STRATEGY_META.map((meta) => {
     const strategy = strategies?.find((s) => s.name === meta.name) ?? null;
     const pnlRow = pnl?.perStrategy.find((p) => p.name === meta.name) ?? null;
-    return { meta, strategy, pnlRow };
+    const lastTrade = strategy && lastTrades ? lastTrades[strategy.id] ?? null : null;
+    return { meta, strategy, pnlRow, lastTrade };
   });
 
   return (
@@ -144,7 +162,7 @@ export default function Strategies() {
         </p>
       </div>
 
-      {cards.map(({ meta, strategy, pnlRow }) => {
+      {cards.map(({ meta, strategy, pnlRow, lastTrade }) => {
         const Icon = meta.icon;
         const isActive = strategy?.isActive ?? false;
         const config = strategy?.config ? (() => { try { return JSON.parse(strategy.config!); } catch { return {}; } })() : meta.defaultConfig;
@@ -185,6 +203,36 @@ export default function Strategies() {
                   <p className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-2">
                     {meta.description}
                   </p>
+
+                  {/* Current market + last trade */}
+                  {(strategy?.marketQuestion || lastTrade) && (
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
+                      {strategy?.marketQuestion && (
+                        <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                          <Radio className="w-3 h-3 text-blue-400" />
+                          <span className="truncate max-w-[220px]">{strategy.marketQuestion}</span>
+                        </span>
+                      )}
+                      {lastTrade && (
+                        <span className={cn(
+                          "flex items-center gap-1 text-[11px] font-mono",
+                          (lastTrade.netPnl ?? lastTrade.pnl ?? 0) > 0
+                            ? "text-profit"
+                            : (lastTrade.netPnl ?? lastTrade.pnl ?? 0) < 0
+                            ? "text-loss"
+                            : "text-muted-foreground"
+                        )}>
+                          {lastTrade.side === "BUY" ? (
+                            <ArrowUpCircle className="w-3 h-3" />
+                          ) : (
+                            <ArrowDownCircle className="w-3 h-3" />
+                          )}
+                          Last: {(lastTrade.netPnl ?? lastTrade.pnl ?? 0) >= 0 ? "+" : ""}
+                          {(lastTrade.netPnl ?? lastTrade.pnl ?? 0).toFixed(2)} USDC
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {/* P&L row */}
                   <div className="flex items-center gap-4 mt-2.5 flex-wrap">
