@@ -56,7 +56,7 @@ docker run -d \
    | Field | Value |
    |---|---|
    | Name | `polybot` |
-   | Repository | `ghcr.io/tesladoc12/polymarket-bot:latest` *(or your image)* |
+   | Repository | `ghcr.io/emdoc12/polymarket-bot:latest` *(or build locally)* |
    | Network Type | Bridge |
    | Port Mapping | Host `5000` → Container `5000` |
    | Path Mapping | Host `/mnt/user/appdata/polybot` → Container `/data` |
