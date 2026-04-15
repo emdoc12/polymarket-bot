@@ -28,87 +28,81 @@ export async function registerRoutes(
 
   // ===== MARKET DATA (proxied from Polymarket) =====
 
-  // Search/list markets — uses /events endpoint which supports title search
-  // and contains nested markets with prices. Falls back to /markets for browsing.
+  // Search/list markets
+  // The Gamma API title filter is broken — it ignores the param.
+  // We fetch a large batch sorted by startDate (newest first, catches rolling
+  // crypto candle markets) and filter client-side for search queries.
   app.get("/api/markets", async (req, res) => {
     try {
-      const limit = (req.query.limit as string) || "30";
-      const offset = (req.query.offset as string) || "0";
       const search = req.query.search as string | undefined;
 
-      if (search) {
-        // Use events endpoint — only one that supports text search via title param
-        const eventsData = await polyFetch(GAMMA_API, "/events", {
-          limit: "50",
+      // Fetch two batches in parallel:
+      //   1. Newest events (catches 5-min crypto candles)
+      //   2. Highest volume events (catches big prediction markets)
+      const [newestEvents, topEvents] = await Promise.all([
+        polyFetch(GAMMA_API, "/events", {
+          limit: "100",
           offset: "0",
           active: "true",
           closed: "false",
-          title: search,
-        }) as any[];
+          order: "startDate",
+          ascending: "false",
+        }) as Promise<any[]>,
+        polyFetch(GAMMA_API, "/events", {
+          limit: "100",
+          offset: "0",
+          active: "true",
+          closed: "false",
+          order: "volume",
+          ascending: "false",
+        }) as Promise<any[]>,
+      ]);
 
-        // Flatten events -> markets, then also client-filter by search term
-        const markets: any[] = [];
-        const term = search.toLowerCase();
-        for (const event of (Array.isArray(eventsData) ? eventsData : [])) {
-          const eventMarkets: any[] = event.markets || [];
+      // Merge and deduplicate by event id
+      const seen = new Set<string>();
+      const allEvents: any[] = [];
+      for (const e of [...(Array.isArray(newestEvents) ? newestEvents : []), ...(Array.isArray(topEvents) ? topEvents : [])]) {
+        if (!seen.has(e.id)) {
+          seen.add(e.id);
+          allEvents.push(e);
+        }
+      }
+
+      // Flatten events -> individual markets
+      const allMarkets: any[] = [];
+      for (const event of allEvents) {
+        const eventMarkets: any[] = event.markets || [];
+        if (eventMarkets.length > 0) {
           for (const m of eventMarkets) {
-            if (
-              m.question?.toLowerCase().includes(term) ||
-              event.title?.toLowerCase().includes(term)
-            ) {
-              markets.push(m);
-            }
+            allMarkets.push({ ...m, _eventTitle: event.title, _eventImage: event.image });
           }
-          // If event matches and has no individual markets listed, add event-level data
-          if (eventMarkets.length === 0 && event.title?.toLowerCase().includes(term)) {
-            markets.push({
-              id: event.id,
-              question: event.title,
-              conditionId: event.markets?.[0]?.conditionId || "",
-              outcomePrices: null,
-              outcomes: null,
-              clobTokenIds: null,
-              volume: event.volume,
-              volumeNum: parseFloat(event.volume || "0"),
-              endDate: event.endDate,
-              image: event.image,
-            });
-          }
+        } else {
+          // Event with no nested markets — use event itself
+          allMarkets.push({
+            id: event.id,
+            question: event.title,
+            conditionId: "",
+            outcomePrices: null,
+            outcomes: null,
+            clobTokenIds: null,
+            volumeNum: parseFloat(event.volume || "0"),
+            endDate: event.endDate,
+            image: event.image,
+          });
         }
+      }
 
-        // If events search returned nothing, fall back to fetching all markets
-        // and filtering client-side
-        if (markets.length === 0) {
-          const allMarkets = await polyFetch(GAMMA_API, "/markets", {
-            limit: "200",
-            offset: "0",
-            active: "true",
-            closed: "false",
-            order: "volumeNum",
-            ascending: "false",
-          }) as any[];
-          const filtered = (Array.isArray(allMarkets) ? allMarkets : []).filter(
-            (m: any) => m.question?.toLowerCase().includes(term)
-          );
-          res.json(filtered);
-          return;
-        }
-
-        res.json(markets);
+      if (search) {
+        const term = search.toLowerCase();
+        const filtered = allMarkets.filter((m: any) =>
+          m.question?.toLowerCase().includes(term) ||
+          m._eventTitle?.toLowerCase().includes(term)
+        );
+        res.json(filtered);
         return;
       }
 
-      // No search — return top markets sorted by volume
-      const params: Record<string, string> = {
-        limit,
-        offset,
-        active: "true",
-        closed: "false",
-        order: "volumeNum",
-        ascending: "false",
-      };
-      const data = await polyFetch(GAMMA_API, "/markets", params);
-      res.json(data);
+      res.json(allMarkets);
     } catch (e: any) {
       res.status(502).json({ error: e.message });
     }
