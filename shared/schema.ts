@@ -20,6 +20,8 @@ export const strategies = sqliteTable("strategies", {
   lastTriggered: text("last_triggered"), // ISO timestamp
   totalExecutions: integer("total_executions").notNull().default(0),
   marketQuestion: text("market_question"), // cached market question text
+  autoRoll: integer("auto_roll", { mode: "boolean" }).notNull().default(false), // auto-roll to next candle
+  currentConditionId: text("current_condition_id"), // tracks the current active candle being traded
 });
 
 // Trade log table - records of executed or attempted trades

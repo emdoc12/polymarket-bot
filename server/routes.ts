@@ -35,22 +35,49 @@ export async function registerRoutes(
   app.get("/api/markets", async (req, res) => {
     try {
       const search = req.query.search as string | undefined;
+      const showClosed = req.query.closed === "true";
+      const tag = req.query.tag as string | undefined;
 
-      // Fetch two batches in parallel:
+      const baseParams: Record<string, string> = {
+        limit: "100",
+        offset: "0",
+      };
+      if (tag) baseParams.tag = tag;
+
+      if (showClosed) {
+        // Results tab: closed markets sorted by end date
+        baseParams.active = "false";
+        baseParams.closed = "true";
+        baseParams.order = "endDate";
+        baseParams.ascending = "false";
+        const closedEvents = await polyFetch(GAMMA_API, "/events", baseParams) as any[];
+        const allMarkets: any[] = [];
+        for (const event of (Array.isArray(closedEvents) ? closedEvents : [])) {
+          const eventMarkets: any[] = event.markets || [];
+          if (eventMarkets.length > 0) {
+            for (const m of eventMarkets) allMarkets.push({ ...m, _eventTitle: event.title, _eventImage: event.image });
+          } else {
+            allMarkets.push({ id: event.id, question: event.title, conditionId: "", outcomePrices: null, outcomes: null, clobTokenIds: null, volumeNum: parseFloat(event.volume || "0"), endDate: event.endDate, image: event.image });
+          }
+        }
+        const filtered = search ? allMarkets.filter((m: any) => m.question?.toLowerCase().includes(search.toLowerCase()) || m._eventTitle?.toLowerCase().includes(search.toLowerCase())) : allMarkets;
+        res.json(filtered);
+        return;
+      }
+
+      // Live tab: Fetch two batches in parallel:
       //   1. Newest events (catches 5-min crypto candles)
       //   2. Highest volume events (catches big prediction markets)
       const [newestEvents, topEvents] = await Promise.all([
         polyFetch(GAMMA_API, "/events", {
-          limit: "100",
-          offset: "0",
+          ...baseParams,
           active: "true",
           closed: "false",
           order: "startDate",
           ascending: "false",
         }) as Promise<any[]>,
         polyFetch(GAMMA_API, "/events", {
-          limit: "100",
-          offset: "0",
+          ...baseParams,
           active: "true",
           closed: "false",
           order: "volume",
@@ -103,6 +130,59 @@ export async function registerRoutes(
       }
 
       res.json(allMarkets);
+    } catch (e: any) {
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  // Get current live BTC 5-min candle market (always returns the one that's active right now)
+  app.get("/api/markets/btc-candle/current", async (req, res) => {
+    try {
+      // Fetch newest active events and find the current BTC 5-min candle
+      const events = await polyFetch(GAMMA_API, "/events", {
+        limit: "50",
+        offset: "0",
+        active: "true",
+        closed: "false",
+        order: "startDate",
+        ascending: "false",
+      }) as any[];
+
+      const now = Date.now();
+      let bestMatch: any = null;
+
+      for (const event of (Array.isArray(events) ? events : [])) {
+        const title: string = (event.title || "").toLowerCase();
+        if (
+          title.includes("bitcoin") &&
+          (title.includes("up or down") || title.includes("up/down")) &&
+          title.includes("minute")
+        ) {
+          // Pick the one whose end date is soonest but still in the future
+          const endMs = event.endDate ? new Date(event.endDate).getTime() : Infinity;
+          if (endMs > now) {
+            if (
+              !bestMatch ||
+              endMs < new Date(bestMatch.endDate).getTime()
+            ) {
+              bestMatch = event;
+            }
+          }
+        }
+      }
+
+      if (!bestMatch) {
+        res.status(404).json({ error: "No active BTC 5-min candle market found" });
+        return;
+      }
+
+      // Flatten to market
+      const markets: any[] = bestMatch.markets || [];
+      if (markets.length > 0) {
+        res.json({ event: bestMatch, market: { ...markets[0], _eventTitle: bestMatch.title, _eventImage: bestMatch.image } });
+      } else {
+        res.json({ event: bestMatch, market: null });
+      }
     } catch (e: any) {
       res.status(502).json({ error: e.message });
     }
