@@ -15,6 +15,71 @@ sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
 
+// Auto-migrate: create tables and add missing columns without wiping data
+function runMigrations() {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS strategies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      market_slug TEXT,
+      condition_id TEXT,
+      token_id TEXT,
+      side TEXT NOT NULL,
+      trigger_type TEXT NOT NULL,
+      trigger_price REAL NOT NULL,
+      order_size REAL NOT NULL,
+      order_type TEXT NOT NULL DEFAULT 'LIMIT',
+      limit_price REAL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      cooldown_minutes INTEGER NOT NULL DEFAULT 5,
+      last_triggered TEXT,
+      total_executions INTEGER NOT NULL DEFAULT 0,
+      market_question TEXT,
+      auto_roll INTEGER NOT NULL DEFAULT 0,
+      current_condition_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS trade_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      strategy_id INTEGER REFERENCES strategies(id),
+      token_id TEXT NOT NULL,
+      side TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      price REAL NOT NULL,
+      size REAL NOT NULL,
+      status TEXT NOT NULL,
+      order_id TEXT,
+      error_message TEXT,
+      timestamp TEXT NOT NULL,
+      market_question TEXT
+    );
+    CREATE TABLE IF NOT EXISTS watchlist (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      condition_id TEXT NOT NULL UNIQUE,
+      token_id TEXT NOT NULL,
+      market_question TEXT NOT NULL,
+      added_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS bot_settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      value TEXT NOT NULL
+    );
+  `);
+
+  // Add columns that may be missing on older databases (ALTER TABLE IF NOT EXISTS not supported in SQLite,
+  // so we check pragma and add selectively)
+  const stratCols = sqlite.pragma("table_info(strategies)") as { name: string }[];
+  const stratColNames = new Set(stratCols.map((c) => c.name));
+  if (!stratColNames.has("auto_roll")) {
+    sqlite.exec("ALTER TABLE strategies ADD COLUMN auto_roll INTEGER NOT NULL DEFAULT 0;");
+  }
+  if (!stratColNames.has("current_condition_id")) {
+    sqlite.exec("ALTER TABLE strategies ADD COLUMN current_condition_id TEXT;");
+  }
+}
+
+runMigrations();
+
 export interface IStorage {
   // Strategies
   getStrategies(): Strategy[];
