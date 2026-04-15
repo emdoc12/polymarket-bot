@@ -22,22 +22,34 @@ export const strategies = sqliteTable("strategies", {
   marketQuestion: text("market_question"), // cached market question text
   autoRoll: integer("auto_roll", { mode: "boolean" }).notNull().default(false), // auto-roll to next candle
   currentConditionId: text("current_condition_id"), // tracks the current active candle being traded
+  // P&L tracking per strategy
+  totalPnl: real("total_pnl").notNull().default(0),
+  winCount: integer("win_count").notNull().default(0),
+  lossCount: integer("loss_count").notNull().default(0),
+  // Strategy config (JSON blob for flexible per-strategy params)
+  config: text("config"), // JSON string e.g. {"mainSize":0.8,"hedgeSize":0.2,"tpPct":0.03,"slPct":0.015}
 });
 
 // Trade log table - records of executed or attempted trades
 export const tradeLogs = sqliteTable("trade_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   strategyId: integer("strategy_id").references(() => strategies.id),
+  strategyName: text("strategy_name"), // snapshot of strategy name at trade time
   tokenId: text("token_id").notNull(),
   side: text("side").notNull(), // BUY or SELL
   outcome: text("outcome").notNull(), // YES or NO
   price: real("price").notNull(),
   size: real("size").notNull(),
-  status: text("status").notNull(), // "pending", "filled", "failed", "simulated"
+  status: text("status").notNull(), // "pending", "filled", "failed", "simulated", "closed"
   orderId: text("order_id"),
   errorMessage: text("error_message"),
   timestamp: text("timestamp").notNull(),
   marketQuestion: text("market_question"),
+  // P&L tracking
+  exitPrice: real("exit_price"),       // price at close/resolution
+  pnl: real("pnl"),                   // realised P&L in USDC
+  pnlPercent: real("pnl_percent"),    // % return
+  closedAt: text("closed_at"),        // ISO timestamp of close
 });
 
 // Watchlist - tracked markets

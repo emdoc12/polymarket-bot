@@ -21,10 +21,71 @@ async function polyFetch(baseUrl: string, path: string, params?: Record<string, 
   return res.json();
 }
 
+// The 4 fixed strategies — seeded once on startup if not present
+const FIXED_STRATEGIES = [
+  {
+    name: "Last-Second Momentum Snipe",
+    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
+    side: "YES" as const,
+    triggerType: "price_below",
+    triggerPrice: 0.48,
+    orderSize: 10,
+    orderType: "MARKET",
+    cooldownMinutes: 1,
+    isActive: false,
+    autoRoll: true,
+    config: JSON.stringify({ mainSize: 0.8, hedgeSize: 0.2, tpPct: 0.03, slPct: 0.015, description: "WS detects Up <0.48 amid upward spot momentum. Buy 80% main, hedge 20% opposite. Exit +2-4% or SL -1.5%." }),
+  },
+  {
+    name: "Orderbook Arbitrage & Imbalance",
+    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
+    side: "YES" as const,
+    triggerType: "price_above",
+    triggerPrice: 0,
+    orderSize: 10,
+    orderType: "MARKET",
+    cooldownMinutes: 1,
+    isActive: false,
+    autoRoll: true,
+    config: JSON.stringify({ mainSize: 1.0, hedgeSize: 0, tpPct: 0, slPct: 0, description: "Bid/ask skew or L2 imbalance detected. Proportional buys or snipe the skew. 80-90% win rate in thin liquidity." }),
+  },
+  {
+    name: "Spot Correlation Reversion Scalp",
+    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
+    side: "YES" as const,
+    triggerType: "price_below",
+    triggerPrice: 0.45,
+    orderSize: 10,
+    orderType: "LIMIT",
+    cooldownMinutes: 1,
+    isActive: false,
+    autoRoll: true,
+    config: JSON.stringify({ mainSize: 0.875, hedgeSize: 0.125, tpPct: 0.025, slPct: 0, spotReboundPct: 0.003, windowSecs: 30, description: "Polymarket Up at 45% while spot rebounds >0.3% in 30s. Buy undervalued token, light hedge 10-15%. Exit +2.5% or RSI signal." }),
+  },
+  {
+    name: "Oracle Lead Arbitrage",
+    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
+    side: "YES" as const,
+    triggerType: "price_above",
+    triggerPrice: 0,
+    orderSize: 10,
+    orderType: "MARKET",
+    cooldownMinutes: 1,
+    isActive: false,
+    autoRoll: true,
+    config: JSON.stringify({ mainSize: 0.7, hedgeSize: 0.3, tpPct: 0.02, slPct: 0, cexDeltaPct: 0.002, description: "CEX or Chainlink feed shows >0.2% delta while Polymarket lags. Buy mispriced token (70%), hedge (30%). Exit +1.5-3% or pre-resolution." }),
+  },
+];
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Seed fixed strategies and default paper balance
+  storage.upsertStrategies(FIXED_STRATEGIES as any);
+  if (!storage.getSetting("paper_balance")) {
+    storage.setSetting("paper_balance", "1000");
+  }
 
   // ===== MARKET DATA (proxied from Polymarket) =====
 
@@ -416,6 +477,65 @@ export async function registerRoutes(
     if (!key || value === undefined) return res.status(400).json({ error: "key and value required" });
     storage.setSetting(key, value);
     res.json({ success: true });
+  });
+
+  // ===== PAPER BALANCE =====
+
+  app.get("/api/paper-balance", (_req, res) => {
+    const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+    res.json({ balance });
+  });
+
+  app.post("/api/paper-balance", (req, res) => {
+    const { balance } = req.body;
+    if (typeof balance !== "number") return res.status(400).json({ error: "balance must be a number" });
+    storage.setSetting("paper_balance", String(balance));
+    res.json({ balance });
+  });
+
+  // ===== P&L =====
+
+  app.get("/api/pnl", (_req, res) => {
+    const strats = storage.getStrategies();
+    const logs = storage.getTradeLogs(1000);
+    const totalPnl = strats.reduce((sum, s) => sum + (s.totalPnl ?? 0), 0);
+    const totalWins = strats.reduce((sum, s) => sum + (s.winCount ?? 0), 0);
+    const totalLosses = strats.reduce((sum, s) => sum + (s.lossCount ?? 0), 0);
+    const paperBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
+    const perStrategy = strats.map((s) => ({
+      id: s.id,
+      name: s.name,
+      totalPnl: s.totalPnl ?? 0,
+      winCount: s.winCount ?? 0,
+      lossCount: s.lossCount ?? 0,
+      totalExecutions: s.totalExecutions,
+      winRate: s.winCount + s.lossCount > 0
+        ? ((s.winCount ?? 0) / (s.winCount + s.lossCount) * 100).toFixed(1)
+        : null,
+    }));
+    res.json({ totalPnl, totalWins, totalLosses, paperBalance, perStrategy });
+  });
+
+  // Manually close a trade with P&L
+  app.post("/api/trades/:id/close", (req, res) => {
+    const { exitPrice } = req.body;
+    const trade = storage.getTradeLogs(1000).find((t) => t.id === parseInt(req.params.id));
+    if (!trade) return res.status(404).json({ error: "Trade not found" });
+    const ep = parseFloat(exitPrice);
+    const entryPrice = trade.price;
+    const size = trade.size;
+    // P&L = (exitPrice - entryPrice) * size / entryPrice  (simplified)
+    const pnl = ((ep - entryPrice) * size);
+    const pnlPercent = ((ep - entryPrice) / entryPrice) * 100;
+    const won = pnl > 0;
+    // Update trade log
+    storage.updateTradeLog(trade.id, { exitPrice: ep, pnl, pnlPercent, closedAt: new Date().toISOString(), status: "closed" });
+    // Update strategy P&L
+    if (trade.strategyId) storage.updateStrategyPnl(trade.strategyId, pnl, won);
+    // Update paper balance
+    const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+    storage.setSetting("paper_balance", String(balance + pnl));
+    res.json({ pnl, pnlPercent, won });
   });
 
   // ===== BOT STATUS =====

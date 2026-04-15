@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Bot, TrendingUp, Activity, Clock } from "lucide-react";
+import { Bot, Activity, DollarSign, Trophy, TrendingDown } from "lucide-react";
+import { cn } from "@/lib/utils";
 import type { TradeLog, Strategy } from "@shared/schema";
 
 export default function Dashboard() {
@@ -17,9 +18,20 @@ export default function Dashboard() {
     refetchInterval: 10000,
   });
 
+  const { data: pnl } = useQuery<{
+    totalPnl: number; totalWins: number; totalLosses: number; paperBalance: number;
+    perStrategy: { id: number; name: string; totalPnl: number; winCount: number; lossCount: number; totalExecutions: number; winRate: string | null }[];
+  }>({
+    queryKey: ["/api/pnl"],
+    refetchInterval: 15000,
+  });
+
   const activeStrats = strategies?.filter((s) => s.isActive) || [];
   const recentTrades = status?.recentTrades || [];
   const totalExecutions = strategies?.reduce((sum, s) => sum + s.totalExecutions, 0) || 0;
+  const paperBalance = pnl?.paperBalance ?? 1000;
+  const totalPnl = pnl?.totalPnl ?? 0;
+  const startBalance = 1000;
 
   return (
     <div className="space-y-6">
@@ -43,6 +55,52 @@ export default function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Paper Balance */}
+        <Card>
+          <CardContent className="pt-5 pb-4 px-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground font-medium">Paper Balance</p>
+                <p className="text-2xl font-semibold mt-1 font-mono tracking-tight">
+                  ${paperBalance.toFixed(2)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">started at $1,000</p>
+              </div>
+              <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center">
+                <DollarSign className="w-4 h-4 text-primary" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Total P&L */}
+        <Card>
+          <CardContent className="pt-5 pb-4 px-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground font-medium">Total P&amp;L</p>
+                <p className={cn(
+                  "text-2xl font-semibold mt-1 font-mono tracking-tight",
+                  totalPnl > 0 ? "text-profit" : totalPnl < 0 ? "text-loss" : ""
+                )}>
+                  {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  {((paperBalance - startBalance) / startBalance * 100).toFixed(1)}% return
+                </p>
+              </div>
+              <div className={cn(
+                "w-8 h-8 rounded-md flex items-center justify-center",
+                totalPnl >= 0 ? "bg-profit/10" : "bg-loss/10"
+              )}>
+                {totalPnl >= 0
+                  ? <Trophy className="w-4 h-4 text-profit" />
+                  : <TrendingDown className="w-4 h-4 text-loss" />}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
         <StatCard
           title="Active Strategies"
           value={status?.activeStrategies ?? 0}
@@ -53,19 +111,7 @@ export default function Dashboard() {
           title="Total Executions"
           value={totalExecutions}
           subtitle="all time"
-          icon={TrendingUp}
-        />
-        <StatCard
-          title="Recent Trades"
-          value={recentTrades.length}
-          subtitle="last 10 logged"
           icon={Activity}
-        />
-        <StatCard
-          title="Mode"
-          value={status?.mode === "live" ? "Live" : "Paper"}
-          subtitle="trading mode"
-          icon={Clock}
         />
       </div>
 

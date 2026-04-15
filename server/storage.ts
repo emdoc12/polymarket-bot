@@ -66,16 +66,23 @@ function runMigrations() {
     );
   `);
 
-  // Add columns that may be missing on older databases (ALTER TABLE IF NOT EXISTS not supported in SQLite,
-  // so we check pragma and add selectively)
+  // Add columns that may be missing on older databases
   const stratCols = sqlite.pragma("table_info(strategies)") as { name: string }[];
   const stratColNames = new Set(stratCols.map((c) => c.name));
-  if (!stratColNames.has("auto_roll")) {
-    sqlite.exec("ALTER TABLE strategies ADD COLUMN auto_roll INTEGER NOT NULL DEFAULT 0;");
-  }
-  if (!stratColNames.has("current_condition_id")) {
-    sqlite.exec("ALTER TABLE strategies ADD COLUMN current_condition_id TEXT;");
-  }
+  if (!stratColNames.has("auto_roll")) sqlite.exec("ALTER TABLE strategies ADD COLUMN auto_roll INTEGER NOT NULL DEFAULT 0;");
+  if (!stratColNames.has("current_condition_id")) sqlite.exec("ALTER TABLE strategies ADD COLUMN current_condition_id TEXT;");
+  if (!stratColNames.has("total_pnl")) sqlite.exec("ALTER TABLE strategies ADD COLUMN total_pnl REAL NOT NULL DEFAULT 0;");
+  if (!stratColNames.has("win_count")) sqlite.exec("ALTER TABLE strategies ADD COLUMN win_count INTEGER NOT NULL DEFAULT 0;");
+  if (!stratColNames.has("loss_count")) sqlite.exec("ALTER TABLE strategies ADD COLUMN loss_count INTEGER NOT NULL DEFAULT 0;");
+  if (!stratColNames.has("config")) sqlite.exec("ALTER TABLE strategies ADD COLUMN config TEXT;");
+
+  const logCols = sqlite.pragma("table_info(trade_logs)") as { name: string }[];
+  const logColNames = new Set(logCols.map((c) => c.name));
+  if (!logColNames.has("strategy_name")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN strategy_name TEXT;");
+  if (!logColNames.has("exit_price")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN exit_price REAL;");
+  if (!logColNames.has("pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN pnl REAL;");
+  if (!logColNames.has("pnl_percent")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN pnl_percent REAL;");
+  if (!logColNames.has("closed_at")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN closed_at TEXT;");
 }
 
 runMigrations();
@@ -89,11 +96,14 @@ export interface IStorage {
   deleteStrategy(id: number): void;
   toggleStrategy(id: number, isActive: boolean): Strategy | undefined;
   markStrategyTriggered(id: number): void;
+  updateStrategyPnl(id: number, pnl: number, won: boolean): void;
+  upsertStrategies(defaults: InsertStrategy[]): void;
 
   // Trade logs
   getTradeLogs(limit?: number): TradeLog[];
   getTradeLogsByStrategy(strategyId: number): TradeLog[];
   createTradeLog(log: InsertTradeLog): TradeLog;
+  updateTradeLog(id: number, updates: Partial<TradeLog>): void;
 
   // Watchlist
   getWatchlist(): Watchlist[];
@@ -143,6 +153,27 @@ export class DatabaseStorage implements IStorage {
     }).where(eq(strategies.id, id)).run();
   }
 
+  updateStrategyPnl(id: number, pnl: number, won: boolean): void {
+    const s = this.getStrategy(id);
+    if (!s) return;
+    db.update(strategies).set({
+      totalPnl: (s.totalPnl ?? 0) + pnl,
+      winCount: won ? (s.winCount ?? 0) + 1 : (s.winCount ?? 0),
+      lossCount: !won ? (s.lossCount ?? 0) + 1 : (s.lossCount ?? 0),
+    }).where(eq(strategies.id, id)).run();
+  }
+
+  upsertStrategies(defaults: InsertStrategy[]): void {
+    // Insert each strategy only if no strategy with that name exists yet
+    const existing = this.getStrategies();
+    const existingNames = new Set(existing.map((s) => s.name));
+    for (const s of defaults) {
+      if (!existingNames.has(s.name)) {
+        db.insert(strategies).values(s).run();
+      }
+    }
+  }
+
   // Trade logs
   getTradeLogs(limit = 100): TradeLog[] {
     return db.select().from(tradeLogs).orderBy(desc(tradeLogs.id)).limit(limit).all();
@@ -154,6 +185,10 @@ export class DatabaseStorage implements IStorage {
 
   createTradeLog(log: InsertTradeLog): TradeLog {
     return db.insert(tradeLogs).values(log).returning().get();
+  }
+
+  updateTradeLog(id: number, updates: Partial<TradeLog>): void {
+    db.update(tradeLogs).set(updates as any).where(eq(tradeLogs.id, id)).run();
   }
 
   // Watchlist

@@ -1,59 +1,119 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Plus, Play, Trash2, Power, RefreshCw, Bitcoin, ChevronRight, Zap } from "lucide-react";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetFooter,
+} from "@/components/ui/sheet";
+import {
+  Zap, BookOpen, TrendingUp, Link2,
+  Settings2, RefreshCw, Trophy, TrendingDown, Minus
+} from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import type { Strategy } from "@shared/schema";
 
-interface BtcCandleMarket {
-  event: {
-    title: string;
-    endDate: string;
-    startDate: string;
-  };
-  market: {
-    conditionId: string;
-    clobTokenIds?: string;
-    outcomePrices?: string;
-    outcomes?: string;
-  } | null;
+// Fixed strategy metadata (matches server seeds by name)
+const STRATEGY_META = [
+  {
+    name: "Last-Second Momentum Snipe",
+    icon: Zap,
+    iconColor: "text-yellow-400",
+    iconBg: "bg-yellow-400/10",
+    defaultConfig: { mainSize: 0.8, hedgeSize: 0.2, tpPct: 0.03, slPct: 0.015, triggerPrice: 0.48, orderSize: 10 },
+    fields: [
+      { key: "triggerPrice", label: "Trigger (Up price <)", type: "percent" },
+      { key: "orderSize", label: "Order size (USDC)", type: "number" },
+      { key: "mainSize", label: "Main allocation", type: "percent" },
+      { key: "hedgeSize", label: "Hedge allocation", type: "percent" },
+      { key: "tpPct", label: "Take profit %", type: "percent" },
+      { key: "slPct", label: "Stop loss %", type: "percent" },
+    ],
+    description: "WS detects \"Up\" <trigger% amid upward spot momentum. Buys main token (80%), hedges opposite (20%). Exits at +2-4% profit or -1.5% stop loss.",
+  },
+  {
+    name: "Orderbook Arbitrage & Imbalance",
+    icon: BookOpen,
+    iconColor: "text-blue-400",
+    iconBg: "bg-blue-400/10",
+    defaultConfig: { orderSize: 10, imbalanceThreshold: 0.6 },
+    fields: [
+      { key: "orderSize", label: "Order size (USDC)", type: "number" },
+      { key: "imbalanceThreshold", label: "Imbalance threshold", type: "percent" },
+    ],
+    description: "Detects bid/ask skew or Level 2 imbalance in WS data. Executes proportional buys or snipes the skew. 80-90% win rate in thin liquidity.",
+  },
+  {
+    name: "Spot Correlation Reversion Scalp",
+    icon: TrendingUp,
+    iconColor: "text-green-400",
+    iconBg: "bg-green-400/10",
+    defaultConfig: { triggerPrice: 0.45, orderSize: 10, mainSize: 0.875, hedgeSize: 0.125, tpPct: 0.025, spotReboundPct: 0.003, windowSecs: 30 },
+    fields: [
+      { key: "triggerPrice", label: "Polymarket Up trigger <", type: "percent" },
+      { key: "spotReboundPct", label: "Spot rebound >%", type: "percent" },
+      { key: "windowSecs", label: "Rebound window (secs)", type: "number" },
+      { key: "orderSize", label: "Order size (USDC)", type: "number" },
+      { key: "mainSize", label: "Main allocation", type: "percent" },
+      { key: "hedgeSize", label: "Hedge allocation", type: "percent" },
+      { key: "tpPct", label: "Take profit %", type: "percent" },
+    ],
+    description: "Polymarket \"Up\" at 45% while spot rebounds >0.3% in 30s. Buys undervalued token, light hedge 10-15%. Exits +2.5% or automated RSI signal.",
+  },
+  {
+    name: "Oracle Lead Arbitrage",
+    icon: Link2,
+    iconColor: "text-purple-400",
+    iconBg: "bg-purple-400/10",
+    defaultConfig: { orderSize: 10, mainSize: 0.7, hedgeSize: 0.3, tpPct: 0.02, cexDeltaPct: 0.002 },
+    fields: [
+      { key: "cexDeltaPct", label: "CEX delta trigger >%", type: "percent" },
+      { key: "orderSize", label: "Order size (USDC)", type: "number" },
+      { key: "mainSize", label: "Main allocation", type: "percent" },
+      { key: "hedgeSize", label: "Hedge allocation", type: "percent" },
+      { key: "tpPct", label: "Take profit %", type: "percent" },
+    ],
+    description: "Direct CEX or Chainlink feed shows >0.2% delta while Polymarket lags. Buys mispriced token (70%), hedges (30%). Exits +1.5-3% or pre-resolution.",
+  },
+];
+
+interface PnlData {
+  totalPnl: number;
+  totalWins: number;
+  totalLosses: number;
+  paperBalance: number;
+  perStrategy: {
+    id: number;
+    name: string;
+    totalPnl: number;
+    winCount: number;
+    lossCount: number;
+    totalExecutions: number;
+    winRate: string | null;
+  }[];
 }
 
 export default function Strategies() {
-  const [showCreate, setShowCreate] = useState(false);
-  const [showBtcSetup, setShowBtcSetup] = useState(false);
+  const [settingsFor, setSettingsFor] = useState<Strategy | null>(null);
   const { toast } = useToast();
 
-  const { data: strategies, isLoading } = useQuery<Strategy[]>({
+  const { data: strategies } = useQuery<Strategy[]>({
     queryKey: ["/api/strategies"],
+    refetchInterval: 10000,
   });
 
-  // Live BTC candle for the quick-setup card
-  const { data: btcCandle } = useQuery<BtcCandleMarket>({
-    queryKey: ["/api/markets/btc-candle/current"],
-    queryFn: async () => {
-      const res = await fetch("/api/markets/btc-candle/current");
-      if (!res.ok) return null;
-      return res.json();
-    },
-    refetchInterval: 30000,
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: number) => apiRequest("DELETE", `/api/strategies/${id}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
-    },
+  const { data: pnl } = useQuery<PnlData>({
+    queryKey: ["/api/pnl"],
+    refetchInterval: 15000,
   });
 
   const toggleMutation = useMutation({
@@ -63,230 +123,172 @@ export default function Strategies() {
       queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
       queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
     },
-  });
-
-  const simulateMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const res = await apiRequest("POST", `/api/strategies/${id}/simulate`);
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/trades"] });
-      toast({
-        title: data.triggered ? "Strategy Triggered" : "Not Triggered",
-        description: `Current: ${(data.currentPrice * 100).toFixed(1)}% | Trigger: ${(data.triggerPrice * 100).toFixed(1)}%`,
-      });
-    },
     onError: (e: Error) => {
-      toast({ title: "Simulation failed", description: e.message, variant: "destructive" });
+      toast({ title: "Error", description: e.message, variant: "destructive" });
     },
   });
 
-  // Check if there's already an auto-roll BTC strategy
-  const btcAutoRollStrategy = strategies?.find((s) => s.autoRoll);
+  // Match DB strategies to meta by name (order preserved)
+  const cards = STRATEGY_META.map((meta) => {
+    const strategy = strategies?.find((s) => s.name === meta.name) ?? null;
+    const pnlRow = pnl?.perStrategy.find((p) => p.name === meta.name) ?? null;
+    return { meta, strategy, pnlRow };
+  });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight">Strategies</h2>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Automated trading rules and triggers
-          </p>
-        </div>
-        <Button onClick={() => setShowCreate(true)} data-testid="button-create-strategy">
-          <Plus className="w-4 h-4 mr-1.5" />
-          New Strategy
-        </Button>
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-xl font-semibold tracking-tight">Strategies</h2>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          Toggle strategies on or off. Each one auto-rolls on the live BTC 5-min candle market.
+        </p>
       </div>
 
-      {/* BTC 5-min Auto-Roll Quick Setup */}
-      {!btcAutoRollStrategy && (
-        <Card
-          className="border-primary/30 bg-primary/5 cursor-pointer hover:bg-primary/10 transition-colors"
-          onClick={() => setShowBtcSetup(true)}
-        >
-          <CardContent className="py-4 px-5">
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 rounded-full bg-orange-500/15 flex items-center justify-center shrink-0">
-                <Bitcoin className="w-5 h-5 text-orange-400" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-semibold">BTC 5-Min Up/Down — Auto-Roll</p>
-                  <Badge className="text-[10px] h-4 px-1.5 bg-orange-500/20 text-orange-400 border-orange-500/30">
-                    Quick Setup
-                  </Badge>
-                </div>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {btcCandle?.event
-                    ? `Now: ${btcCandle.event.title} · ends ${new Date(btcCandle.event.endDate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                    : "Automatically trades each 5-min candle and rolls to the next"}
-                </p>
-              </div>
-              <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {cards.map(({ meta, strategy, pnlRow }) => {
+        const Icon = meta.icon;
+        const isActive = strategy?.isActive ?? false;
+        const config = strategy?.config ? (() => { try { return JSON.parse(strategy.config!); } catch { return {}; } })() : meta.defaultConfig;
+        const totalPnl = pnlRow?.totalPnl ?? 0;
+        const winRate = pnlRow?.winRate ? parseFloat(pnlRow.winRate) : null;
 
-      {/* Strategy list */}
-      {!strategies || strategies.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-sm text-muted-foreground">
-              No strategies yet. Create one above or use the BTC quick setup.
-            </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-3">
-          {strategies.map((s) => (
-            <Card key={s.id} data-testid={`strategy-card-${s.id}`}>
-              <CardContent className="py-4 px-5">
-                <div className="flex items-start gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-sm font-semibold">{s.name}</h3>
-                      <Badge variant={s.isActive ? "default" : "secondary"} className="text-[11px]">
-                        {s.isActive ? "Active" : "Paused"}
+        return (
+          <Card
+            key={meta.name}
+            className={cn(
+              "transition-colors",
+              isActive && "border-primary/40 bg-primary/[0.03]"
+            )}
+          >
+            <CardContent className="py-4 px-5">
+              <div className="flex items-start gap-4">
+                {/* Icon */}
+                <div className={cn("w-10 h-10 rounded-full flex items-center justify-center shrink-0 mt-0.5", meta.iconBg)}>
+                  <Icon className={cn("w-5 h-5", meta.iconColor)} />
+                </div>
+
+                {/* Body */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm font-semibold">{meta.name}</h3>
+                    {isActive && (
+                      <Badge className="text-[10px] h-4 px-1.5 gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block" />
+                        Active
                       </Badge>
-                      {s.autoRoll && (
-                        <Badge variant="outline" className="text-[10px] h-4 px-1.5 text-orange-400 border-orange-500/40 gap-1">
-                          <RefreshCw className="w-2.5 h-2.5" />
-                          Auto-Roll
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1 truncate">
-                      {s.marketQuestion || "No market linked"}
-                    </p>
-                    <div className="flex items-center gap-4 mt-2.5 flex-wrap">
-                      <span className="text-xs">
-                        <span className="text-muted-foreground">Side:</span>{" "}
-                        <span className="font-medium">{s.side}</span>
-                      </span>
-                      {!s.autoRoll && (
-                        <span className="text-xs">
-                          <span className="text-muted-foreground">Trigger:</span>{" "}
-                          <span className="font-medium font-mono">
-                            {s.triggerType === "price_below" ? "< " : "> "}
-                            {(s.triggerPrice * 100).toFixed(1)}%
-                          </span>
-                        </span>
-                      )}
-                      <span className="text-xs">
-                        <span className="text-muted-foreground">Size:</span>{" "}
-                        <span className="font-medium font-mono">${s.orderSize}</span>
-                      </span>
-                      <span className="text-xs">
-                        <span className="text-muted-foreground">Runs:</span>{" "}
-                        <span className="font-medium font-mono">{s.totalExecutions}</span>
-                      </span>
-                      {s.autoRoll && s.currentConditionId && (
-                        <span className="text-xs text-muted-foreground font-mono truncate max-w-[120px]">
-                          cid: {s.currentConditionId.slice(0, 10)}…
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {!s.autoRoll && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={() => simulateMutation.mutate(s.id)}
-                        disabled={simulateMutation.isPending}
-                        title="Simulate"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                      </Button>
                     )}
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={() => toggleMutation.mutate({ id: s.id, isActive: !s.isActive })}
-                      title={s.isActive ? "Pause" : "Activate"}
-                    >
-                      <Power className={cn("w-3.5 h-3.5", s.isActive && "text-primary")} />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-destructive"
-                      onClick={() => deleteMutation.mutate(s.id)}
-                      title="Delete"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </Button>
+                    <Badge variant="outline" className="text-[10px] h-4 px-1.5 gap-1 text-orange-400 border-orange-500/40">
+                      <RefreshCw className="w-2.5 h-2.5" />
+                      Auto-Roll
+                    </Badge>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed line-clamp-2">
+                    {meta.description}
+                  </p>
+
+                  {/* P&L row */}
+                  <div className="flex items-center gap-4 mt-2.5 flex-wrap">
+                    <span className="text-xs flex items-center gap-1">
+                      {totalPnl > 0 ? (
+                        <Trophy className="w-3 h-3 text-profit" />
+                      ) : totalPnl < 0 ? (
+                        <TrendingDown className="w-3 h-3 text-loss" />
+                      ) : (
+                        <Minus className="w-3 h-3 text-muted-foreground" />
+                      )}
+                      <span className={cn(
+                        "font-mono font-medium",
+                        totalPnl > 0 ? "text-profit" : totalPnl < 0 ? "text-loss" : "text-muted-foreground"
+                      )}>
+                        {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)} USDC
+                      </span>
+                    </span>
+                    {winRate !== null && (
+                      <span className="text-xs text-muted-foreground">
+                        {winRate.toFixed(0)}% win rate
+                      </span>
+                    )}
+                    {pnlRow && (
+                      <span className="text-xs text-muted-foreground">
+                        {pnlRow.totalExecutions} trades · {pnlRow.winCount}W / {pnlRow.lossCount}L
+                      </span>
+                    )}
+                    {config.orderSize && (
+                      <span className="text-xs text-muted-foreground">
+                        ${config.orderSize}/candle
+                      </span>
+                    )}
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
 
-      <CreateStrategyDialog open={showCreate} onClose={() => setShowCreate(false)} />
-      <BtcAutoRollDialog
-        open={showBtcSetup}
-        onClose={() => setShowBtcSetup(false)}
-        btcCandle={btcCandle ?? null}
-      />
+                {/* Controls */}
+                <div className="flex items-center gap-3 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => strategy && setSettingsFor(strategy)}
+                    disabled={!strategy}
+                    title="Strategy settings"
+                  >
+                    <Settings2 className="w-3.5 h-3.5" />
+                  </Button>
+                  <Switch
+                    checked={isActive}
+                    disabled={!strategy || toggleMutation.isPending}
+                    onCheckedChange={(checked) => {
+                      if (strategy) toggleMutation.mutate({ id: strategy.id, isActive: checked });
+                    }}
+                  />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
+
+      {settingsFor && (
+        <StrategySettingsSheet
+          strategy={settingsFor}
+          meta={STRATEGY_META.find((m) => m.name === settingsFor.name)!}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
     </div>
   );
 }
 
-// ─── BTC Auto-Roll Setup Dialog ────────────────────────────────────────────
+// ─── Settings Sheet ──────────────────────────────────────────────────────────
 
-function BtcAutoRollDialog({
-  open,
+function StrategySettingsSheet({
+  strategy,
+  meta,
   onClose,
-  btcCandle,
 }: {
-  open: boolean;
+  strategy: Strategy;
+  meta: typeof STRATEGY_META[0];
   onClose: () => void;
-  btcCandle: BtcCandleMarket | null;
 }) {
   const { toast } = useToast();
-  const [form, setForm] = useState({
-    side: "YES",
-    orderSize: "10",
-    orderType: "MARKET",
-  });
+  const existingConfig = strategy.config
+    ? (() => { try { return JSON.parse(strategy.config!); } catch { return {}; } })()
+    : meta.defaultConfig;
 
-  const market = btcCandle?.market;
-  const tokenIds = market?.clobTokenIds ? JSON.parse(market.clobTokenIds) : [];
-  const prices = market?.outcomePrices ? JSON.parse(market.outcomePrices) : [];
-  const outcomes = market?.outcomes ? JSON.parse(market.outcomes) : ["Yes", "No"];
+  const [config, setConfig] = useState<Record<string, number>>({ ...meta.defaultConfig, ...existingConfig });
+  const [orderSize, setOrderSize] = useState(String(strategy.orderSize));
 
-  const createMutation = useMutation({
+  const saveMutation = useMutation({
     mutationFn: async () => {
-      await apiRequest("POST", "/api/strategies", {
-        name: "BTC 5-Min Auto-Roll",
-        marketQuestion: btcCandle?.event?.title || "Bitcoin Up or Down - 5 Minutes",
-        tokenId: tokenIds[form.side === "YES" ? 0 : 1] || null,
-        conditionId: market?.conditionId || null,
-        side: form.side,
-        triggerType: "price_above", // always-on for auto-roll
-        triggerPrice: 0,            // triggers immediately (price is always > 0)
-        orderSize: parseFloat(form.orderSize),
-        orderType: form.orderType,
-        limitPrice: null,
-        cooldownMinutes: 5,
-        isActive: true,
-        autoRoll: true,
-        currentConditionId: market?.conditionId || null,
+      const newConfig = { ...config, orderSize: parseFloat(orderSize) };
+      await apiRequest("PATCH", `/api/strategies/${strategy.id}`, {
+        orderSize: parseFloat(orderSize),
+        triggerPrice: config.triggerPrice ?? strategy.triggerPrice,
+        config: JSON.stringify(newConfig),
       });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
-      toast({ title: "BTC Auto-Roll strategy created", description: "Bot will trade each 5-min candle automatically." });
+      toast({ title: "Settings saved" });
       onClose();
     },
     onError: (e: Error) => {
@@ -294,284 +296,70 @@ function BtcAutoRollDialog({
     },
   });
 
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Bitcoin className="w-4 h-4 text-orange-400" />
-            BTC 5-Min Auto-Roll Strategy
-          </DialogTitle>
-        </DialogHeader>
+  const formatVal = (key: string, val: number) => {
+    const field = meta.fields.find((f) => f.key === key);
+    if (field?.type === "percent") return (val * 100).toFixed(1);
+    return String(val);
+  };
 
-        {/* Current candle preview */}
-        {btcCandle?.event && (
-          <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 space-y-2">
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Current Candle</p>
-            <p className="text-sm font-medium">{btcCandle.event.title}</p>
-            <div className="flex gap-3">
-              {outcomes.map((o: string, i: number) => (
-                <div key={o} className="flex items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">{o}:</span>
-                  <span className="text-xs font-mono font-semibold">
-                    {prices[i] ? (parseFloat(prices[i]) * 100).toFixed(0) + "¢" : "—"}
-                  </span>
+  const parseVal = (key: string, raw: string) => {
+    const field = meta.fields.find((f) => f.key === key);
+    const n = parseFloat(raw);
+    if (field?.type === "percent") return n / 100;
+    return n;
+  };
+
+  return (
+    <Sheet open onOpenChange={(o) => !o && onClose()}>
+      <SheetContent className="w-full sm:max-w-md">
+        <SheetHeader>
+          <SheetTitle className="text-base">{meta.name}</SheetTitle>
+        </SheetHeader>
+
+        <div className="space-y-4 mt-6 px-1">
+          <p className="text-xs text-muted-foreground leading-relaxed">{meta.description}</p>
+
+          <div className="space-y-3">
+            {meta.fields.map((field) => (
+              <div key={field.key} className="flex items-center gap-3">
+                <Label className="text-xs w-44 shrink-0">{field.label}</Label>
+                <div className="flex items-center gap-1.5 flex-1">
+                  <Input
+                    type="number"
+                    step={field.type === "percent" ? "0.1" : "1"}
+                    min="0"
+                    value={field.key === "orderSize" ? orderSize : formatVal(field.key, config[field.key] ?? 0)}
+                    onChange={(e) => {
+                      if (field.key === "orderSize") {
+                        setOrderSize(e.target.value);
+                      } else {
+                        setConfig((prev) => ({ ...prev, [field.key]: parseVal(field.key, e.target.value) }));
+                      }
+                    }}
+                    className="font-mono"
+                  />
+                  {field.type === "percent" && field.key !== "windowSecs" && (
+                    <span className="text-xs text-muted-foreground">%</span>
+                  )}
+                  {field.key === "windowSecs" && (
+                    <span className="text-xs text-muted-foreground">s</span>
+                  )}
+                  {field.key === "orderSize" && (
+                    <span className="text-xs text-muted-foreground">$</span>
+                  )}
                 </div>
-              ))}
-              <span className="text-xs text-muted-foreground ml-auto">
-                ends {new Date(btcCandle.event.endDate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </span>
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-4 mt-1">
-          <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 flex items-start gap-3">
-            <RefreshCw className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              The bot will trade the current candle, then automatically detect when it closes
-              and roll to the next one. It runs continuously while active.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label className="text-xs">Direction</Label>
-              <Select value={form.side} onValueChange={(v) => setForm({ ...form, side: v })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="YES">Up (Yes)</SelectItem>
-                  <SelectItem value="NO">Down (No)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label className="text-xs">Order Type</Label>
-              <Select value={form.orderType} onValueChange={(v) => setForm({ ...form, orderType: v })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="MARKET">Market</SelectItem>
-                  <SelectItem value="LIMIT">Limit</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div>
-            <Label htmlFor="btcSize" className="text-xs">Order Size (USDC) per candle</Label>
-            <Input
-              id="btcSize"
-              type="number"
-              step="1"
-              min="1"
-              value={form.orderSize}
-              onChange={(e) => setForm({ ...form, orderSize: e.target.value })}
-              className="font-mono"
-            />
+              </div>
+            ))}
           </div>
         </div>
 
-        <DialogFooter className="mt-4">
+        <SheetFooter className="mt-8">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button
-            onClick={() => createMutation.mutate()}
-            disabled={createMutation.isPending}
-            className="gap-1.5"
-          >
-            <Zap className="w-3.5 h-3.5" />
-            Start Auto-Roll
+          <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+            Save
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─── Regular Strategy Create Dialog ────────────────────────────────────────
-
-function CreateStrategyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { toast } = useToast();
-  const [form, setForm] = useState({
-    name: "",
-    marketQuestion: "",
-    tokenId: "",
-    conditionId: "",
-    side: "YES",
-    triggerType: "price_below",
-    triggerPrice: "0.30",
-    orderSize: "10",
-    orderType: "LIMIT",
-    limitPrice: "",
-    cooldownMinutes: "5",
-    isActive: true,
-  });
-
-  const createMutation = useMutation({
-    mutationFn: async () => {
-      await apiRequest("POST", "/api/strategies", {
-        name: form.name,
-        marketQuestion: form.marketQuestion || null,
-        tokenId: form.tokenId || null,
-        conditionId: form.conditionId || null,
-        side: form.side,
-        triggerType: form.triggerType,
-        triggerPrice: parseFloat(form.triggerPrice),
-        orderSize: parseFloat(form.orderSize),
-        orderType: form.orderType,
-        limitPrice: form.limitPrice ? parseFloat(form.limitPrice) : null,
-        cooldownMinutes: parseInt(form.cooldownMinutes),
-        isActive: form.isActive,
-        autoRoll: false,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/strategies"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/bot/status"] });
-      toast({ title: "Strategy created" });
-      onClose();
-      setForm({
-        name: "", marketQuestion: "", tokenId: "", conditionId: "",
-        side: "YES", triggerType: "price_below", triggerPrice: "0.30",
-        orderSize: "10", orderType: "LIMIT", limitPrice: "",
-        cooldownMinutes: "5", isActive: true,
-      });
-    },
-    onError: (e: Error) => {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    },
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>New Strategy</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4 mt-2">
-          <div>
-            <Label htmlFor="name" className="text-xs">Strategy Name</Label>
-            <Input
-              id="name"
-              data-testid="input-strategy-name"
-              placeholder="e.g. Buy YES on dip"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-          </div>
-          <div>
-            <Label htmlFor="question" className="text-xs">Market Question (optional)</Label>
-            <Input
-              id="question"
-              data-testid="input-market-question"
-              placeholder="Market description for reference"
-              value={form.marketQuestion}
-              onChange={(e) => setForm({ ...form, marketQuestion: e.target.value })}
-            />
-          </div>
-          <div>
-            <Label htmlFor="tokenId" className="text-xs">CLOB Token ID</Label>
-            <Input
-              id="tokenId"
-              data-testid="input-token-id"
-              placeholder="Paste from market detail"
-              value={form.tokenId}
-              onChange={(e) => setForm({ ...form, tokenId: e.target.value })}
-              className="font-mono text-xs"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label className="text-xs">Side</Label>
-              <Select value={form.side} onValueChange={(v) => setForm({ ...form, side: v })}>
-                <SelectTrigger data-testid="select-side"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="YES">YES</SelectItem>
-                  <SelectItem value="NO">NO</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label className="text-xs">Trigger</Label>
-              <Select value={form.triggerType} onValueChange={(v) => setForm({ ...form, triggerType: v })}>
-                <SelectTrigger data-testid="select-trigger-type"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="price_below">Price Below</SelectItem>
-                  <SelectItem value="price_above">Price Above</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label htmlFor="triggerPrice" className="text-xs">Trigger Price (0-1)</Label>
-              <Input
-                id="triggerPrice"
-                data-testid="input-trigger-price"
-                type="number" step="0.01" min="0" max="1"
-                value={form.triggerPrice}
-                onChange={(e) => setForm({ ...form, triggerPrice: e.target.value })}
-                className="font-mono"
-              />
-            </div>
-            <div>
-              <Label htmlFor="orderSize" className="text-xs">Order Size (USDC)</Label>
-              <Input
-                id="orderSize"
-                data-testid="input-order-size"
-                type="number" step="1" min="1"
-                value={form.orderSize}
-                onChange={(e) => setForm({ ...form, orderSize: e.target.value })}
-                className="font-mono"
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label className="text-xs">Order Type</Label>
-              <Select value={form.orderType} onValueChange={(v) => setForm({ ...form, orderType: v })}>
-                <SelectTrigger data-testid="select-order-type"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="LIMIT">Limit</SelectItem>
-                  <SelectItem value="MARKET">Market</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="cooldown" className="text-xs">Cooldown (min)</Label>
-              <Input
-                id="cooldown"
-                data-testid="input-cooldown"
-                type="number" step="1" min="1"
-                value={form.cooldownMinutes}
-                onChange={(e) => setForm({ ...form, cooldownMinutes: e.target.value })}
-                className="font-mono"
-              />
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Switch
-              checked={form.isActive}
-              onCheckedChange={(c) => setForm({ ...form, isActive: c })}
-              data-testid="switch-active"
-            />
-            <Label className="text-xs">Start active immediately</Label>
-          </div>
-        </div>
-        <DialogFooter className="mt-4">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button
-            onClick={() => createMutation.mutate()}
-            disabled={!form.name || createMutation.isPending}
-            data-testid="button-submit-strategy"
-          >
-            Create Strategy
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
