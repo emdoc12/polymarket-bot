@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Bot, Activity, DollarSign, Trophy, TrendingDown } from "lucide-react";
+import { Bot, Activity, DollarSign, Trophy, TrendingDown, ShieldAlert, ShieldCheck, Wifi, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { TradeLog, Strategy } from "@shared/schema";
 
@@ -24,6 +24,15 @@ export default function Dashboard() {
   }>({
     queryKey: ["/api/pnl"],
     refetchInterval: 15000,
+  });
+
+  const { data: safeguards } = useQuery<{
+    drawdownPct: number; drawdownLimit: number; circuitBreaker: string;
+    circuitBreakerAt: string | null; latencyMs: number | null;
+    lagScore: number | null; polyPrice: number | null; chainlinkPrice: number | null;
+  }>({
+    queryKey: ["/api/safeguards"],
+    refetchInterval: 30000,
   });
 
   const activeStrats = strategies?.filter((s) => s.isActive) || [];
@@ -114,6 +123,86 @@ export default function Dashboard() {
           icon={Activity}
         />
       </div>
+
+      {/* Safeguards */}
+      <Card className={cn(
+        safeguards?.circuitBreaker === "triggered" && "border-destructive/50 bg-destructive/5"
+      )}>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {safeguards?.circuitBreaker === "triggered"
+                ? <ShieldAlert className="w-4 h-4 text-destructive" />
+                : <ShieldCheck className="w-4 h-4 text-profit" />}
+              <CardTitle className="text-sm font-medium">Safeguards</CardTitle>
+            </div>
+            {safeguards?.circuitBreaker === "triggered" && (
+              <Badge variant="destructive" className="text-[10px]">Circuit Breaker Triggered</Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            {/* Drawdown */}
+            <div>
+              <p className="text-xs text-muted-foreground">Daily Drawdown</p>
+              <p className={cn(
+                "text-lg font-semibold font-mono mt-0.5",
+                (safeguards?.drawdownPct ?? 0) >= (safeguards?.drawdownLimit ?? 10)
+                  ? "text-destructive" : (safeguards?.drawdownPct ?? 0) > (safeguards?.drawdownLimit ?? 10) * 0.7
+                  ? "text-yellow-400" : "text-profit"
+              )}>
+                {safeguards?.drawdownPct?.toFixed(1) ?? "0.0"}%
+              </p>
+              <p className="text-[11px] text-muted-foreground">limit {safeguards?.drawdownLimit ?? 10}%</p>
+            </div>
+            {/* Latency */}
+            <div>
+              <p className="text-xs text-muted-foreground flex items-center gap-1"><Wifi className="w-3 h-3" /> Latency</p>
+              <p className={cn(
+                "text-lg font-semibold font-mono mt-0.5",
+                safeguards?.latencyMs == null ? "text-muted-foreground"
+                  : safeguards.latencyMs < 300 ? "text-profit"
+                  : safeguards.latencyMs < 800 ? "text-yellow-400" : "text-loss"
+              )}>
+                {safeguards?.latencyMs != null ? `${safeguards.latencyMs}ms` : "—"}
+              </p>
+              <p className="text-[11px] text-muted-foreground">to Gamma API</p>
+            </div>
+            {/* Lag Score */}
+            <div>
+              <p className="text-xs text-muted-foreground flex items-center gap-1"><Zap className="w-3 h-3" /> Lag Score</p>
+              <p className={cn(
+                "text-lg font-semibold font-mono mt-0.5",
+                safeguards?.lagScore == null ? "text-muted-foreground"
+                  : safeguards.lagScore > 0.6 ? "text-profit"
+                  : safeguards.lagScore > 0.3 ? "text-yellow-400" : "text-muted-foreground"
+              )}>
+                {safeguards?.lagScore != null ? safeguards.lagScore.toFixed(2) : "—"}
+              </p>
+              <p className="text-[11px] text-muted-foreground">0=neutral · 1=strong signal</p>
+            </div>
+            {/* BTC spot vs Poly */}
+            <div>
+              <p className="text-xs text-muted-foreground">BTC Prices</p>
+              <div className="mt-0.5 space-y-0.5">
+                <p className="text-xs font-mono">
+                  <span className="text-muted-foreground">Spot: </span>
+                  <span className="font-medium">
+                    {safeguards?.chainlinkPrice ? `$${safeguards.chainlinkPrice.toLocaleString()}` : "—"}
+                  </span>
+                </p>
+                <p className="text-xs font-mono">
+                  <span className="text-muted-foreground">Up prob: </span>
+                  <span className="font-medium">
+                    {safeguards?.polyPrice != null ? `${(safeguards.polyPrice * 100).toFixed(0)}%` : "—"}
+                  </span>
+                </p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Active Strategies */}
       <Card>

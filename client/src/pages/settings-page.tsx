@@ -4,11 +4,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
-import { Shield, AlertTriangle } from "lucide-react";
+import { Shield, AlertTriangle, DollarSign, TrendingDown, Globe, Zap } from "lucide-react";
 import type { BotSetting } from "@shared/schema";
 
 export default function SettingsPage() {
@@ -25,6 +26,9 @@ export default function SettingsPage() {
   const [pollingInterval, setPollingInterval] = useState("30");
   const [maxDailyTrades, setMaxDailyTrades] = useState("50");
   const [maxOrderSize, setMaxOrderSize] = useState("100");
+  const [takerFeeRate, setTakerFeeRate] = useState("1.0");
+  const [drawdownLimit, setDrawdownLimit] = useState("10");
+  const [multiSourceVerify, setMultiSourceVerify] = useState(true);
 
   useEffect(() => {
     if (settings) {
@@ -32,16 +36,22 @@ export default function SettingsPage() {
       setPollingInterval(getVal("polling_interval", "30"));
       setMaxDailyTrades(getVal("max_daily_trades", "50"));
       setMaxOrderSize(getVal("max_order_size", "100"));
+      setTakerFeeRate((parseFloat(getVal("taker_fee_rate", "0.01")) * 100).toFixed(1));
+      setDrawdownLimit((parseFloat(getVal("drawdown_limit", "0.10")) * 100).toFixed(0));
+      setMultiSourceVerify(getVal("multi_source_verify", "true") === "true");
     }
   }, [settings]);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const pairs = [
+      const pairs: [string, string][] = [
         ["mode", mode],
         ["polling_interval", pollingInterval],
         ["max_daily_trades", maxDailyTrades],
         ["max_order_size", maxOrderSize],
+        ["taker_fee_rate", String(parseFloat(takerFeeRate) / 100)],
+        ["drawdown_limit", String(parseFloat(drawdownLimit) / 100)],
+        ["multi_source_verify", String(multiSourceVerify)],
       ];
       for (const [key, value] of pairs) {
         await apiRequest("POST", "/api/settings", { key, value });
@@ -62,7 +72,7 @@ export default function SettingsPage() {
       <div>
         <h2 className="text-xl font-semibold tracking-tight">Settings</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Configure bot behavior and safety limits
+          Configure bot behavior, fees, and safety limits
         </p>
       </div>
 
@@ -74,13 +84,13 @@ export default function SettingsPage() {
             <CardTitle className="text-sm font-medium">Trading Mode</CardTitle>
           </div>
           <CardDescription className="text-xs">
-            Paper mode simulates trades without executing them on-chain.
-            Live mode requires a connected wallet with CLOB API credentials.
+            Paper mode simulates trades without real execution.
+            Live mode requires a connected Polygon wallet with CLOB API credentials.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Select value={mode} onValueChange={setMode}>
-            <SelectTrigger className="w-48" data-testid="select-mode">
+            <SelectTrigger className="w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -92,28 +102,119 @@ export default function SettingsPage() {
             <div className="flex items-start gap-2 mt-3 p-3 rounded-md bg-destructive/10 border border-destructive/20">
               <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
               <p className="text-xs text-destructive">
-                Live mode will execute real trades on Polymarket using your wallet.
-                Ensure you have CLOB API credentials configured and sufficient USDC balance.
+                Live mode executes real trades on Polymarket using your wallet.
+                Ensure CLOB API credentials are set and USDC balance is sufficient.
               </p>
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Polling */}
+      {/* Fees */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">Strategy Polling</CardTitle>
+          <div className="flex items-center gap-2">
+            <DollarSign className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">Fee Handling</CardTitle>
+          </div>
           <CardDescription className="text-xs">
-            How frequently the bot checks market prices against your strategy triggers.
+            Taker fees are deducted from P&L on every trade close (entry + exit).
+            Polymarket charges 1-2% taker fee. Target edges must exceed fees.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-3">
-            <Label htmlFor="polling" className="text-xs shrink-0">Check every</Label>
+            <Label className="text-xs w-40 shrink-0">Taker fee rate</Label>
             <Input
-              id="polling"
-              data-testid="input-polling-interval"
+              type="number"
+              step="0.1"
+              min="0"
+              max="5"
+              value={takerFeeRate}
+              onChange={(e) => setTakerFeeRate(e.target.value)}
+              className="w-24 font-mono"
+            />
+            <span className="text-xs text-muted-foreground">% per side</span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            Effective round-trip cost: <span className="font-mono font-medium">{(parseFloat(takerFeeRate || "0") * 2).toFixed(1)}%</span> per trade.
+            Strategies target <span className="font-mono">&gt;3%</span> net edge.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Safeguards */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <TrendingDown className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">Safeguards</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Circuit breakers protect your account from runaway losses.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Label className="text-xs w-40 shrink-0">Daily drawdown limit</Label>
+            <Input
+              type="number"
+              step="1"
+              min="1"
+              max="50"
+              value={drawdownLimit}
+              onChange={(e) => setDrawdownLimit(e.target.value)}
+              className="w-24 font-mono"
+            />
+            <span className="text-xs text-muted-foreground">%</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            If today's losses exceed <span className="font-mono font-medium">{drawdownLimit}%</span> of opening balance, all strategies pause automatically.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Multi-source verification */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Globe className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">Multi-Source Verification</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Cross-check Polymarket prices against CryptoCompare/Chainlink before executing.
+            Reduces false signals from stale feeds.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={multiSourceVerify}
+              onCheckedChange={setMultiSourceVerify}
+            />
+            <Label className="text-xs">
+              {multiSourceVerify ? "Enabled — prices verified against CryptoCompare" : "Disabled — using Polymarket feed only"}
+            </Label>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Polling */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">Strategy Polling</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            How frequently the bot checks market conditions against triggers.
+            Lower = faster but higher API load.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center gap-3">
+            <Label className="text-xs shrink-0">Check every</Label>
+            <Input
               type="number"
               min="5"
               max="300"
@@ -123,23 +224,9 @@ export default function SettingsPage() {
             />
             <span className="text-xs text-muted-foreground">seconds</span>
           </div>
-        </CardContent>
-      </Card>
-
-      {/* Safety Limits */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">Safety Limits</CardTitle>
-          <CardDescription className="text-xs">
-            Circuit breakers to prevent runaway trading.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
           <div className="flex items-center gap-3">
-            <Label htmlFor="maxTrades" className="text-xs w-40 shrink-0">Max daily trades</Label>
+            <Label className="text-xs w-40 shrink-0">Max daily trades</Label>
             <Input
-              id="maxTrades"
-              data-testid="input-max-daily-trades"
               type="number"
               min="1"
               value={maxDailyTrades}
@@ -148,10 +235,8 @@ export default function SettingsPage() {
             />
           </div>
           <div className="flex items-center gap-3">
-            <Label htmlFor="maxSize" className="text-xs w-40 shrink-0">Max order size (USDC)</Label>
+            <Label className="text-xs w-40 shrink-0">Max order size (USDC)</Label>
             <Input
-              id="maxSize"
-              data-testid="input-max-order-size"
               type="number"
               min="1"
               value={maxOrderSize}
@@ -163,30 +248,26 @@ export default function SettingsPage() {
       </Card>
 
       <div className="flex justify-end">
-        <Button
-          onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending}
-          data-testid="button-save-settings"
-        >
+        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
           Save Settings
         </Button>
       </div>
 
-      {/* Info Box */}
+      {/* Live trading info */}
       <Card className="border-primary/20 bg-primary/5">
         <CardContent className="py-4 px-5">
-          <h3 className="text-sm font-medium mb-2">Connecting to Polymarket</h3>
-          <div className="text-xs text-muted-foreground space-y-2">
-            <p>
-              To enable live trading, you need a Polygon wallet with USDC and Polymarket CLOB API credentials.
-              The bot uses the py-clob-client or @polymarket/clob-client SDK to interact with the CLOB.
-            </p>
-            <p>
-              1. Export your private key from your wallet<br />
-              2. Derive L2 API credentials using the SDK<br />
-              3. Set environment variables: POLY_PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE<br />
-              4. Switch to Live mode above
-            </p>
+          <h3 className="text-sm font-medium mb-2">Connecting to Polymarket (Live Mode)</h3>
+          <div className="text-xs text-muted-foreground space-y-1.5">
+            <p>1. Export your private key from your Polygon wallet</p>
+            <p>2. Derive L2 API credentials via <span className="font-mono">py-clob-client</span> or <span className="font-mono">@polymarket/clob-client</span></p>
+            <p>3. Set environment variables on the container:</p>
+            <code className="block bg-background/60 rounded px-3 py-2 font-mono text-[11px] mt-1 leading-relaxed">
+              POLY_PRIVATE_KEY=0x...<br />
+              POLY_API_KEY=...<br />
+              POLY_API_SECRET=...<br />
+              POLY_PASSPHRASE=...
+            </code>
+            <p className="mt-1">4. Switch to Live mode above and save.</p>
           </div>
         </CardContent>
       </Card>

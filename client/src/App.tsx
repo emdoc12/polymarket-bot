@@ -13,6 +13,7 @@ import Strategies from "@/pages/strategies";
 import Trades from "@/pages/trades";
 import WatchlistPage from "@/pages/watchlist-page";
 import SettingsPage from "@/pages/settings-page";
+import Backtest from "@/pages/backtest";
 
 function AppRouter() {
   return (
@@ -23,6 +24,7 @@ function AppRouter() {
       <Route path="/trades" component={Trades} />
       <Route path="/watchlist" component={WatchlistPage} />
       <Route path="/settings" component={SettingsPage} />
+      <Route path="/backtest" component={Backtest} />
       <Route component={NotFound} />
     </Switch>
   );

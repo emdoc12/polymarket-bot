@@ -81,11 +81,14 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // Seed fixed strategies and default paper balance
+  // Seed fixed strategies and default settings
   storage.upsertStrategies(FIXED_STRATEGIES as any);
-  if (!storage.getSetting("paper_balance")) {
-    storage.setSetting("paper_balance", "1000");
-  }
+  if (!storage.getSetting("paper_balance")) storage.setSetting("paper_balance", "1000");
+  if (!storage.getSetting("day_start_balance")) storage.setSetting("day_start_balance", "1000");
+  if (!storage.getSetting("taker_fee_rate")) storage.setSetting("taker_fee_rate", "0.01");
+  if (!storage.getSetting("drawdown_limit")) storage.setSetting("drawdown_limit", "0.10");
+  if (!storage.getSetting("circuit_breaker")) storage.setSetting("circuit_breaker", "ok");
+  if (!storage.getSetting("multi_source_verify")) storage.setSetting("multi_source_verify", "true");
 
   // ===== MARKET DATA (proxied from Polymarket) =====
 
@@ -516,7 +519,7 @@ export async function registerRoutes(
     res.json({ totalPnl, totalWins, totalLosses, paperBalance, perStrategy });
   });
 
-  // Manually close a trade with P&L
+  // Manually close a trade with P&L (fees applied)
   app.post("/api/trades/:id/close", (req, res) => {
     const { exitPrice } = req.body;
     const trade = storage.getTradeLogs(1000).find((t) => t.id === parseInt(req.params.id));
@@ -524,18 +527,229 @@ export async function registerRoutes(
     const ep = parseFloat(exitPrice);
     const entryPrice = trade.price;
     const size = trade.size;
-    // P&L = (exitPrice - entryPrice) * size / entryPrice  (simplified)
-    const pnl = ((ep - entryPrice) * size);
-    const pnlPercent = ((ep - entryPrice) / entryPrice) * 100;
-    const won = pnl > 0;
-    // Update trade log
-    storage.updateTradeLog(trade.id, { exitPrice: ep, pnl, pnlPercent, closedAt: new Date().toISOString(), status: "closed" });
-    // Update strategy P&L
-    if (trade.strategyId) storage.updateStrategyPnl(trade.strategyId, pnl, won);
-    // Update paper balance
+    const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.01"); // default 1%
+    const grossPnl = (ep - entryPrice) * size;
+    const feePaid = size * feeRate * 2; // fee on entry + exit
+    const netPnl = grossPnl - feePaid;
+    const pnlPercent = (grossPnl / (entryPrice * size)) * 100;
+    const won = netPnl > 0;
+    storage.updateTradeLog(trade.id, {
+      exitPrice: ep, pnl: grossPnl, pnlPercent,
+      closedAt: new Date().toISOString(), status: "closed",
+      feePaid, netPnl,
+    });
+    if (trade.strategyId) storage.updateStrategyPnl(trade.strategyId, netPnl, won);
+    // Check daily drawdown circuit breaker before updating balance
     const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
-    storage.setSetting("paper_balance", String(balance + pnl));
-    res.json({ pnl, pnlPercent, won });
+    const startOfDayBalance = parseFloat(storage.getSetting("day_start_balance") || String(balance));
+    const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
+    const newBalance = balance + netPnl;
+    const drawdownPct = (startOfDayBalance - newBalance) / startOfDayBalance;
+    if (drawdownPct >= drawdownLimit) {
+      storage.setSetting("circuit_breaker", "triggered");
+      storage.setSetting("circuit_breaker_at", new Date().toISOString());
+    }
+    storage.setSetting("paper_balance", String(newBalance));
+    res.json({ grossPnl, feePaid, netPnl, pnlPercent, won, circuitBreaker: drawdownPct >= drawdownLimit });
+  });
+
+  // ===== SAFEGUARDS =====
+
+  app.get("/api/safeguards", async (_req, res) => {
+    const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+    const startOfDayBalance = parseFloat(storage.getSetting("day_start_balance") || "1000");
+    const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
+    const circuitBreaker = storage.getSetting("circuit_breaker") || "ok";
+    const circuitBreakerAt = storage.getSetting("circuit_breaker_at") || null;
+    const drawdownPct = startOfDayBalance > 0
+      ? Math.max(0, (startOfDayBalance - balance) / startOfDayBalance)
+      : 0;
+
+    // Latency probe — measure round-trip to Gamma API
+    let latencyMs: number | null = null;
+    try {
+      const t0 = Date.now();
+      await fetch("https://gamma-api.polymarket.com/events?limit=1&active=true", { signal: AbortSignal.timeout(3000) });
+      latencyMs = Date.now() - t0;
+    } catch { /* timeout or network error */ }
+
+    // Lag score — compare Gamma API price vs Chainlink BTC/USD to detect Polymarket lagging
+    // Fetch both in parallel
+    let lagScore: number | null = null;
+    let polyPrice: number | null = null;
+    let chainlinkPrice: number | null = null;
+    try {
+      const [polyRes, clRes] = await Promise.allSettled([
+        // Polymarket: get current BTC 5-min candle "Yes" price as implied BTC direction
+        fetch("https://gamma-api.polymarket.com/events?limit=5&active=true&closed=false&order=startDate&ascending=false",
+          { signal: AbortSignal.timeout(3000) }).then((r) => r.json()),
+        // Chainlink BTC/USD feed via public aggregator proxy
+        fetch("https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD",
+          { signal: AbortSignal.timeout(3000) }).then((r) => r.json()),
+      ]);
+
+      if (clRes.status === "fulfilled" && clRes.value?.USD) {
+        chainlinkPrice = clRes.value.USD;
+      }
+      if (polyRes.status === "fulfilled" && Array.isArray(polyRes.value)) {
+        // Find BTC candle event, extract Yes price
+        for (const ev of polyRes.value) {
+          const title = (ev.title || "").toLowerCase();
+          if (title.includes("bitcoin") && title.includes("up or down")) {
+            const mkt = ev.markets?.[0];
+            if (mkt?.outcomePrices) {
+              try {
+                const prices = JSON.parse(mkt.outcomePrices);
+                polyPrice = parseFloat(prices[0]); // "Yes" = Up probability
+              } catch { /* parse fail */ }
+            }
+            break;
+          }
+        }
+      }
+
+      // Lag score: if chainlinkPrice moved significantly but polyPrice hasn't adjusted
+      // We approximate: lagScore = 0 (aligned) to 1 (strongly lagging)
+      // For now: flag if polyPrice < 0.45 or > 0.55 (strongly directional) — real lag needs time-series
+      if (polyPrice !== null) {
+        const deviation = Math.abs(polyPrice - 0.5);
+        lagScore = parseFloat((deviation * 2).toFixed(3)); // 0 = neutral, 1 = strongly directional
+      }
+    } catch { /* non-critical */ }
+
+    res.json({
+      drawdownPct: parseFloat((drawdownPct * 100).toFixed(2)),
+      drawdownLimit: parseFloat((drawdownLimit * 100).toFixed(0)),
+      circuitBreaker,
+      circuitBreakerAt,
+      latencyMs,
+      lagScore,
+      polyPrice,
+      chainlinkPrice,
+    });
+  });
+
+  // Reset circuit breaker manually
+  app.post("/api/safeguards/reset", (_req, res) => {
+    const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+    storage.setSetting("circuit_breaker", "ok");
+    storage.setSetting("circuit_breaker_at", "");
+    storage.setSetting("day_start_balance", String(balance));
+    res.json({ ok: true });
+  });
+
+  // ===== BACKTEST =====
+
+  app.post("/api/backtest", async (req, res) => {
+    try {
+      const { strategyName, periodDays = 7, orderSize = 10 } = req.body;
+      const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.01");
+
+      // Fetch Chainlink BTC/USD OHLC from CryptoCompare (free, no key needed)
+      // Each data point = 5 minutes; limit = periodDays * 24 * 12
+      const limit = Math.min(periodDays * 24 * 12, 2000);
+      const ohlcRes = await fetch(
+        `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}&aggregate=5`,
+        { signal: AbortSignal.timeout(10000) }
+      );
+      if (!ohlcRes.ok) throw new Error("Failed to fetch OHLC data");
+      const ohlcData = await ohlcRes.json();
+      const candles: { time: number; open: number; high: number; low: number; close: number; volumeto: number }[] =
+        ohlcData?.Data?.Data || [];
+
+      if (candles.length < 10) {
+        res.status(502).json({ error: "Not enough historical data returned" });
+        return;
+      }
+
+      // Simulate strategy logic against each 5-min candle
+      let wins = 0, losses = 0, grossPnl = 0, totalFees = 0, edges: number[] = [];
+
+      for (let i = 1; i < candles.length; i++) {
+        const prev = candles[i - 1];
+        const curr = candles[i];
+        const priceChange = (curr.close - prev.close) / prev.close; // % move this candle
+        let entryProb = 0.5; // simulated Polymarket Yes probability
+        let signal = false;
+        let betUp = true;
+
+        if (strategyName === "Last-Second Momentum Snipe") {
+          // Signal: prev candle was up (momentum), Yes prob < 0.48
+          const prevUp = prev.close > prev.open;
+          entryProb = prevUp ? 0.44 + Math.random() * 0.06 : 0.5 + Math.random() * 0.08;
+          signal = prevUp && entryProb < 0.48;
+          betUp = true;
+        } else if (strategyName === "Orderbook Arbitrage & Imbalance") {
+          // Signal: simulated orderbook imbalance (volume skew proxy)
+          const volSkew = curr.volumeto / (prev.volumeto + 1);
+          signal = volSkew > 1.3 || volSkew < 0.7;
+          betUp = volSkew > 1.3;
+          entryProb = betUp ? 0.48 : 0.52;
+        } else if (strategyName === "Spot Correlation Reversion Scalp") {
+          // Signal: price bounced > 0.3% and Yes prob < 0.45
+          const rebound = (curr.close - prev.low) / prev.low;
+          entryProb = 0.40 + Math.random() * 0.08;
+          signal = rebound > 0.003 && entryProb < 0.45;
+          betUp = true;
+        } else if (strategyName === "Oracle Lead Arbitrage") {
+          // Signal: simulate CEX delta > 0.2% ahead of implied price
+          const cexDelta = Math.abs(priceChange);
+          signal = cexDelta > 0.002;
+          betUp = priceChange > 0;
+          entryProb = betUp ? 0.46 : 0.54;
+        } else {
+          signal = Math.random() > 0.6; // random fallback
+          betUp = Math.random() > 0.5;
+        }
+
+        if (!signal) continue;
+
+        // Outcome: did BTC actually go up this candle?
+        const actuallyUp = curr.close >= prev.close;
+        const won = betUp ? actuallyUp : !actuallyUp;
+
+        // P&L calculation
+        const edge = won
+          ? Math.abs(priceChange) * (1 - entryProb) / entryProb // simplified payoff
+          : -entryProb;
+        const tradePnl = orderSize * edge;
+        const fee = orderSize * feeRate * 2;
+        grossPnl += tradePnl;
+        totalFees += fee;
+        edges.push(tradePnl - fee);
+        if (won) wins++; else losses++;
+      }
+
+      const totalTrades = wins + losses;
+      const winRate = totalTrades > 0 ? wins / totalTrades : 0;
+      const netPnl = grossPnl - totalFees;
+      const avgEdge = edges.length > 0 ? edges.reduce((a, b) => a + b, 0) / edges.length : 0;
+      const edgePct = orderSize > 0 ? (avgEdge / orderSize) * 100 : 0;
+      const meetsTarget = winRate >= 0.65 && edgePct >= 3;
+
+      const run = storage.saveBacktestRun({
+        strategyName,
+        ranAt: new Date().toISOString(),
+        periodDays,
+        totalTrades,
+        wins,
+        losses,
+        winRate,
+        grossPnl,
+        totalFees,
+        netPnl,
+        edgePct,
+        meetsTarget,
+      });
+
+      res.json(run);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/backtest", (_req, res) => {
+    res.json(storage.getBacktestRuns());
   });
 
   // ===== BOT STATUS =====

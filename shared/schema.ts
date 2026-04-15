@@ -47,9 +47,11 @@ export const tradeLogs = sqliteTable("trade_logs", {
   marketQuestion: text("market_question"),
   // P&L tracking
   exitPrice: real("exit_price"),       // price at close/resolution
-  pnl: real("pnl"),                   // realised P&L in USDC
+  pnl: real("pnl"),                   // realised P&L in USDC (gross)
   pnlPercent: real("pnl_percent"),    // % return
   closedAt: text("closed_at"),        // ISO timestamp of close
+  feePaid: real("fee_paid"),          // taker fee deducted (USDC)
+  netPnl: real("net_pnl"),            // pnl - feePaid
 });
 
 // Watchlist - tracked markets
@@ -59,6 +61,23 @@ export const watchlist = sqliteTable("watchlist", {
   tokenId: text("token_id").notNull(),
   marketQuestion: text("market_question").notNull(),
   addedAt: text("added_at").notNull(),
+});
+
+// Backtest results
+export const backtestRuns = sqliteTable("backtest_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  strategyName: text("strategy_name").notNull(),
+  ranAt: text("ran_at").notNull(),           // ISO timestamp
+  periodDays: integer("period_days").notNull(),
+  totalTrades: integer("total_trades").notNull(),
+  wins: integer("wins").notNull(),
+  losses: integer("losses").notNull(),
+  winRate: real("win_rate").notNull(),        // 0-1
+  grossPnl: real("gross_pnl").notNull(),
+  totalFees: real("total_fees").notNull(),
+  netPnl: real("net_pnl").notNull(),
+  edgePct: real("edge_pct").notNull(),        // avg edge per trade %
+  meetsTarget: integer("meets_target", { mode: "boolean" }).notNull(), // winRate >= 0.65 && edge >= 0.03
 });
 
 // Bot settings
@@ -73,9 +92,12 @@ export const insertStrategySchema = createInsertSchema(strategies).omit({ id: tr
 export const insertTradeLogSchema = createInsertSchema(tradeLogs).omit({ id: true });
 export const insertWatchlistSchema = createInsertSchema(watchlist).omit({ id: true });
 export const insertBotSettingSchema = createInsertSchema(botSettings).omit({ id: true });
+export const insertBacktestRunSchema = createInsertSchema(backtestRuns).omit({ id: true });
 
 // Types
 export type Strategy = typeof strategies.$inferSelect;
+export type BacktestRun = typeof backtestRuns.$inferSelect;
+export type InsertBacktestRun = z.infer<typeof insertBacktestRunSchema>;
 export type InsertStrategy = z.infer<typeof insertStrategySchema>;
 export type TradeLog = typeof tradeLogs.$inferSelect;
 export type InsertTradeLog = z.infer<typeof insertTradeLogSchema>;

@@ -9,6 +9,7 @@ import {
   Sun,
   Moon,
   Activity,
+  FlaskConical,
 } from "lucide-react";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -19,6 +20,7 @@ const navItems = [
   { path: "/strategies", label: "Strategies", icon: Bot },
   { path: "/trades", label: "Trade Log", icon: History },
   { path: "/watchlist", label: "Watchlist", icon: Star },
+  { path: "/backtest", label: "Backtest", icon: FlaskConical },
   { path: "/settings", label: "Settings", icon: Settings },
 ];
 

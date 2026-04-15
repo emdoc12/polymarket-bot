@@ -3,6 +3,7 @@ import {
   type TradeLog, type InsertTradeLog, tradeLogs,
   type Watchlist, type InsertWatchlist, watchlist,
   type BotSetting, type InsertBotSetting, botSettings,
+  type BacktestRun, type InsertBacktestRun, backtestRuns,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
@@ -83,6 +84,27 @@ function runMigrations() {
   if (!logColNames.has("pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN pnl REAL;");
   if (!logColNames.has("pnl_percent")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN pnl_percent REAL;");
   if (!logColNames.has("closed_at")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN closed_at TEXT;");
+  if (!logColNames.has("fee_paid")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN fee_paid REAL;");
+  if (!logColNames.has("net_pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN net_pnl REAL;");
+
+  // Backtest runs table
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS backtest_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      strategy_name TEXT NOT NULL,
+      ran_at TEXT NOT NULL,
+      period_days INTEGER NOT NULL,
+      total_trades INTEGER NOT NULL,
+      wins INTEGER NOT NULL,
+      losses INTEGER NOT NULL,
+      win_rate REAL NOT NULL,
+      gross_pnl REAL NOT NULL,
+      total_fees REAL NOT NULL,
+      net_pnl REAL NOT NULL,
+      edge_pct REAL NOT NULL,
+      meets_target INTEGER NOT NULL
+    );
+  `);
 }
 
 runMigrations();
@@ -114,6 +136,10 @@ export interface IStorage {
   getSetting(key: string): string | undefined;
   setSetting(key: string, value: string): void;
   getAllSettings(): BotSetting[];
+
+  // Backtest runs
+  saveBacktestRun(run: InsertBacktestRun): BacktestRun;
+  getBacktestRuns(strategyName?: string): BacktestRun[];
 }
 
 export class DatabaseStorage implements IStorage {
@@ -221,6 +247,19 @@ export class DatabaseStorage implements IStorage {
 
   getAllSettings(): BotSetting[] {
     return db.select().from(botSettings).all();
+  }
+
+  saveBacktestRun(run: InsertBacktestRun): BacktestRun {
+    return db.insert(backtestRuns).values(run).returning().get();
+  }
+
+  getBacktestRuns(strategyName?: string): BacktestRun[] {
+    if (strategyName) {
+      return db.select().from(backtestRuns)
+        .where(eq(backtestRuns.strategyName, strategyName))
+        .orderBy(desc(backtestRuns.id)).all();
+    }
+    return db.select().from(backtestRuns).orderBy(desc(backtestRuns.id)).all();
   }
 }
 
