@@ -28,24 +28,85 @@ export async function registerRoutes(
 
   // ===== MARKET DATA (proxied from Polymarket) =====
 
-  // Search/list markets
+  // Search/list markets — uses /events endpoint which supports title search
+  // and contains nested markets with prices. Falls back to /markets for browsing.
   app.get("/api/markets", async (req, res) => {
     try {
-      const limit = (req.query.limit as string) || "20";
+      const limit = (req.query.limit as string) || "30";
       const offset = (req.query.offset as string) || "0";
-      const params: Record<string, string> = {
-        limit, offset, active: "true", closed: "false",
-      };
-      if (req.query.tag) params.tag = req.query.tag as string;
-      if (req.query.search) {
-        // Use the public search endpoint for text queries
-        const searchData = await polyFetch(GAMMA_API, "/public-search", {
-          query: req.query.search as string,
-          limit,
-        });
-        res.json(searchData);
+      const search = req.query.search as string | undefined;
+
+      if (search) {
+        // Use events endpoint — only one that supports text search via title param
+        const eventsData = await polyFetch(GAMMA_API, "/events", {
+          limit: "50",
+          offset: "0",
+          active: "true",
+          closed: "false",
+          title: search,
+        }) as any[];
+
+        // Flatten events -> markets, then also client-filter by search term
+        const markets: any[] = [];
+        const term = search.toLowerCase();
+        for (const event of (Array.isArray(eventsData) ? eventsData : [])) {
+          const eventMarkets: any[] = event.markets || [];
+          for (const m of eventMarkets) {
+            if (
+              m.question?.toLowerCase().includes(term) ||
+              event.title?.toLowerCase().includes(term)
+            ) {
+              markets.push(m);
+            }
+          }
+          // If event matches and has no individual markets listed, add event-level data
+          if (eventMarkets.length === 0 && event.title?.toLowerCase().includes(term)) {
+            markets.push({
+              id: event.id,
+              question: event.title,
+              conditionId: event.markets?.[0]?.conditionId || "",
+              outcomePrices: null,
+              outcomes: null,
+              clobTokenIds: null,
+              volume: event.volume,
+              volumeNum: parseFloat(event.volume || "0"),
+              endDate: event.endDate,
+              image: event.image,
+            });
+          }
+        }
+
+        // If events search returned nothing, fall back to fetching all markets
+        // and filtering client-side
+        if (markets.length === 0) {
+          const allMarkets = await polyFetch(GAMMA_API, "/markets", {
+            limit: "200",
+            offset: "0",
+            active: "true",
+            closed: "false",
+            order: "volumeNum",
+            ascending: "false",
+          }) as any[];
+          const filtered = (Array.isArray(allMarkets) ? allMarkets : []).filter(
+            (m: any) => m.question?.toLowerCase().includes(term)
+          );
+          res.json(filtered);
+          return;
+        }
+
+        res.json(markets);
         return;
       }
+
+      // No search — return top markets sorted by volume
+      const params: Record<string, string> = {
+        limit,
+        offset,
+        active: "true",
+        closed: "false",
+        order: "volumeNum",
+        ascending: "false",
+      };
       const data = await polyFetch(GAMMA_API, "/markets", params);
       res.json(data);
     } catch (e: any) {
