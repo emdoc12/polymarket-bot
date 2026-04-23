@@ -23,6 +23,13 @@ type EngineStatus = {
   currentMarketEndsAt: string | null;
   currentYesPrice: number | null;
   currentNoPrice: number | null;
+  strategyDiagnostics: {
+    strategyId: number;
+    strategyName: string;
+    outcome: string;
+    detail: string;
+    checkedAt: string | null;
+  }[];
 };
 
 export default function Dashboard() {
@@ -250,6 +257,43 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
+          </div>
+
+          <div className="rounded-lg border border-border/60 bg-muted/20 p-4">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <p className="text-sm font-medium">Per-Strategy Diagnostics</p>
+              <p className="text-[11px] text-muted-foreground">
+                {engine?.strategyDiagnostics?.[0]?.checkedAt
+                  ? `Updated ${new Date(engine.strategyDiagnostics[0].checkedAt).toLocaleTimeString()}`
+                  : "No scan yet"}
+              </p>
+            </div>
+
+            {!engine?.strategyDiagnostics || engine.strategyDiagnostics.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Enable a strategy to see per-candle diagnostics here.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {engine.strategyDiagnostics.map((item) => (
+                  <div
+                    key={item.strategyId}
+                    className="flex items-start justify-between gap-3 rounded-md bg-background/70 px-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">{item.strategyName}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{item.detail}</p>
+                    </div>
+                    <Badge
+                      variant={diagnosticVariant(item.outcome)}
+                      className="shrink-0 text-[10px] uppercase tracking-wide"
+                    >
+                      {item.outcome.replace(/_/g, " ")}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -485,6 +529,13 @@ function MonitorStat({
       </div>
     </div>
   );
+}
+
+function diagnosticVariant(outcome: string): "default" | "secondary" | "destructive" | "outline" {
+  if (outcome === "entered") return "default";
+  if (outcome === "error") return "destructive";
+  if (outcome === "no_signal" || outcome === "pending_scan") return "outline";
+  return "secondary";
 }
 
 function StatusBadge({ status }: { status: string }) {

@@ -56,6 +56,13 @@ type EngineRuntimeState = {
   currentYesPrice: number | null;
   currentNoPrice: number | null;
   openTrades: number;
+  strategyDiagnostics: {
+    strategyId: number;
+    strategyName: string;
+    outcome: string;
+    detail: string;
+    checkedAt: string | null;
+  }[];
 };
 
 const FIXED_STRATEGIES = [
@@ -152,6 +159,7 @@ const engineState: EngineRuntimeState = {
   currentYesPrice: null,
   currentNoPrice: null,
   openTrades: 0,
+  strategyDiagnostics: [],
 };
 
 async function polyFetch(baseUrl: string, path: string, params?: Record<string, string>) {
@@ -567,6 +575,14 @@ async function runEngineOnce() {
   }
 
   const strategies = storage.getStrategies().filter((strategy) => strategy.isActive);
+  const checkedAt = new Date().toISOString();
+  engineState.strategyDiagnostics = strategies.map((strategy) => ({
+    strategyId: strategy.id,
+    strategyName: strategy.name,
+    outcome: "pending_scan",
+    detail: "Waiting for engine evaluation",
+    checkedAt,
+  }));
   if (strategies.length === 0) {
     engineState.lastPollOutcome = "idle_no_active_strategies";
     return;
@@ -600,6 +616,7 @@ async function runEngineOnce() {
   let lastSkipReason = "scanned_no_signal";
 
   for (const strategy of strategies) {
+    const diagnostic = engineState.strategyDiagnostics.find((item) => item.strategyId === strategy.id);
     try {
       storage.updateStrategy(strategy.id, {
         currentConditionId: market.conditionId,
@@ -608,6 +625,10 @@ async function runEngineOnce() {
 
       if (storage.getOpenTradeByStrategyAndCondition(strategy.id, market.conditionId)) {
         lastSkipReason = `${strategy.name}: already_open_for_current_market`;
+        if (diagnostic) {
+          diagnostic.outcome = "already_open";
+          diagnostic.detail = "Trade already open for this BTC candle";
+        }
         continue;
       }
 
@@ -615,6 +636,10 @@ async function runEngineOnce() {
         const cooldownMs = Math.max(1, strategy.cooldownMinutes ?? 1) * 60 * 1000;
         if (Date.now() - new Date(strategy.lastTriggered).getTime() < cooldownMs) {
           lastSkipReason = `${strategy.name}: cooldown_active`;
+          if (diagnostic) {
+            diagnostic.outcome = "cooldown";
+            diagnostic.detail = "Waiting for strategy cooldown to expire";
+          }
           continue;
         }
       }
@@ -624,26 +649,46 @@ async function runEngineOnce() {
       const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
       if (tradesToday >= maxDailyTrades) {
         lastSkipReason = "max_daily_trades_reached";
+        if (diagnostic) {
+          diagnostic.outcome = "limit_reached";
+          diagnostic.detail = "Max daily trades reached";
+        }
         break;
       }
       if (orderSize <= 0) {
         lastSkipReason = `${strategy.name}: invalid_order_size`;
+        if (diagnostic) {
+          diagnostic.outcome = "invalid_size";
+          diagnostic.detail = "Order size must be greater than zero";
+        }
         continue;
       }
       if (openExposure + orderSize > balance) {
         lastSkipReason = `${strategy.name}: insufficient_paper_balance`;
+        if (diagnostic) {
+          diagnostic.outcome = "balance_blocked";
+          diagnostic.detail = "Paper balance would be exceeded";
+        }
         continue;
       }
 
       const signal = await evaluateSignal(strategy, market, snapshot, candles);
       if (!signal) {
         lastSkipReason = `${strategy.name}: no_signal`;
+        if (diagnostic) {
+          diagnostic.outcome = "no_signal";
+          diagnostic.detail = "Current BTC candle does not satisfy this strategy";
+        }
         continue;
       }
 
       const entry = chooseEntryFromSignal(signal.side, snapshot);
       if (!entry.tokenId || !Number.isFinite(entry.price) || entry.price <= 0) {
         lastSkipReason = `${strategy.name}: invalid_entry_snapshot`;
+        if (diagnostic) {
+          diagnostic.outcome = "bad_snapshot";
+          diagnostic.detail = "Missing token or midpoint for entry";
+        }
         continue;
       }
 
@@ -674,7 +719,15 @@ async function runEngineOnce() {
       engineState.lastSignalStrategy = strategy.name;
       engineState.lastSignalReason = signal.reason;
       engineState.openTrades = storage.getOpenTrades().length;
+      if (diagnostic) {
+        diagnostic.outcome = "entered";
+        diagnostic.detail = signal.reason;
+      }
     } catch {
+      if (diagnostic) {
+        diagnostic.outcome = "error";
+        diagnostic.detail = "Strategy evaluation failed";
+      }
       continue;
     }
   }
@@ -1260,6 +1313,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       currentMarketEndsAt: engineState.currentMarketEndsAt,
       currentYesPrice: engineState.currentYesPrice,
       currentNoPrice: engineState.currentNoPrice,
+      strategyDiagnostics: engineState.strategyDiagnostics,
     });
   });
 
