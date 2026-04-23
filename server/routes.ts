@@ -61,8 +61,18 @@ type EngineRuntimeState = {
     strategyName: string;
     outcome: string;
     detail: string;
+    score: number | null;
     checkedAt: string | null;
   }[];
+  managerDecision: {
+    chosenStrategyId: number | null;
+    chosenStrategyName: string | null;
+    action: string | null;
+    side: "YES" | "NO" | null;
+    score: number | null;
+    reason: string | null;
+    decidedAt: string | null;
+  };
 };
 
 const FIXED_STRATEGIES = [
@@ -160,6 +170,15 @@ const engineState: EngineRuntimeState = {
   currentNoPrice: null,
   openTrades: 0,
   strategyDiagnostics: [],
+  managerDecision: {
+    chosenStrategyId: null,
+    chosenStrategyName: null,
+    action: null,
+    side: null,
+    score: null,
+    reason: null,
+    decidedAt: null,
+  },
 };
 
 async function polyFetch(baseUrl: string, path: string, params?: Record<string, string>) {
@@ -503,7 +522,12 @@ async function evaluateSignal(
     const triggerPrice = Number(config.triggerPrice ?? strategy.triggerPrice ?? 0.48);
     const threshold = Number(config.momentumThreshold ?? 0.65);
     if (yesPrice <= triggerPrice && momentum >= threshold && lastThreeGreen) {
-      return { side: "YES" as const, reason: `Momentum ${momentum.toFixed(2)} with YES at ${(yesPrice * 100).toFixed(1)}%` };
+      const edge = Math.max(0, triggerPrice - yesPrice);
+      return {
+        side: "YES" as const,
+        score: momentum * 0.7 + edge * 8,
+        reason: `Momentum ${momentum.toFixed(2)} with YES at ${(yesPrice * 100).toFixed(1)}%`,
+      };
     }
     return null;
   }
@@ -517,10 +541,18 @@ async function evaluateSignal(
     const threshold = Number(config.imbalanceThreshold ?? 0.18);
     const maxEntryPrice = Number(config.maxEntryPrice ?? 0.56);
     if (imbalance >= threshold && yesPrice <= maxEntryPrice) {
-      return { side: "YES" as const, reason: `YES bid imbalance ${imbalance.toFixed(2)}` };
+      return {
+        side: "YES" as const,
+        score: Math.abs(imbalance) * 1.6 + Math.max(0, maxEntryPrice - yesPrice) * 4,
+        reason: `YES bid imbalance ${imbalance.toFixed(2)}`,
+      };
     }
     if (imbalance <= -threshold && noPrice <= maxEntryPrice) {
-      return { side: "NO" as const, reason: `NO bid imbalance ${imbalance.toFixed(2)}` };
+      return {
+        side: "NO" as const,
+        score: Math.abs(imbalance) * 1.6 + Math.max(0, maxEntryPrice - noPrice) * 4,
+        reason: `NO bid imbalance ${imbalance.toFixed(2)}`,
+      };
     }
     return null;
   }
@@ -537,7 +569,11 @@ async function evaluateSignal(
     const reboundThreshold = Number(config.reboundThreshold ?? 0.0025);
     const downtrend = redBars / window.length >= 0.5;
     if (yesPrice <= triggerPrice && rebound >= reboundThreshold && (!multiSourceVerify || downtrend)) {
-      return { side: "YES" as const, reason: `Rebound ${rebound.toFixed(4)} with YES at ${(yesPrice * 100).toFixed(1)}%` };
+      return {
+        side: "YES" as const,
+        score: rebound * 120 + Math.max(0, triggerPrice - yesPrice) * 6,
+        reason: `Rebound ${rebound.toFixed(4)} with YES at ${(yesPrice * 100).toFixed(1)}%`,
+      };
     }
     return null;
   }
@@ -551,10 +587,18 @@ async function evaluateSignal(
     const threshold = Number(config.spotMoveThreshold ?? 0.002);
     const maxEntryPrice = Number(config.maxEntryPrice ?? 0.6);
     if (delta >= threshold && yesPrice <= maxEntryPrice) {
-      return { side: "YES" as const, reason: `Spot delta +${(delta * 100).toFixed(2)}% with YES lagging` };
+      return {
+        side: "YES" as const,
+        score: delta * 140 + Math.max(0, maxEntryPrice - yesPrice) * 4,
+        reason: `Spot delta +${(delta * 100).toFixed(2)}% with YES lagging`,
+      };
     }
     if (delta <= -threshold && noPrice <= maxEntryPrice) {
-      return { side: "NO" as const, reason: `Spot delta ${(delta * 100).toFixed(2)}% with NO lagging` };
+      return {
+        side: "NO" as const,
+        score: Math.abs(delta) * 140 + Math.max(0, maxEntryPrice - noPrice) * 4,
+        reason: `Spot delta ${(delta * 100).toFixed(2)}% with NO lagging`,
+      };
     }
     return null;
   }
@@ -581,8 +625,18 @@ async function runEngineOnce() {
     strategyName: strategy.name,
     outcome: "pending_scan",
     detail: "Waiting for engine evaluation",
+    score: null,
     checkedAt,
   }));
+  engineState.managerDecision = {
+    chosenStrategyId: null,
+    chosenStrategyName: null,
+    action: null,
+    side: null,
+    score: null,
+    reason: null,
+    decidedAt: checkedAt,
+  };
   if (strategies.length === 0) {
     engineState.lastPollOutcome = "idle_no_active_strategies";
     return;
@@ -614,6 +668,12 @@ async function runEngineOnce() {
   let openExposure = getOpenExposure();
   let openedTrade = false;
   let lastSkipReason = "scanned_no_signal";
+  const recommendations: Array<{
+    strategy: Strategy;
+    diagnostic: NonNullable<EngineRuntimeState["strategyDiagnostics"]>[number] | undefined;
+    signal: { side: "YES" | "NO"; score: number; reason: string };
+    orderSize: number;
+  }> = [];
 
   for (const strategy of strategies) {
     const diagnostic = engineState.strategyDiagnostics.find((item) => item.strategyId === strategy.id);
@@ -628,6 +688,7 @@ async function runEngineOnce() {
         if (diagnostic) {
           diagnostic.outcome = "already_open";
           diagnostic.detail = "Trade already open for this BTC candle";
+          diagnostic.score = null;
         }
         continue;
       }
@@ -636,12 +697,13 @@ async function runEngineOnce() {
         const cooldownMs = Math.max(1, strategy.cooldownMinutes ?? 1) * 60 * 1000;
         if (Date.now() - new Date(strategy.lastTriggered).getTime() < cooldownMs) {
           lastSkipReason = `${strategy.name}: cooldown_active`;
-          if (diagnostic) {
-            diagnostic.outcome = "cooldown";
-            diagnostic.detail = "Waiting for strategy cooldown to expire";
-          }
-          continue;
+        if (diagnostic) {
+          diagnostic.outcome = "cooldown";
+          diagnostic.detail = "Waiting for strategy cooldown to expire";
+          diagnostic.score = null;
         }
+        continue;
+      }
       }
 
       const requestedSize = Number(parseStrategyConfig(strategy).orderSize ?? strategy.orderSize ?? 10);
@@ -652,6 +714,7 @@ async function runEngineOnce() {
         if (diagnostic) {
           diagnostic.outcome = "limit_reached";
           diagnostic.detail = "Max daily trades reached";
+          diagnostic.score = null;
         }
         break;
       }
@@ -660,6 +723,7 @@ async function runEngineOnce() {
         if (diagnostic) {
           diagnostic.outcome = "invalid_size";
           diagnostic.detail = "Order size must be greater than zero";
+          diagnostic.score = null;
         }
         continue;
       }
@@ -668,6 +732,7 @@ async function runEngineOnce() {
         if (diagnostic) {
           diagnostic.outcome = "balance_blocked";
           diagnostic.detail = "Paper balance would be exceeded";
+          diagnostic.score = null;
         }
         continue;
       }
@@ -678,59 +743,127 @@ async function runEngineOnce() {
         if (diagnostic) {
           diagnostic.outcome = "no_signal";
           diagnostic.detail = "Current BTC candle does not satisfy this strategy";
+          diagnostic.score = null;
         }
         continue;
       }
 
-      const entry = chooseEntryFromSignal(signal.side, snapshot);
+      if (diagnostic) {
+        diagnostic.outcome = "recommended";
+        diagnostic.detail = signal.reason;
+        diagnostic.score = Number(signal.score.toFixed(3));
+      }
+      recommendations.push({ strategy, diagnostic, signal, orderSize });
+    } catch {
+      if (diagnostic) {
+        diagnostic.outcome = "error";
+        diagnostic.detail = "Strategy evaluation failed";
+        diagnostic.score = null;
+      }
+      continue;
+    }
+  }
+
+  if (recommendations.length === 0) {
+    engineState.managerDecision = {
+      chosenStrategyId: null,
+      chosenStrategyName: null,
+      action: "stand_down",
+      side: null,
+      score: null,
+      reason: "No specialist agent produced a valid recommendation",
+      decidedAt: new Date().toISOString(),
+    };
+    engineState.lastPollOutcome = lastSkipReason;
+    return;
+  }
+
+  recommendations.sort((a, b) => b.signal.score - a.signal.score);
+  const winner = recommendations[0];
+  const managerScoreThreshold = 0.62;
+  engineState.managerDecision = {
+    chosenStrategyId: winner.strategy.id,
+    chosenStrategyName: winner.strategy.name,
+    action: winner.signal.score >= managerScoreThreshold ? "enter_trade" : "stand_down",
+    side: winner.signal.side,
+    score: Number(winner.signal.score.toFixed(3)),
+    reason: winner.signal.reason,
+    decidedAt: new Date().toISOString(),
+  };
+
+  for (const recommendation of recommendations) {
+    if (!recommendation.diagnostic) continue;
+    if (recommendation.strategy.id === winner.strategy.id) {
+      recommendation.diagnostic.outcome = winner.signal.score >= managerScoreThreshold ? "manager_selected" : "manager_passed";
+      recommendation.diagnostic.detail = winner.signal.score >= managerScoreThreshold
+        ? `Manager selected this play: ${winner.signal.reason}`
+        : `Best idea, but manager passed: score ${winner.signal.score.toFixed(2)} below threshold`;
+    } else {
+      recommendation.diagnostic.outcome = "manager_rejected";
+      recommendation.diagnostic.detail = `Manager preferred ${winner.strategy.name} (${winner.signal.score.toFixed(2)}) over this setup`;
+    }
+  }
+
+  if (winner.signal.score < managerScoreThreshold) {
+    engineState.lastPollOutcome = "manager_stood_down";
+    return;
+  }
+
+  const diagnostic = winner.diagnostic;
+  try {
+      const entry = chooseEntryFromSignal(winner.signal.side, snapshot);
       if (!entry.tokenId || !Number.isFinite(entry.price) || entry.price <= 0) {
-        lastSkipReason = `${strategy.name}: invalid_entry_snapshot`;
+        lastSkipReason = `${winner.strategy.name}: invalid_entry_snapshot`;
         if (diagnostic) {
           diagnostic.outcome = "bad_snapshot";
-          diagnostic.detail = "Missing token or midpoint for entry";
+          diagnostic.detail = "Missing token or midpoint for manager-selected entry";
+          diagnostic.score = Number(winner.signal.score.toFixed(3));
         }
-        continue;
+        engineState.lastPollOutcome = lastSkipReason;
+        return;
       }
 
       const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
-      const entryFee = calculateTakerFee(orderSize, entry.price, feeRate);
+      const entryFee = calculateTakerFee(winner.orderSize, entry.price, feeRate);
       storage.createTradeLog({
-        strategyId: strategy.id,
-        strategyName: strategy.name,
+        strategyId: winner.strategy.id,
+        strategyName: winner.strategy.name,
         marketId: market.id,
         conditionId: market.conditionId,
         tokenId: entry.tokenId,
         side: entry.side,
         outcome: entry.outcome,
         price: entry.price,
-        size: orderSize,
+        size: winner.orderSize,
         status: "open",
         timestamp: new Date().toISOString(),
-        marketQuestion: market._eventTitle || market.question || strategy.marketQuestion,
+        marketQuestion: market._eventTitle || market.question || winner.strategy.marketQuestion,
         feePaid: entryFee,
-        errorMessage: signal.reason,
+        errorMessage: `Manager chose ${winner.strategy.name}: ${winner.signal.reason}`,
       });
 
-      storage.markStrategyTriggered(strategy.id);
+      storage.markStrategyTriggered(winner.strategy.id);
       tradesToday += 1;
-      openExposure += orderSize;
+      openExposure += winner.orderSize;
       openedTrade = true;
       engineState.lastSignalAt = new Date().toISOString();
-      engineState.lastSignalStrategy = strategy.name;
-      engineState.lastSignalReason = signal.reason;
+      engineState.lastSignalStrategy = winner.strategy.name;
+      engineState.lastSignalReason = `Manager selected ${winner.strategy.name}: ${winner.signal.reason}`;
       engineState.openTrades = storage.getOpenTrades().length;
       if (diagnostic) {
         diagnostic.outcome = "entered";
-        diagnostic.detail = signal.reason;
+        diagnostic.detail = `Manager entered trade: ${winner.signal.reason}`;
+        diagnostic.score = Number(winner.signal.score.toFixed(3));
       }
     } catch {
       if (diagnostic) {
         diagnostic.outcome = "error";
-        diagnostic.detail = "Strategy evaluation failed";
+        diagnostic.detail = "Manager-selected trade failed during entry";
+        diagnostic.score = Number(winner.signal.score.toFixed(3));
       }
-      continue;
+      engineState.lastPollOutcome = "manager_entry_failed";
+      return;
     }
-  }
 
   engineState.lastPollOutcome = openedTrade ? "opened_paper_trade" : lastSkipReason;
 }
@@ -1314,6 +1447,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       currentYesPrice: engineState.currentYesPrice,
       currentNoPrice: engineState.currentNoPrice,
       strategyDiagnostics: engineState.strategyDiagnostics,
+      managerDecision: engineState.managerDecision,
     });
   });
 

@@ -28,8 +28,18 @@ type EngineStatus = {
     strategyName: string;
     outcome: string;
     detail: string;
+    score: number | null;
     checkedAt: string | null;
   }[];
+  managerDecision: {
+    chosenStrategyId: number | null;
+    chosenStrategyName: string | null;
+    action: string | null;
+    side: "YES" | "NO" | null;
+    score: number | null;
+    reason: string | null;
+    decidedAt: string | null;
+  };
 };
 
 export default function Dashboard() {
@@ -187,9 +197,9 @@ export default function Dashboard() {
             />
             <MonitorStat
               icon={Zap}
-              label="Last Signal"
-              value={engine?.lastSignalStrategy || "—"}
-              detail={engine?.lastSignalReason || "No signal recorded yet"}
+              label="Manager Choice"
+              value={engine?.managerDecision?.chosenStrategyName || "Stand down"}
+              detail={engine?.managerDecision?.reason || "No manager decision yet"}
             />
             <MonitorStat
               icon={Bot}
@@ -206,6 +216,33 @@ export default function Dashboard() {
           </div>
 
           <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
+            <div className="rounded-lg border border-border/60 bg-background/70 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs text-muted-foreground">Manager Agent</p>
+                  <p className="text-sm font-medium mt-1">
+                    {engine?.managerDecision?.action === "enter_trade"
+                      ? `Deploy ${engine.managerDecision.chosenStrategyName}`
+                      : "Stand down"}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {engine?.managerDecision?.reason || "No manager decision yet"}
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <Badge variant={engine?.managerDecision?.action === "enter_trade" ? "default" : "secondary"}>
+                    {engine?.managerDecision?.action?.replace(/_/g, " ") || "idle"}
+                  </Badge>
+                  <p className="text-[11px] text-muted-foreground mt-2 font-mono">
+                    Score {engine?.managerDecision?.score != null ? engine.managerDecision.score.toFixed(2) : "—"}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-mono">
+                    Side {engine?.managerDecision?.side || "—"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-xs text-muted-foreground">Current BTC 5-minute market</p>
@@ -283,6 +320,9 @@ export default function Dashboard() {
                     <div className="min-w-0">
                       <p className="text-sm font-medium">{item.strategyName}</p>
                       <p className="text-xs text-muted-foreground mt-1">{item.detail}</p>
+                      <p className="text-[11px] text-muted-foreground mt-1 font-mono">
+                        Score {item.score != null ? item.score.toFixed(2) : "—"}
+                      </p>
                     </div>
                     <Badge
                       variant={diagnosticVariant(item.outcome)}
