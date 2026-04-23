@@ -1,9 +1,29 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Bot, Activity, DollarSign, Trophy, TrendingDown, ShieldAlert, ShieldCheck, Wifi, Zap } from "lucide-react";
+import { Bot, Activity, DollarSign, Trophy, TrendingDown, ShieldAlert, ShieldCheck, Wifi, Zap, TimerReset, Radar, CircleDot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { TradeLog, Strategy } from "@shared/schema";
+
+type EngineStatus = {
+  running: boolean;
+  mode: string;
+  pollingIntervalSec: number;
+  activeStrategies: number;
+  openTrades: number;
+  circuitBreaker: string;
+  lastPollAt: string | null;
+  lastPollOutcome: string | null;
+  lastSignalAt: string | null;
+  lastSignalStrategy: string | null;
+  lastSignalReason: string | null;
+  currentMarketId: string | null;
+  currentConditionId: string | null;
+  currentMarketQuestion: string | null;
+  currentMarketEndsAt: string | null;
+  currentYesPrice: number | null;
+  currentNoPrice: number | null;
+};
 
 export default function Dashboard() {
   const { data: status } = useQuery<{
@@ -11,7 +31,13 @@ export default function Dashboard() {
     activeStrategies: number;
     totalStrategies: number;
     recentTrades: TradeLog[];
+    openTrades: number;
   }>({ queryKey: ["/api/bot/status"], refetchInterval: 10000 });
+
+  const { data: engine } = useQuery<EngineStatus>({
+    queryKey: ["/api/engine/status"],
+    refetchInterval: 5000,
+  });
 
   const { data: strategies } = useQuery<Strategy[]>({
     queryKey: ["/api/strategies"],
@@ -41,6 +67,9 @@ export default function Dashboard() {
   const paperBalance = pnl?.paperBalance ?? 1000;
   const totalPnl = pnl?.totalPnl ?? 0;
   const startBalance = 1000;
+  const secondsToExpiry = engine?.currentMarketEndsAt
+    ? Math.max(0, Math.floor((new Date(engine.currentMarketEndsAt).getTime() - Date.now()) / 1000))
+    : null;
 
   return (
     <div className="space-y-6">
@@ -123,6 +152,107 @@ export default function Dashboard() {
           icon={Activity}
         />
       </div>
+
+      {/* Engine Monitor */}
+      <Card className="border-primary/20">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Radar className="w-4 h-4 text-primary" />
+              <CardTitle className="text-sm font-medium">Engine Monitor</CardTitle>
+            </div>
+            <Badge variant={engine?.running ? "secondary" : "outline"} className="gap-1.5">
+              <span className={cn(
+                "w-1.5 h-1.5 rounded-full",
+                engine?.running ? "bg-green-400 animate-pulse" : "bg-muted-foreground"
+              )} />
+              {engine?.running ? "Scanning" : "Stopped"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+            <MonitorStat
+              icon={TimerReset}
+              label="Last Poll"
+              value={engine?.lastPollAt ? new Date(engine.lastPollAt).toLocaleTimeString() : "—"}
+              detail={engine?.lastPollOutcome || "No heartbeat yet"}
+            />
+            <MonitorStat
+              icon={Zap}
+              label="Last Signal"
+              value={engine?.lastSignalStrategy || "—"}
+              detail={engine?.lastSignalReason || "No signal recorded yet"}
+            />
+            <MonitorStat
+              icon={Bot}
+              label="Open Paper Trades"
+              value={String(engine?.openTrades ?? status?.openTrades ?? 0)}
+              detail={`${engine?.activeStrategies ?? status?.activeStrategies ?? 0} active strategies`}
+            />
+            <MonitorStat
+              icon={CircleDot}
+              label="Poll Interval"
+              value={engine?.pollingIntervalSec != null ? `${engine.pollingIntervalSec}s` : "—"}
+              detail={engine?.circuitBreaker === "triggered" ? "Circuit breaker active" : "Paper engine ready"}
+            />
+          </div>
+
+          <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground">Current BTC 5-minute market</p>
+                <p className="text-sm font-medium mt-1">
+                  {engine?.currentMarketQuestion || "Waiting for current BTC market"}
+                </p>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-muted-foreground font-mono">
+                  <span>Market: {engine?.currentMarketId ? engine.currentMarketId.slice(0, 12) + "..." : "—"}</span>
+                  <span>Condition: {engine?.currentConditionId ? engine.currentConditionId.slice(0, 12) + "..." : "—"}</span>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <p className="text-xs text-muted-foreground">Time left</p>
+                <p className={cn(
+                  "text-lg font-semibold font-mono mt-1",
+                  secondsToExpiry == null ? "text-muted-foreground"
+                    : secondsToExpiry <= 30 ? "text-loss"
+                    : secondsToExpiry <= 90 ? "text-yellow-400"
+                    : "text-profit"
+                )}>
+                  {secondsToExpiry == null ? "—" : `${secondsToExpiry}s`}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+              <div className="rounded-md bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground">YES Mid</p>
+                <p className="font-mono font-medium mt-1">
+                  {engine?.currentYesPrice != null ? `${(engine.currentYesPrice * 100).toFixed(1)}%` : "—"}
+                </p>
+              </div>
+              <div className="rounded-md bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground">NO Mid</p>
+                <p className="font-mono font-medium mt-1">
+                  {engine?.currentNoPrice != null ? `${(engine.currentNoPrice * 100).toFixed(1)}%` : "—"}
+                </p>
+              </div>
+              <div className="rounded-md bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground">Last Signal Time</p>
+                <p className="font-mono font-medium mt-1">
+                  {engine?.lastSignalAt ? new Date(engine.lastSignalAt).toLocaleTimeString() : "—"}
+                </p>
+              </div>
+              <div className="rounded-md bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground">Last Poll Outcome</p>
+                <p className="font-mono font-medium mt-1 text-[12px] break-words">
+                  {engine?.lastPollOutcome || "—"}
+                </p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Safeguards */}
       <Card className={cn(
@@ -327,6 +457,33 @@ function StatCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function MonitorStat({
+  icon: Icon,
+  label,
+  value,
+  detail,
+}: {
+  icon: typeof Bot;
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/20 p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-xs text-muted-foreground">{label}</p>
+          <p className="text-sm font-semibold mt-1">{value}</p>
+          <p className="text-[11px] text-muted-foreground mt-1">{detail}</p>
+        </div>
+        <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center shrink-0">
+          <Icon className="w-4 h-4 text-primary" />
+        </div>
+      </div>
+    </div>
   );
 }
 

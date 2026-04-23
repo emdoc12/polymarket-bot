@@ -42,6 +42,22 @@ type PriceSnapshot = {
   noBook: any | null;
 };
 
+type EngineRuntimeState = {
+  running: boolean;
+  lastPollAt: string | null;
+  lastPollOutcome: string | null;
+  lastSignalAt: string | null;
+  lastSignalStrategy: string | null;
+  lastSignalReason: string | null;
+  currentMarketId: string | null;
+  currentConditionId: string | null;
+  currentMarketQuestion: string | null;
+  currentMarketEndsAt: string | null;
+  currentYesPrice: number | null;
+  currentNoPrice: number | null;
+  openTrades: number;
+};
+
 const FIXED_STRATEGIES = [
   {
     name: "Last-Second Momentum Snipe",
@@ -121,6 +137,22 @@ const FIXED_STRATEGIES = [
     }),
   },
 ];
+
+const engineState: EngineRuntimeState = {
+  running: true,
+  lastPollAt: null,
+  lastPollOutcome: null,
+  lastSignalAt: null,
+  lastSignalStrategy: null,
+  lastSignalReason: null,
+  currentMarketId: null,
+  currentConditionId: null,
+  currentMarketQuestion: null,
+  currentMarketEndsAt: null,
+  currentYesPrice: null,
+  currentNoPrice: null,
+  openTrades: 0,
+};
 
 async function polyFetch(baseUrl: string, path: string, params?: Record<string, string>) {
   const url = new URL(path, baseUrl);
@@ -526,21 +558,46 @@ async function runEngineOnce() {
   ensurePaperDefaults();
   maybeRollDayStartBalance();
   await settleResolvedTrades();
+  engineState.lastPollAt = new Date().toISOString();
+  engineState.openTrades = storage.getOpenTrades().length;
 
-  if (storage.getSetting("circuit_breaker") === "triggered") return;
+  if (storage.getSetting("circuit_breaker") === "triggered") {
+    engineState.lastPollOutcome = "paused_by_circuit_breaker";
+    return;
+  }
 
   const strategies = storage.getStrategies().filter((strategy) => strategy.isActive);
-  if (strategies.length === 0) return;
+  if (strategies.length === 0) {
+    engineState.lastPollOutcome = "idle_no_active_strategies";
+    return;
+  }
 
   const market = await fetchCurrentBtcCandleMarket();
-  if (!market || !market.conditionId) return;
+  if (!market || !market.conditionId) {
+    engineState.currentMarketId = null;
+    engineState.currentConditionId = null;
+    engineState.currentMarketQuestion = null;
+    engineState.currentMarketEndsAt = null;
+    engineState.currentYesPrice = null;
+    engineState.currentNoPrice = null;
+    engineState.lastPollOutcome = "waiting_for_current_btc_market";
+    return;
+  }
 
   const snapshot = await getPriceSnapshot(market);
   const candles = await fetchRecentBtcCandles(15).catch(() => []);
+  engineState.currentMarketId = market.id;
+  engineState.currentConditionId = market.conditionId;
+  engineState.currentMarketQuestion = market._eventTitle || market.question || "BTC 5-minute market";
+  engineState.currentMarketEndsAt = market.endDate || null;
+  engineState.currentYesPrice = snapshot.yesMid;
+  engineState.currentNoPrice = snapshot.noMid;
   const maxDailyTrades = parseInt(storage.getSetting("max_daily_trades") || "24", 10);
   const maxOrderSize = parseFloat(storage.getSetting("max_order_size") || "25");
   let tradesToday = countTradesToday();
   let openExposure = getOpenExposure();
+  let openedTrade = false;
+  let lastSkipReason = "scanned_no_signal";
 
   for (const strategy of strategies) {
     try {
@@ -550,12 +607,14 @@ async function runEngineOnce() {
       });
 
       if (storage.getOpenTradeByStrategyAndCondition(strategy.id, market.conditionId)) {
+        lastSkipReason = `${strategy.name}: already_open_for_current_market`;
         continue;
       }
 
       if (strategy.lastTriggered) {
         const cooldownMs = Math.max(1, strategy.cooldownMinutes ?? 1) * 60 * 1000;
         if (Date.now() - new Date(strategy.lastTriggered).getTime() < cooldownMs) {
+          lastSkipReason = `${strategy.name}: cooldown_active`;
           continue;
         }
       }
@@ -563,15 +622,30 @@ async function runEngineOnce() {
       const requestedSize = Number(parseStrategyConfig(strategy).orderSize ?? strategy.orderSize ?? 10);
       const orderSize = Math.min(requestedSize, maxOrderSize);
       const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
-      if (tradesToday >= maxDailyTrades) break;
-      if (orderSize <= 0) continue;
-      if (openExposure + orderSize > balance) continue;
+      if (tradesToday >= maxDailyTrades) {
+        lastSkipReason = "max_daily_trades_reached";
+        break;
+      }
+      if (orderSize <= 0) {
+        lastSkipReason = `${strategy.name}: invalid_order_size`;
+        continue;
+      }
+      if (openExposure + orderSize > balance) {
+        lastSkipReason = `${strategy.name}: insufficient_paper_balance`;
+        continue;
+      }
 
       const signal = await evaluateSignal(strategy, market, snapshot, candles);
-      if (!signal) continue;
+      if (!signal) {
+        lastSkipReason = `${strategy.name}: no_signal`;
+        continue;
+      }
 
       const entry = chooseEntryFromSignal(signal.side, snapshot);
-      if (!entry.tokenId || !Number.isFinite(entry.price) || entry.price <= 0) continue;
+      if (!entry.tokenId || !Number.isFinite(entry.price) || entry.price <= 0) {
+        lastSkipReason = `${strategy.name}: invalid_entry_snapshot`;
+        continue;
+      }
 
       const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
       const entryFee = calculateTakerFee(orderSize, entry.price, feeRate);
@@ -595,10 +669,17 @@ async function runEngineOnce() {
       storage.markStrategyTriggered(strategy.id);
       tradesToday += 1;
       openExposure += orderSize;
+      openedTrade = true;
+      engineState.lastSignalAt = new Date().toISOString();
+      engineState.lastSignalStrategy = strategy.name;
+      engineState.lastSignalReason = signal.reason;
+      engineState.openTrades = storage.getOpenTrades().length;
     } catch {
       continue;
     }
   }
+
+  engineState.lastPollOutcome = openedTrade ? "opened_paper_trade" : lastSkipReason;
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -1139,6 +1220,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       recentTrades,
       openTrades: storage.getOpenTrades().length,
       currentMarket: await fetchCurrentBtcCandleMarket().catch(() => null),
+      engine: engineState,
     });
   });
 
@@ -1167,6 +1249,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       activeStrategies: storage.getStrategies().filter((strategy) => strategy.isActive).length,
       openTrades: storage.getOpenTrades().length,
       circuitBreaker: storage.getSetting("circuit_breaker") || "ok",
+      lastPollAt: engineState.lastPollAt,
+      lastPollOutcome: engineState.lastPollOutcome,
+      lastSignalAt: engineState.lastSignalAt,
+      lastSignalStrategy: engineState.lastSignalStrategy,
+      lastSignalReason: engineState.lastSignalReason,
+      currentMarketId: engineState.currentMarketId,
+      currentConditionId: engineState.currentConditionId,
+      currentMarketQuestion: engineState.currentMarketQuestion,
+      currentMarketEndsAt: engineState.currentMarketEndsAt,
+      currentYesPrice: engineState.currentYesPrice,
+      currentNoPrice: engineState.currentNoPrice,
     });
   });
 
