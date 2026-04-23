@@ -93,6 +93,12 @@ docker run -d \
 - Positions stay attached to the market they entered and settle when that candle resolves
 - Active strategies can automatically roll into the next BTC 5-minute market
 
+## Releases
+
+- `master` pushes publish the `latest` container tag
+- Git tags like `v1.5.3` publish matching versioned image tags
+- Bump [`VERSION`](/Users/emdoc12/jedi-poly/VERSION) and `package.json` together before tagging a release
+
 ---
 
 ## Development
