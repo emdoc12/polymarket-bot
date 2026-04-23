@@ -95,8 +95,7 @@ docker run -d \
 
 ## Releases
 
-- `master` pushes publish the `latest` container tag
-- Git tags like `v1.5.3` publish matching versioned image tags
+- Git tags like `v1.5.3` publish both the `latest` container tag and the matching versioned image tag
 - Bump [`VERSION`](/Users/emdoc12/jedi-poly/VERSION) and `package.json` together before tagging a release
 
 ---
