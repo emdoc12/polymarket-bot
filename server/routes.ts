@@ -13,6 +13,7 @@ type PolyMarket = {
   clobTokenIds?: string | null;
   outcomePrices?: string | null;
   outcomes?: string | null;
+  eventStartTime?: string;
   startDate?: string;
   endDate?: string;
   active?: boolean;
@@ -29,6 +30,7 @@ type PolyEvent = {
   id: string;
   title?: string;
   image?: string;
+  eventStartTime?: string;
   startDate?: string;
   endDate?: string;
   volume?: string;
@@ -234,8 +236,9 @@ function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
   const hasMinute = normalized.includes("minute") || normalized.includes("min");
   const hasFive = normalized.includes("5 minute") || normalized.includes("5-minute") || normalized.includes("5 min");
   const hasExplicitTimeRange = /\b\d{1,2}:\d{2}\s?(am|pm)?\s*-\s*\d{1,2}:\d{2}\s?(am|pm)?/i.test(title || "");
-  const durationMs = event.startDate && event.endDate
-    ? new Date(event.endDate).getTime() - new Date(event.startDate).getTime()
+  const effectiveStart = event.eventStartTime || event.startDate;
+  const durationMs = effectiveStart && event.endDate
+    ? new Date(event.endDate).getTime() - new Date(effectiveStart).getTime()
     : null;
   const looksLikeShortRollingWindow = durationMs != null && durationMs > 0 && durationMs <= 6 * 60 * 1000;
   return (
@@ -268,6 +271,7 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
       outcomes: null,
       clobTokenIds: null,
       volumeNum: parseFloat(event.volume || "0"),
+      eventStartTime: event.eventStartTime,
       startDate: event.startDate,
       endDate: event.endDate,
       image: event.image,
@@ -277,6 +281,7 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
   }
   return markets.map((market) => ({
     ...market,
+    eventStartTime: market.eventStartTime || event.eventStartTime,
     startDate: market.startDate || event.startDate,
     _eventTitle: event.title,
     _eventImage: event.image,
@@ -288,8 +293,9 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   const futureMarkets = markets.filter((market) => market.endDate && new Date(market.endDate).getTime() > now);
   const currentlyLive = futureMarkets
     .filter((market) => {
-      if (!market.startDate || !market.endDate) return false;
-      const startMs = new Date(market.startDate).getTime();
+      const effectiveStart = market.eventStartTime || market.startDate;
+      if (!effectiveStart || !market.endDate) return false;
+      const startMs = new Date(effectiveStart).getTime();
       const endMs = new Date(market.endDate).getTime();
       return startMs <= now && now < endMs;
     })
@@ -301,8 +307,8 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
 
   const upcoming = futureMarkets
     .sort((a, b) => {
-      const aStart = new Date(a.startDate || a.endDate || 0).getTime();
-      const bStart = new Date(b.startDate || b.endDate || 0).getTime();
+      const aStart = new Date(a.eventStartTime || a.startDate || a.endDate || 0).getTime();
+      const bStart = new Date(b.eventStartTime || b.startDate || b.endDate || 0).getTime();
       return aStart - bStart;
     });
 
