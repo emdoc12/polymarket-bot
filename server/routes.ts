@@ -543,30 +543,9 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   engineState.marketDebug.selectorCandidates = [];
   engineState.marketDebug.selectorWinner = null;
 
-  const exactTitleMatch = markets.find((market) => {
-    const title = getMarketTitle(market);
-    return title.includes(currentWindow.timeFragment);
-  });
-
-  if (exactTitleMatch) {
-    engineState.marketDebug.selectorWinner = getMarketTitle(exactTitleMatch);
-    return exactTitleMatch;
-  }
-
   const titleTimedMarkets = markets
     .map((market) => ({ market, window: getMarketWindow(market) }))
     .filter((entry) => entry.window != null && entry.window.durationMinutes === 5);
-  engineState.marketDebug.selectorCandidates = titleTimedMarkets
-    .slice(0, 12)
-    .map((entry) => {
-      const window = entry.window!;
-      const distance = currentComparable < window.startComparable
-        ? window.startComparable - currentComparable
-        : currentComparable >= window.endComparable
-          ? currentComparable - window.endComparable
-          : 0;
-      return `${getMarketTitle(entry.market)} | distance=${distance}m`;
-    });
 
   if (titleTimedMarkets.length > 0) {
     const rankedByCurrentBucket = [...titleTimedMarkets].sort((a, b) => {
@@ -588,6 +567,17 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
 
       return b.window!.startComparable - a.window!.startComparable;
     });
+    engineState.marketDebug.selectorCandidates = rankedByCurrentBucket
+      .slice(0, 12)
+      .map((entry) => {
+        const window = entry.window!;
+        const distance = currentComparable < window.startComparable
+          ? window.startComparable - currentComparable
+          : currentComparable >= window.endComparable
+            ? currentComparable - window.endComparable
+            : 0;
+        return `${getMarketTitle(entry.market)} | distance=${distance}m`;
+      });
 
     engineState.marketDebug.selectorWinner = getMarketTitle(rankedByCurrentBucket[0].market);
     return rankedByCurrentBucket[0].market;
