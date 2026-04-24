@@ -1187,6 +1187,79 @@ async function evaluateSignal(
   return null;
 }
 
+function evaluateAgentOpinion(
+  strategy: Strategy,
+  market: PolyMarket,
+  snapshot: PriceSnapshot,
+  candles: any[],
+) {
+  const config = parseStrategyConfig(strategy);
+  const yesPrice = clampProbability(snapshot.yesMid);
+  const noPrice = clampProbability(snapshot.noMid, 1 - yesPrice);
+  const timeLeftMs = market.endDate ? new Date(market.endDate).getTime() - Date.now() : 0;
+  const secondsLeft = Math.max(0, Math.floor(timeLeftMs / 1000));
+  const minSecondsLeft = Number(config.minSecondsLeft ?? 30);
+  if (secondsLeft < minSecondsLeft) return null;
+
+  const window = candles.slice(-8);
+  const firstClose = window[0]?.close ?? null;
+  const lastClose = window[window.length - 1]?.close ?? null;
+  const spotDelta = firstClose && lastClose ? (lastClose - firstClose) / firstClose : 0;
+  const greenRatio = window.length > 0
+    ? window.filter((c: any) => c.close > c.open).length / window.length
+    : 0.5;
+  const yesBidDepth = sumBookSize(snapshot.yesBook?.bids);
+  const noBidDepth = sumBookSize(snapshot.noBook?.bids);
+  const totalDepth = yesBidDepth + noBidDepth;
+  const imbalance = totalDepth > 0 ? (yesBidDepth - noBidDepth) / totalDepth : 0;
+
+  let side: "YES" | "NO" = "YES";
+  let directionalConfidence = 0.5;
+  let thesis = "neutral market read";
+
+  if (strategy.name === "Orderbook Arbitrage & Imbalance") {
+    side = imbalance >= 0 ? "YES" : "NO";
+    directionalConfidence = 0.5 + Math.min(0.32, Math.abs(imbalance) * 0.55);
+    thesis = `${side} book pressure ${imbalance.toFixed(2)}`;
+  } else if (strategy.name === "Oracle Lead Arbitrage") {
+    side = spotDelta >= 0 ? "YES" : "NO";
+    directionalConfidence = 0.5 + Math.min(0.30, Math.abs(spotDelta) * 95);
+    thesis = `${side} spot delta ${(spotDelta * 100).toFixed(2)}%`;
+  } else if (strategy.name === "Last-Second Momentum Snipe") {
+    side = greenRatio >= 0.5 ? "YES" : "NO";
+    directionalConfidence = 0.5 + Math.min(0.24, Math.abs(greenRatio - 0.5) * 0.8 + Math.abs(spotDelta) * 45);
+    thesis = `${side} momentum green ratio ${greenRatio.toFixed(2)}`;
+  } else if (strategy.name === "Spot Correlation Reversion Scalp") {
+    const lows = window.map((c: any) => c.low ?? c.close).filter((value: number) => Number.isFinite(value));
+    const windowLow = lows.length > 0 ? Math.min(...lows) : lastClose;
+    const rebound = windowLow && lastClose ? (lastClose - windowLow) / windowLow : 0;
+    side = rebound >= 0.001 || spotDelta >= 0 ? "YES" : "NO";
+    directionalConfidence = 0.5 + Math.min(0.24, Math.abs(rebound) * 80 + Math.abs(spotDelta) * 50);
+    thesis = `${side} rebound ${(rebound * 100).toFixed(2)}%`;
+  }
+
+  const entryPrice = side === "YES" ? yesPrice : noPrice;
+  const maxAgentEntryPrice = Number(config.maxAgentEntryPrice ?? 0.68);
+  if (entryPrice > maxAgentEntryPrice) return null;
+
+  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const expectedGrossEdge = directionalConfidence - entryPrice;
+  const estimatedFeeDrag = feeRate * (1 - entryPrice);
+  const riskPenalty = entryPrice > 0.78 ? (entryPrice - 0.78) * 0.8 : 0;
+  const score = expectedGrossEdge - estimatedFeeDrag - riskPenalty;
+  const minAgentScore = Number(config.minAgentScore ?? 0.015);
+
+  if (score < minAgentScore) {
+    return null;
+  }
+
+  return {
+    side,
+    score,
+    reason: `${thesis}; confidence ${(directionalConfidence * 100).toFixed(1)}% vs ${(entryPrice * 100).toFixed(1)}% price; edge ${(score * 100).toFixed(1)}% after fees`,
+  };
+}
+
 async function runEngineOnce() {
   ensurePaperDefaults();
   maybeRollDayStartBalance();
@@ -1336,12 +1409,13 @@ async function runEngineOnce() {
         continue;
       }
 
-      const signal = await evaluateSignal(strategy, market, snapshot, candles);
+      const strictSignal = await evaluateSignal(strategy, market, snapshot, candles);
+      const signal = strictSignal ?? evaluateAgentOpinion(strategy, market, snapshot, candles);
       if (!signal) {
         lastSkipReason = `${strategy.name}: no_signal`;
         if (diagnostic) {
           diagnostic.outcome = "no_signal";
-          diagnostic.detail = "Current BTC candle does not satisfy this strategy";
+          diagnostic.detail = "Agent did not find positive edge after fees";
           diagnostic.score = null;
         }
         continue;
@@ -1349,7 +1423,7 @@ async function runEngineOnce() {
 
       if (diagnostic) {
         diagnostic.outcome = "recommended";
-        diagnostic.detail = signal.reason;
+        diagnostic.detail = strictSignal ? signal.reason : `Agentic read: ${signal.reason}`;
         diagnostic.score = Number(signal.score.toFixed(3));
       }
       recommendations.push({ strategy, diagnostic, signal, orderSize });
@@ -1379,7 +1453,7 @@ async function runEngineOnce() {
 
   recommendations.sort((a, b) => b.signal.score - a.signal.score);
   const winner = recommendations[0];
-  const managerScoreThreshold = 0.48;
+  const managerScoreThreshold = 0.015;
   engineState.managerDecision = {
     chosenStrategyId: winner.strategy.id,
     chosenStrategyName: winner.strategy.name,
