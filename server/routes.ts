@@ -1244,7 +1244,10 @@ function evaluateAgentOpinion(
 
   const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
   const expectedGrossEdge = directionalConfidence - entryPrice;
-  const estimatedFeeDrag = feeRate * (1 - entryPrice);
+  const estimatedEntryFeeDrag = feeRate * (1 - entryPrice);
+  const estimatedExitPrice = clampProbability(directionalConfidence);
+  const estimatedExitFeeDrag = feeRate * estimatedExitPrice * (1 - estimatedExitPrice) / entryPrice;
+  const estimatedFeeDrag = estimatedEntryFeeDrag + estimatedExitFeeDrag;
   const riskPenalty = entryPrice > 0.78 ? (entryPrice - 0.78) * 0.8 : 0;
   const score = expectedGrossEdge - estimatedFeeDrag - riskPenalty;
   const minAgentScore = Number(config.minAgentScore ?? 0.015);
@@ -1256,7 +1259,7 @@ function evaluateAgentOpinion(
   return {
     side,
     score,
-    reason: `${thesis}; confidence ${(directionalConfidence * 100).toFixed(1)}% vs ${(entryPrice * 100).toFixed(1)}% price; edge ${(score * 100).toFixed(1)}% after fees`,
+    reason: `${thesis}; confidence ${(directionalConfidence * 100).toFixed(1)}% vs ${(entryPrice * 100).toFixed(1)}% price; edge ${(score * 100).toFixed(1)}% after round-trip fees`,
   };
 }
 
