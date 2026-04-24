@@ -322,6 +322,7 @@ function getCurrentEtWindowTarget() {
     day: easternNow.day,
     bucketStart,
     bucketEnd,
+    timeFragment: `${formatEtClockFromMinutes(bucketStart)}-${formatEtClockFromMinutes(bucketEnd)} ET`,
     titleFragment: `${easternNow.monthName} ${easternNow.day}, ${formatEtClockFromMinutes(bucketStart)}-${formatEtClockFromMinutes(bucketEnd)} ET`,
   };
 }
@@ -337,15 +338,41 @@ function parseBtcTitleWindow(title?: string) {
   const endMinutes = parseClockToMinutes(match[4].toUpperCase());
   if (!month || startMinutes == null || endMinutes == null) return null;
   const year = easternNow.year;
+  const nowMinutes = parseClockToMinutes(
+    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
+  ) ?? 0;
+  let normalizedStart = startMinutes;
+  let normalizedEnd = endMinutes;
+  if (normalizedEnd <= normalizedStart) {
+    normalizedEnd += 1440;
+  }
+  const candidateOffsets = [-1440, 0, 1440];
+  let bestStart = normalizedStart;
+  let bestEnd = normalizedEnd;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const offset of candidateOffsets) {
+    const candidateStart = normalizedStart + offset;
+    const candidateEnd = normalizedEnd + offset;
+    let distance = 0;
+    if (nowMinutes < candidateStart) distance = candidateStart - nowMinutes;
+    else if (nowMinutes >= candidateEnd) distance = nowMinutes - candidateEnd;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestStart = candidateStart;
+      bestEnd = candidateEnd;
+    }
+  }
   return {
     year,
     month,
     day,
     startMinutes,
     endMinutes,
-    durationMinutes: endMinutes - startMinutes,
-    startComparable: getComparableEtMinute(year, month, day, startMinutes),
-    endComparable: getComparableEtMinute(year, month, day, endMinutes),
+    normalizedStartMinutes: bestStart,
+    normalizedEndMinutes: bestEnd,
+    durationMinutes: normalizedEnd - normalizedStart,
+    startComparable: bestStart,
+    endComparable: bestEnd,
   };
 }
 
@@ -360,8 +387,7 @@ function getTitleWindowTimeLeftSec(title?: string) {
   const nowMinutes = parseClockToMinutes(
     `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
   ) ?? 0;
-  const nowComparable = getComparableEtMinute(easternNow.year, monthNameToNumber(easternNow.monthName), easternNow.day, nowMinutes);
-  const secondsLeft = ((window.endComparable - nowComparable) * 60) - easternNow.second;
+  const secondsLeft = ((window.normalizedEndMinutes - nowMinutes) * 60) - easternNow.second;
   return Math.max(0, secondsLeft);
 }
 
@@ -426,18 +452,12 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
 }
 
 function pickCurrentOrNextMarket(markets: PolyMarket[]) {
-  const now = Date.now();
   const currentWindow = getCurrentEtWindowTarget();
-  const currentComparable = getComparableEtMinute(
-    currentWindow.year,
-    currentWindow.month,
-    currentWindow.day,
-    currentWindow.bucketStart,
-  );
+  const currentComparable = currentWindow.bucketStart;
 
   const exactTitleMatch = markets.find((market) => {
     const title = getMarketTitle(market);
-    return title.includes(currentWindow.titleFragment);
+    return title.includes(currentWindow.timeFragment);
   });
 
   if (exactTitleMatch) {
@@ -450,7 +470,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
 
   const liveByTitle = titleTimedMarkets
     .filter((entry) => entry.window!.startComparable <= currentComparable && currentComparable < entry.window!.endComparable)
-    .sort((a, b) => entrySortByEnd(a.market, b.market));
+    .sort((a, b) => a.window!.endComparable - b.window!.endComparable);
 
   if (liveByTitle.length > 0) {
     return liveByTitle[0].market;
@@ -464,6 +484,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     return upcomingByTitle[0].market;
   }
 
+  const now = Date.now();
   const futureMarkets = markets.filter((market) => market.endDate && new Date(market.endDate).getTime() > now);
   const currentlyLive = futureMarkets
     .filter((market) => {
