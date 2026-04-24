@@ -73,6 +73,10 @@ type EngineRuntimeState = {
     reason: string | null;
     decidedAt: string | null;
   };
+  marketDebug: {
+    matchedEventTitles: string[];
+    btcCandidateTitles: string[];
+  };
 };
 
 const FIXED_STRATEGIES = [
@@ -179,6 +183,10 @@ const engineState: EngineRuntimeState = {
     reason: null,
     decidedAt: null,
   },
+  marketDebug: {
+    matchedEventTitles: [],
+    btcCandidateTitles: [],
+  },
 };
 
 async function polyFetch(baseUrl: string, path: string, params?: Record<string, string>) {
@@ -218,10 +226,23 @@ function parseStrategyConfig(strategy: Strategy): Record<string, number> {
 
 function eventLooksLikeRollingBtcCandle(title?: string) {
   const normalized = (title || "").toLowerCase();
+  const hasBtc = normalized.includes("bitcoin") || normalized.includes("btc");
+  const hasUpDown = normalized.includes("up") && normalized.includes("down");
+  const hasMinute = normalized.includes("minute") || normalized.includes("min");
+  const hasFive = normalized.includes("5 minute") || normalized.includes("5-minute") || normalized.includes("5 min");
   return (
-    normalized.includes("bitcoin") &&
-    (normalized.includes("up or down") || normalized.includes("up/down")) &&
-    normalized.includes("minute")
+    hasBtc &&
+    hasUpDown &&
+    hasMinute &&
+    hasFive
+  );
+}
+
+function eventLooksBtcRelated(title?: string) {
+  const normalized = (title || "").toLowerCase();
+  return (
+    (normalized.includes("bitcoin") || normalized.includes("btc")) &&
+    (normalized.includes("minute") || normalized.includes("min") || normalized.includes("up") || normalized.includes("down"))
   );
 }
 
@@ -266,8 +287,18 @@ async function fetchCurrentBtcCandleMarket() {
     ascending: "false",
   }) as PolyEvent[];
 
-  const candidateMarkets = (Array.isArray(events) ? events : [])
-    .filter((event) => eventLooksLikeRollingBtcCandle(event.title))
+  const allEvents = Array.isArray(events) ? events : [];
+  engineState.marketDebug.btcCandidateTitles = allEvents
+    .filter((event) => eventLooksBtcRelated(event.title))
+    .map((event) => event.title || "")
+    .slice(0, 8);
+
+  const matchedEvents = allEvents.filter((event) => eventLooksLikeRollingBtcCandle(event.title));
+  engineState.marketDebug.matchedEventTitles = matchedEvents
+    .map((event) => event.title || "")
+    .slice(0, 8);
+
+  const candidateMarkets = matchedEvents
     .flatMap(flattenEvent);
 
   const market = pickSoonestEndingMarket(candidateMarkets);
@@ -1448,6 +1479,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       currentNoPrice: engineState.currentNoPrice,
       strategyDiagnostics: engineState.strategyDiagnostics,
       managerDecision: engineState.managerDecision,
+      marketDebug: engineState.marketDebug,
     });
   });
 

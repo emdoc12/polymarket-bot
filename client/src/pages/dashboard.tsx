@@ -40,6 +40,10 @@ type EngineStatus = {
     reason: string | null;
     decidedAt: string | null;
   };
+  marketDebug: {
+    matchedEventTitles: string[];
+    btcCandidateTitles: string[];
+  };
 };
 
 export default function Dashboard() {
@@ -294,6 +298,38 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
+
+            {(engine?.marketDebug?.btcCandidateTitles?.length || engine?.marketDebug?.matchedEventTitles?.length) ? (
+              <div className="rounded-md bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground mb-2">BTC Market Discovery Debug</p>
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-[11px] font-medium text-muted-foreground">Matched rolling titles</p>
+                    {engine?.marketDebug?.matchedEventTitles?.length ? (
+                      <ul className="mt-1 space-y-1 text-xs">
+                        {engine.marketDebug.matchedEventTitles.map((title, index) => (
+                          <li key={`matched-${index}`} className="font-mono break-words">{title}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-muted-foreground mt-1">No exact rolling-title matches yet</p>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-medium text-muted-foreground">BTC-related titles seen</p>
+                    {engine?.marketDebug?.btcCandidateTitles?.length ? (
+                      <ul className="mt-1 space-y-1 text-xs">
+                        {engine.marketDebug.btcCandidateTitles.map((title, index) => (
+                          <li key={`candidate-${index}`} className="font-mono break-words">{title}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-muted-foreground mt-1">No BTC-like event titles returned</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="rounded-lg border border-border/60 bg-muted/20 p-4">
