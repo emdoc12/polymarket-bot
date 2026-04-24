@@ -468,20 +468,28 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     .map((market) => ({ market, window: parseBtcTitleWindow(getMarketTitle(market)) }))
     .filter((entry) => entry.window != null && entry.window.durationMinutes === 5);
 
-  const liveByTitle = titleTimedMarkets
-    .filter((entry) => entry.window!.startComparable <= currentComparable && currentComparable < entry.window!.endComparable)
-    .sort((a, b) => a.window!.endComparable - b.window!.endComparable);
+  if (titleTimedMarkets.length > 0) {
+    const rankedByCurrentBucket = [...titleTimedMarkets].sort((a, b) => {
+      const aLive = a.window!.startComparable <= currentComparable && currentComparable < a.window!.endComparable;
+      const bLive = b.window!.startComparable <= currentComparable && currentComparable < b.window!.endComparable;
+      if (aLive !== bLive) return aLive ? -1 : 1;
 
-  if (liveByTitle.length > 0) {
-    return liveByTitle[0].market;
-  }
+      const aDistance = currentComparable < a.window!.startComparable
+        ? a.window!.startComparable - currentComparable
+        : currentComparable >= a.window!.endComparable
+          ? currentComparable - a.window!.endComparable
+          : 0;
+      const bDistance = currentComparable < b.window!.startComparable
+        ? b.window!.startComparable - currentComparable
+        : currentComparable >= b.window!.endComparable
+          ? currentComparable - b.window!.endComparable
+          : 0;
+      if (aDistance !== bDistance) return aDistance - bDistance;
 
-  const upcomingByTitle = titleTimedMarkets
-    .filter((entry) => entry.window!.endComparable > currentComparable)
-    .sort((a, b) => a.window!.startComparable - b.window!.startComparable);
+      return b.window!.startComparable - a.window!.startComparable;
+    });
 
-  if (upcomingByTitle.length > 0) {
-    return upcomingByTitle[0].market;
+    return rankedByCurrentBucket[0].market;
   }
 
   const now = Date.now();
@@ -516,7 +524,7 @@ function entrySortByEnd(a: PolyMarket, b: PolyMarket) {
 
 async function fetchCurrentBtcCandleMarket() {
   const events = await polyFetch(GAMMA_API, "/events", {
-    limit: "50",
+    limit: "200",
     offset: "0",
     active: "true",
     closed: "false",
