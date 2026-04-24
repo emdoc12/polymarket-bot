@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
-import { Shield, AlertTriangle, DollarSign, TrendingDown, Globe, Zap } from "lucide-react";
+import { Shield, AlertTriangle, DollarSign, TrendingDown, Globe, Zap, Layers } from "lucide-react";
 import type { BotSetting } from "@shared/schema";
 
 export default function SettingsPage() {
@@ -29,6 +29,7 @@ export default function SettingsPage() {
   const [takerFeeRate, setTakerFeeRate] = useState("1.0");
   const [drawdownLimit, setDrawdownLimit] = useState("10");
   const [multiSourceVerify, setMultiSourceVerify] = useState(true);
+  const [enableMultiAssetMarkets, setEnableMultiAssetMarkets] = useState(false);
 
   useEffect(() => {
     if (settings) {
@@ -40,6 +41,7 @@ export default function SettingsPage() {
       setTakerFeeRate((parseFloat(getVal("taker_fee_rate", "0.072")) * 100).toFixed(1));
       setDrawdownLimit((parseFloat(getVal("drawdown_limit", "0.10")) * 100).toFixed(0));
       setMultiSourceVerify(getVal("multi_source_verify", "true") === "true");
+      setEnableMultiAssetMarkets(getVal("enable_multi_asset_markets", "false") === "true");
     }
   }, [settings]);
 
@@ -54,6 +56,7 @@ export default function SettingsPage() {
         ["taker_fee_rate", String(parseFloat(takerFeeRate) / 100)],
         ["drawdown_limit", String(parseFloat(drawdownLimit) / 100)],
         ["multi_source_verify", String(multiSourceVerify)],
+        ["enable_multi_asset_markets", String(enableMultiAssetMarkets)],
       ];
       for (const [key, value] of pairs) {
         await apiRequest("POST", "/api/settings", { key, value });
@@ -189,6 +192,33 @@ export default function SettingsPage() {
               {multiSourceVerify ? "Enabled — spot data must confirm entries" : "Disabled — using Polymarket price action only"}
             </Label>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Market universe */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">Market Universe</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Keep the live paper engine focused on BTC while the wider crypto scanner matures.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={enableMultiAssetMarkets}
+              onCheckedChange={setEnableMultiAssetMarkets}
+            />
+            <Label className="text-xs">
+              {enableMultiAssetMarkets ? "Multi-asset scan enabled" : "BTC-only scan enabled"}
+            </Label>
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            Leave this off for the current test run. When enabled, the scanner can include ETH, SOL, XRP, BNB, DOGE, and HYPE 5-minute markets.
+          </p>
         </CardContent>
       </Card>
 

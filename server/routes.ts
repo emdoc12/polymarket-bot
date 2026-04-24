@@ -6,6 +6,22 @@ import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeL
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const CLOB_API = "https://clob.polymarket.com";
 
+const ROLLING_CRYPTO_MARKETS = [
+  { symbol: "BTC", slugPrefix: "btc-updown-5m", names: ["bitcoin", "btc"] },
+  { symbol: "ETH", slugPrefix: "eth-updown-5m", names: ["ethereum", "eth"] },
+  { symbol: "SOL", slugPrefix: "sol-updown-5m", names: ["solana", "sol"] },
+  { symbol: "XRP", slugPrefix: "xrp-updown-5m", names: ["xrp"] },
+  { symbol: "BNB", slugPrefix: "bnb-updown-5m", names: ["bnb"] },
+  { symbol: "DOGE", slugPrefix: "doge-updown-5m", names: ["dogecoin", "doge"] },
+  { symbol: "HYPE", slugPrefix: "hype-updown-5m", names: ["hyperliquid", "hype"] },
+];
+
+function getRollingCryptoMarketsForScan() {
+  return storage.getSetting("enable_multi_asset_markets") === "true"
+    ? ROLLING_CRYPTO_MARKETS
+    : ROLLING_CRYPTO_MARKETS.slice(0, 1);
+}
+
 type PolyMarket = {
   id: string;
   question?: string;
@@ -24,6 +40,7 @@ type PolyMarket = {
   volumeNum?: number;
   _eventTitle?: string;
   _eventImage?: string;
+  _assetSymbol?: string;
   events?: { title?: string; image?: string }[];
 };
 
@@ -451,7 +468,7 @@ function getMarketWindowTimeLeftSec(market: PolyMarket) {
 function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
   const title = event.title;
   const normalized = (title || "").toLowerCase();
-  const hasBtc = normalized.includes("bitcoin") || normalized.includes("btc");
+  const hasCrypto = getRollingCryptoMarketsForScan().some((asset) => asset.names.some((name) => normalized.includes(name)));
   const hasUpDown = normalized.includes("up") && normalized.includes("down");
   const hasMinute = normalized.includes("minute") || normalized.includes("min");
   const hasFive = normalized.includes("5 minute") || normalized.includes("5-minute") || normalized.includes("5 min");
@@ -462,7 +479,7 @@ function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
     : null;
   const looksLikeShortRollingWindow = durationMs != null && durationMs > 0 && durationMs <= 6 * 60 * 1000;
   return (
-    hasBtc &&
+    hasCrypto &&
     hasUpDown &&
     (
       (hasMinute && hasFive) ||
@@ -475,7 +492,7 @@ function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
 function eventLooksBtcRelated(title?: string) {
   const normalized = (title || "").toLowerCase();
   return (
-    (normalized.includes("bitcoin") || normalized.includes("btc")) &&
+    getRollingCryptoMarketsForScan().some((asset) => asset.names.some((name) => normalized.includes(name))) &&
     (normalized.includes("minute") || normalized.includes("min") || normalized.includes("up") || normalized.includes("down"))
   );
 }
@@ -489,11 +506,17 @@ function marketLooksLikeRollingBtcCandle(market: PolyMarket) {
 
   return titles.some((title) => {
     const normalized = title.toLowerCase();
-    const hasBtc = normalized.includes("bitcoin") || normalized.includes("btc");
+    const hasCrypto = getRollingCryptoMarketsForScan().some((asset) => asset.names.some((name) => normalized.includes(name)));
     const hasUpDown = normalized.includes("up") && normalized.includes("down");
     const window = parseBtcTitleWindow(title);
-    return hasBtc && hasUpDown && window != null && window.durationMinutes === 5;
+    return hasCrypto && hasUpDown && window != null && window.durationMinutes === 5;
   });
+}
+
+function getMarketAssetSymbol(market: PolyMarket) {
+  if (market._assetSymbol) return market._assetSymbol;
+  const title = getMarketTitle(market).toLowerCase();
+  return ROLLING_CRYPTO_MARKETS.find((asset) => asset.names.some((name) => title.includes(name)))?.symbol || "BTC";
 }
 
 function normalizeDirectMarket(market: PolyMarket): PolyMarket {
@@ -507,6 +530,7 @@ function normalizeDirectMarket(market: PolyMarket): PolyMarket {
     ...market,
     _eventTitle: eventTitle || market._eventTitle,
     _eventImage: eventImage || market._eventImage,
+    _assetSymbol: getMarketAssetSymbol({ ...market, _eventTitle: eventTitle || market._eventTitle }),
   };
 }
 
@@ -518,17 +542,19 @@ function getCurrentUtcBucketSeconds(offsetBuckets = 0) {
 async function fetchBtcMarketBySlugBuckets() {
   const offsets = [0, 1, -1, 2];
   const results: PolyMarket[] = [];
-  for (const offset of offsets) {
-    const slug = `btc-updown-5m-${getCurrentUtcBucketSeconds(offset)}`;
-    try {
-      const markets = await polyFetch(GAMMA_API, "/markets", { slug }) as PolyMarket[];
-      if (Array.isArray(markets)) {
-        for (const market of markets) {
-          results.push(normalizeDirectMarket(market));
+  for (const asset of getRollingCryptoMarketsForScan()) {
+    for (const offset of offsets) {
+      const slug = `${asset.slugPrefix}-${getCurrentUtcBucketSeconds(offset)}`;
+      try {
+        const markets = await polyFetch(GAMMA_API, "/markets", { slug }) as PolyMarket[];
+        if (Array.isArray(markets)) {
+          for (const market of markets) {
+            results.push(normalizeDirectMarket({ ...market, _assetSymbol: asset.symbol }));
+          }
         }
+      } catch {
+        continue;
       }
-    } catch {
-      continue;
     }
   }
   return results.filter(marketLooksLikeRollingBtcCandle);
@@ -807,15 +833,20 @@ async function getPriceSnapshot(market: PolyMarket): Promise<PriceSnapshot> {
   };
 }
 
-async function fetchRecentBtcCandles(limit = 15) {
+async function fetchRecentCryptoCandles(symbol = "BTC", limit = 15) {
+  const safeSymbol = /^[A-Z0-9]+$/.test(symbol) ? symbol : "BTC";
   const response = await fetch(
-    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=BTC&tsym=USD&limit=${limit}`,
+    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${safeSymbol}&tsym=USD&limit=${limit}`,
     { signal: AbortSignal.timeout(6000) },
   );
-  if (!response.ok) throw new Error("Failed to fetch BTC spot candles");
+  if (!response.ok) throw new Error(`Failed to fetch ${safeSymbol} spot candles`);
   const data = await response.json();
   const rows = data?.Data?.Data;
   return Array.isArray(rows) ? rows : [];
+}
+
+async function fetchRecentBtcCandles(limit = 15) {
+  return fetchRecentCryptoCandles("BTC", limit);
 }
 
 async function fetchSpotPrice() {
@@ -991,6 +1022,7 @@ function ensurePaperDefaults() {
   if (storage.getSetting("max_order_size") === "25") storage.setSetting("max_order_size", "100");
   if (!storage.getSetting("max_risk_per_trade")) storage.setSetting("max_risk_per_trade", "0.08");
   if (!storage.getSetting("use_percent_sizing")) storage.setSetting("use_percent_sizing", "true");
+  if (!storage.getSetting("enable_multi_asset_markets")) storage.setSetting("enable_multi_asset_markets", "false");
   storage.setSetting("mode", "paper");
 }
 
@@ -1312,7 +1344,7 @@ async function runEngineOnce() {
   }
 
   const snapshot = await getPriceSnapshot(market);
-  const candles = await fetchRecentBtcCandles(15).catch(() => []);
+  const candles = await fetchRecentCryptoCandles(getMarketAssetSymbol(market), 15).catch(() => []);
   const management = manageOpenTradesForCurrentMarket(market, snapshot, strategies);
   engineState.currentMarketId = market.id;
   engineState.currentConditionId = market.conditionId;
