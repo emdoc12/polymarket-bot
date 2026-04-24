@@ -13,6 +13,7 @@ type PolyMarket = {
   clobTokenIds?: string | null;
   outcomePrices?: string | null;
   outcomes?: string | null;
+  startDate?: string;
   endDate?: string;
   active?: boolean;
   closed?: boolean;
@@ -267,6 +268,7 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
       outcomes: null,
       clobTokenIds: null,
       volumeNum: parseFloat(event.volume || "0"),
+      startDate: event.startDate,
       endDate: event.endDate,
       image: event.image,
       _eventTitle: event.title,
@@ -275,16 +277,36 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
   }
   return markets.map((market) => ({
     ...market,
+    startDate: market.startDate || event.startDate,
     _eventTitle: event.title,
     _eventImage: event.image,
   }));
 }
 
-function pickSoonestEndingMarket(markets: PolyMarket[]) {
+function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   const now = Date.now();
-  return markets
-    .filter((market) => market.endDate && new Date(market.endDate).getTime() > now)
-    .sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime())[0] || null;
+  const futureMarkets = markets.filter((market) => market.endDate && new Date(market.endDate).getTime() > now);
+  const currentlyLive = futureMarkets
+    .filter((market) => {
+      if (!market.startDate || !market.endDate) return false;
+      const startMs = new Date(market.startDate).getTime();
+      const endMs = new Date(market.endDate).getTime();
+      return startMs <= now && now < endMs;
+    })
+    .sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime());
+
+  if (currentlyLive.length > 0) {
+    return currentlyLive[0];
+  }
+
+  const upcoming = futureMarkets
+    .sort((a, b) => {
+      const aStart = new Date(a.startDate || a.endDate || 0).getTime();
+      const bStart = new Date(b.startDate || b.endDate || 0).getTime();
+      return aStart - bStart;
+    });
+
+  return upcoming[0] || null;
 }
 
 async function fetchCurrentBtcCandleMarket() {
@@ -311,7 +333,7 @@ async function fetchCurrentBtcCandleMarket() {
   const candidateMarkets = matchedEvents
     .flatMap(flattenEvent);
 
-  const market = pickSoonestEndingMarket(candidateMarkets);
+  const market = pickCurrentOrNextMarket(candidateMarkets);
   if (!market) {
     return null;
   }
