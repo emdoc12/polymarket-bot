@@ -21,6 +21,7 @@ type EngineStatus = {
   currentConditionId: string | null;
   currentMarketQuestion: string | null;
   currentMarketEndsAt: string | null;
+  currentMarketTimeLeftSec: number | null;
   currentYesPrice: number | null;
   currentNoPrice: number | null;
   strategyDiagnostics: {
@@ -88,9 +89,9 @@ export default function Dashboard() {
   const paperBalance = pnl?.paperBalance ?? 1000;
   const totalPnl = pnl?.totalPnl ?? 0;
   const startBalance = 1000;
-  const secondsToExpiry = engine?.currentMarketEndsAt
+  const secondsToExpiry = engine?.currentMarketTimeLeftSec ?? (engine?.currentMarketEndsAt
     ? Math.max(0, Math.floor((new Date(engine.currentMarketEndsAt).getTime() - Date.now()) / 1000))
-    : null;
+    : null);
 
   return (
     <div className="space-y-6">

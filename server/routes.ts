@@ -57,6 +57,7 @@ type EngineRuntimeState = {
   currentConditionId: string | null;
   currentMarketQuestion: string | null;
   currentMarketEndsAt: string | null;
+  currentMarketTimeLeftSec: number | null;
   currentYesPrice: number | null;
   currentNoPrice: number | null;
   openTrades: number;
@@ -176,6 +177,7 @@ const engineState: EngineRuntimeState = {
   currentConditionId: null,
   currentMarketQuestion: null,
   currentMarketEndsAt: null,
+  currentMarketTimeLeftSec: null,
   currentYesPrice: null,
   currentNoPrice: null,
   openTrades: 0,
@@ -256,6 +258,7 @@ function getCurrentEasternParts() {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    second: "2-digit",
     hour12: true,
   });
   const parts = formatter.formatToParts(new Date());
@@ -266,6 +269,7 @@ function getCurrentEasternParts() {
     day: Number(get("day")),
     hour: Number(get("hour")),
     minute: Number(get("minute")),
+    second: Number(get("second")),
     dayPeriod: get("dayPeriod").toUpperCase(),
   };
 }
@@ -334,9 +338,31 @@ function parseBtcTitleWindow(title?: string) {
   if (!month || startMinutes == null || endMinutes == null) return null;
   const year = easternNow.year;
   return {
+    year,
+    month,
+    day,
+    startMinutes,
+    endMinutes,
+    durationMinutes: endMinutes - startMinutes,
     startComparable: getComparableEtMinute(year, month, day, startMinutes),
     endComparable: getComparableEtMinute(year, month, day, endMinutes),
   };
+}
+
+function getMarketTitle(market: PolyMarket) {
+  return market.question || market._eventTitle || "BTC 5-minute market";
+}
+
+function getTitleWindowTimeLeftSec(title?: string) {
+  const window = parseBtcTitleWindow(title);
+  if (!window) return null;
+  const easternNow = getCurrentEasternParts();
+  const nowMinutes = parseClockToMinutes(
+    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
+  ) ?? 0;
+  const nowComparable = getComparableEtMinute(easternNow.year, monthNameToNumber(easternNow.monthName), easternNow.day, nowMinutes);
+  const secondsLeft = ((window.endComparable - nowComparable) * 60) - easternNow.second;
+  return Math.max(0, secondsLeft);
 }
 
 function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
@@ -410,7 +436,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   );
 
   const exactTitleMatch = markets.find((market) => {
-    const title = market.question || market._eventTitle || "";
+    const title = getMarketTitle(market);
     return title.includes(currentWindow.titleFragment);
   });
 
@@ -419,8 +445,8 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   }
 
   const titleTimedMarkets = markets
-    .map((market) => ({ market, window: parseBtcTitleWindow(market.question || market._eventTitle) }))
-    .filter((entry) => entry.window != null);
+    .map((market) => ({ market, window: parseBtcTitleWindow(getMarketTitle(market)) }))
+    .filter((entry) => entry.window != null && entry.window.durationMinutes === 5);
 
   const liveByTitle = titleTimedMarkets
     .filter((entry) => entry.window!.startComparable <= currentComparable && currentComparable < entry.window!.endComparable)
@@ -991,6 +1017,7 @@ async function runEngineOnce() {
     engineState.currentConditionId = null;
     engineState.currentMarketQuestion = null;
     engineState.currentMarketEndsAt = null;
+    engineState.currentMarketTimeLeftSec = null;
     engineState.currentYesPrice = null;
     engineState.currentNoPrice = null;
     engineState.lastPollOutcome = "waiting_for_current_btc_market";
@@ -1002,8 +1029,9 @@ async function runEngineOnce() {
   const management = manageOpenTradesForCurrentMarket(market, snapshot, strategies);
   engineState.currentMarketId = market.id;
   engineState.currentConditionId = market.conditionId;
-  engineState.currentMarketQuestion = market._eventTitle || market.question || "BTC 5-minute market";
+  engineState.currentMarketQuestion = getMarketTitle(market);
   engineState.currentMarketEndsAt = market.endDate || null;
+  engineState.currentMarketTimeLeftSec = getTitleWindowTimeLeftSec(getMarketTitle(market));
   engineState.currentYesPrice = snapshot.yesMid;
   engineState.currentNoPrice = snapshot.noMid;
   engineState.openTrades = storage.getOpenTrades().length;
@@ -1801,6 +1829,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       currentConditionId: engineState.currentConditionId,
       currentMarketQuestion: engineState.currentMarketQuestion,
       currentMarketEndsAt: engineState.currentMarketEndsAt,
+      currentMarketTimeLeftSec: engineState.currentMarketTimeLeftSec,
       currentYesPrice: engineState.currentYesPrice,
       currentNoPrice: engineState.currentNoPrice,
       strategyDiagnostics: engineState.strategyDiagnostics,
