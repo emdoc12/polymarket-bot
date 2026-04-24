@@ -228,6 +228,68 @@ function parseStrategyConfig(strategy: Strategy): Record<string, number> {
   }
 }
 
+function getCurrentEasternParts() {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const parts = formatter.formatToParts(new Date());
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return {
+    year: Number(get("year")),
+    monthName: get("month"),
+    day: Number(get("day")),
+    hour: Number(get("hour")),
+    minute: Number(get("minute")),
+    dayPeriod: get("dayPeriod").toUpperCase(),
+  };
+}
+
+function monthNameToNumber(name: string) {
+  const months = [
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+  ];
+  return months.indexOf(name.toLowerCase()) + 1;
+}
+
+function parseClockToMinutes(raw: string) {
+  const match = raw.trim().match(/^(\d{1,2}):(\d{2})(AM|PM)$/i);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const ampm = match[3].toUpperCase();
+  if (ampm === "AM" && hour === 12) hour = 0;
+  if (ampm === "PM" && hour !== 12) hour += 12;
+  return hour * 60 + minute;
+}
+
+function getComparableEtMinute(year: number, month: number, day: number, minutes: number) {
+  return (((year * 100) + month) * 100 + day) * 1440 + minutes;
+}
+
+function parseBtcTitleWindow(title?: string) {
+  if (!title) return null;
+  const match = title.match(/-\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{1,2}:\d{2}[AP]M)\s*-\s*(\d{1,2}:\d{2}[AP]M)\s*ET/i);
+  if (!match) return null;
+  const easternNow = getCurrentEasternParts();
+  const month = monthNameToNumber(match[1]);
+  const day = Number(match[2]);
+  const startMinutes = parseClockToMinutes(match[3].toUpperCase());
+  const endMinutes = parseClockToMinutes(match[4].toUpperCase());
+  if (!month || startMinutes == null || endMinutes == null) return null;
+  const year = easternNow.year;
+  return {
+    startComparable: getComparableEtMinute(year, month, day, startMinutes),
+    endComparable: getComparableEtMinute(year, month, day, endMinutes),
+  };
+}
+
 function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
   const title = event.title;
   const normalized = (title || "").toLowerCase();
@@ -290,6 +352,34 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
 
 function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   const now = Date.now();
+  const easternNow = getCurrentEasternParts();
+  const currentComparable = getComparableEtMinute(
+    easternNow.year,
+    monthNameToNumber(easternNow.monthName),
+    easternNow.day,
+    parseClockToMinutes(`${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`) ?? 0,
+  );
+
+  const titleTimedMarkets = markets
+    .map((market) => ({ market, window: parseBtcTitleWindow(market.question || market._eventTitle) }))
+    .filter((entry) => entry.window != null);
+
+  const liveByTitle = titleTimedMarkets
+    .filter((entry) => entry.window!.startComparable <= currentComparable && currentComparable < entry.window!.endComparable)
+    .sort((a, b) => entrySortByEnd(a.market, b.market));
+
+  if (liveByTitle.length > 0) {
+    return liveByTitle[0].market;
+  }
+
+  const upcomingByTitle = titleTimedMarkets
+    .filter((entry) => entry.window!.endComparable > currentComparable)
+    .sort((a, b) => a.window!.startComparable - b.window!.startComparable);
+
+  if (upcomingByTitle.length > 0) {
+    return upcomingByTitle[0].market;
+  }
+
   const futureMarkets = markets.filter((market) => market.endDate && new Date(market.endDate).getTime() > now);
   const currentlyLive = futureMarkets
     .filter((market) => {
@@ -299,7 +389,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
       const endMs = new Date(market.endDate).getTime();
       return startMs <= now && now < endMs;
     })
-    .sort((a, b) => new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime());
+    .sort(entrySortByEnd);
 
   if (currentlyLive.length > 0) {
     return currentlyLive[0];
@@ -313,6 +403,10 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     });
 
   return upcoming[0] || null;
+}
+
+function entrySortByEnd(a: PolyMarket, b: PolyMarket) {
+  return new Date(a.endDate || 0).getTime() - new Date(b.endDate || 0).getTime();
 }
 
 async function fetchCurrentBtcCandleMarket() {
