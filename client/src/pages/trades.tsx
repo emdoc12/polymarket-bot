@@ -26,7 +26,51 @@ export default function Trades() {
               </p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+            <div className="space-y-2 p-3 sm:hidden">
+              {trades.map((t) => (
+                <div
+                  key={`trade-card-${t.id}`}
+                  className="rounded-md border border-border/60 bg-muted/20 p-3"
+                  data-testid={`trade-log-card-${t.id}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {t.marketQuestion || t.tokenId.slice(0, 16) + "..."}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground font-mono">
+                        {new Date(t.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+                    <StatusBadge status={t.status} />
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <p className="text-muted-foreground">Action</p>
+                      <p className="font-mono">{t.side} {t.outcome}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Price</p>
+                      <p className="font-mono">{(t.price * 100).toFixed(1)}%</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Size</p>
+                      <p className="font-mono">${t.size.toFixed(2)}</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-3 text-xs">
+                    <span className="text-muted-foreground">{t.strategyName || (t.strategyId ? `#${t.strategyId}` : "—")}</span>
+                    {t.netPnl != null ? (
+                      <span className={t.netPnl >= 0 ? "text-profit font-mono" : "text-loss font-mono"}>
+                        {t.netPnl >= 0 ? "+" : ""}{t.netPnl.toFixed(2)}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto sm:block">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/30">
@@ -76,6 +120,7 @@ export default function Trades() {
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </CardContent>
       </Card>

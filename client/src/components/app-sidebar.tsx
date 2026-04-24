@@ -29,8 +29,8 @@ export function AppSidebar() {
   const { theme, toggleTheme } = useTheme();
 
   return (
-    <aside className="w-56 shrink-0 border-r border-sidebar-border bg-sidebar flex flex-col h-screen sticky top-0">
-      {/* Logo */}
+    <>
+    <aside className="hidden md:flex w-56 shrink-0 border-r border-sidebar-border bg-sidebar flex-col h-screen sticky top-0">
       <div className="px-4 py-4 border-b border-sidebar-border">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
@@ -78,5 +78,29 @@ export function AppSidebar() {
         </button>
       </div>
     </aside>
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-sidebar-border bg-sidebar/95 backdrop-blur supports-[backdrop-filter]:bg-sidebar/80">
+      <div className="grid grid-cols-5 px-1 py-1.5">
+        {navItems.slice(0, 5).map((item) => {
+          const isActive = location === item.path || (item.path !== "/" && location.startsWith(item.path));
+          return (
+            <Link key={item.path} href={item.path}>
+              <div
+                data-testid={`mobile-nav-${item.label.toLowerCase().replace(/\s/g, '-')}`}
+                className={cn(
+                  "flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-md px-1 text-[10px] transition-colors",
+                  isActive
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                    : "text-muted-foreground"
+                )}
+              >
+                <item.icon className="w-4 h-4 shrink-0" />
+                <span className="max-w-full truncate">{item.label.replace("Trade Log", "Trades")}</span>
+              </div>
+            </Link>
+          );
+        })}
+      </div>
+    </nav>
+    </>
   );
 }

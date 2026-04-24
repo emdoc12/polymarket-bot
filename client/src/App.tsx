@@ -39,8 +39,8 @@ function App() {
           <Router hook={useHashLocation}>
             <div className="flex min-h-screen">
               <AppSidebar />
-              <main className="flex-1 p-6 overflow-y-auto">
-                <div className="max-w-5xl mx-auto">
+              <main className="flex-1 overflow-y-auto px-3 pb-24 pt-4 sm:px-5 sm:pb-8 sm:pt-5 lg:p-6">
+                <div className="w-full max-w-5xl mx-auto">
                   <AppRouter />
                 </div>
               </main>

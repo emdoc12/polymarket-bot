@@ -100,7 +100,7 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-xl font-semibold tracking-tight">Dashboard</h2>
           <p className="text-sm text-muted-foreground mt-0.5">
@@ -118,7 +118,7 @@ export default function Dashboard() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {/* Paper Balance */}
         <Card>
           <CardContent className="pt-5 pb-4 px-5">
@@ -197,7 +197,7 @@ export default function Dashboard() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4">
             <MonitorStat
               icon={TimerReset}
               label="Last Poll"
@@ -226,7 +226,7 @@ export default function Dashboard() {
 
           <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
             <div className="rounded-lg border border-border/60 bg-background/70 p-4">
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <p className="text-xs text-muted-foreground">Manager Agent</p>
                   <p className="text-sm font-medium mt-1">
@@ -252,7 +252,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0">
                 <p className="text-xs text-muted-foreground">Current BTC 5-minute market</p>
                 <p className="text-sm font-medium mt-1">
@@ -263,7 +263,7 @@ export default function Dashboard() {
                   <span>Condition: {engine?.currentConditionId ? engine.currentConditionId.slice(0, 12) + "..." : "—"}</span>
                 </div>
               </div>
-              <div className="text-right shrink-0">
+              <div className="shrink-0 text-left sm:text-right">
                 <p className="text-xs text-muted-foreground">Time left</p>
                 <p className={cn(
                   "text-lg font-semibold font-mono mt-1",
@@ -277,7 +277,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
               <div className="rounded-md bg-background/70 p-3">
                 <p className="text-xs text-muted-foreground">YES Mid</p>
                 <p className="font-mono font-medium mt-1">
@@ -370,7 +370,7 @@ export default function Dashboard() {
                 {engine.strategyDiagnostics.map((item) => (
                   <div
                     key={item.strategyId}
-                    className="flex items-start justify-between gap-3 rounded-md bg-background/70 px-3 py-2.5"
+                    className="flex flex-col gap-2 rounded-md bg-background/70 px-3 py-2.5 sm:flex-row sm:items-start sm:justify-between sm:gap-3"
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium">{item.strategyName}</p>
@@ -488,7 +488,7 @@ export default function Dashboard() {
               {activeStrats.map((s) => (
                 <div
                   key={s.id}
-                  className="flex items-center justify-between py-2.5 px-3 rounded-md bg-muted/40"
+                  className="flex flex-col gap-2 py-2.5 px-3 rounded-md bg-muted/40 sm:flex-row sm:items-center sm:justify-between"
                   data-testid={`strategy-row-${s.id}`}
                 >
                   <div className="min-w-0 flex-1">
@@ -497,7 +497,7 @@ export default function Dashboard() {
                       {s.marketQuestion || "No market selected"}
                     </p>
                   </div>
-                  <div className="text-right ml-4 shrink-0">
+                  <div className="shrink-0 text-left sm:ml-4 sm:text-right">
                     <Badge variant="outline" className="text-xs">
                       {s.side} @ {s.triggerType === "price_below" ? "<" : ">"} {(s.triggerPrice * 100).toFixed(0)}%
                     </Badge>
@@ -529,7 +529,7 @@ export default function Dashboard() {
                   key={`activity-${t.id}`}
                   className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5"
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="text-sm font-medium">
@@ -547,7 +547,7 @@ export default function Dashboard() {
                         {t.marketQuestion || t.tokenId.slice(0, 16) + "..."}
                       </p>
                     </div>
-                    <div className="text-right shrink-0">
+                    <div className="shrink-0 text-left sm:text-right">
                       <p className="text-xs font-mono">
                         {new Date(t.timestamp).toLocaleTimeString()}
                       </p>
@@ -582,7 +582,39 @@ export default function Dashboard() {
               No trades logged yet. Simulate a strategy to see results here.
             </p>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+            <div className="space-y-2 sm:hidden">
+              {recentTrades.map((t) => (
+                <div key={`trade-card-${t.id}`} className="rounded-md bg-muted/30 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {t.marketQuestion || t.tokenId.slice(0, 12) + "..."}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground font-mono">
+                        {new Date(t.timestamp).toLocaleTimeString()}
+                      </p>
+                    </div>
+                    <StatusBadge status={t.status} />
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <p className="text-muted-foreground">Side</p>
+                      <p className="font-mono">{t.side} {t.outcome}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Price</p>
+                      <p className="font-mono">{(t.price * 100).toFixed(1)}%</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Size</p>
+                      <p className="font-mono">${t.size.toFixed(2)}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto sm:block">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b text-muted-foreground text-xs">
@@ -622,6 +654,7 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </CardContent>
       </Card>

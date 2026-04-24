@@ -217,8 +217,8 @@ export default function SettingsPage() {
             />
             <span className="text-xs text-muted-foreground">seconds</span>
           </div>
-          <div className="flex items-center gap-3">
-            <Label className="text-xs w-40 shrink-0">Max daily trades</Label>
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+            <Label className="text-xs sm:w-40 sm:shrink-0">Max daily trades</Label>
             <Input
               type="number"
               min="1"
@@ -227,8 +227,8 @@ export default function SettingsPage() {
               className="w-24 font-mono"
             />
           </div>
-          <div className="flex items-center gap-3">
-            <Label className="text-xs w-40 shrink-0">Max order size (USDC)</Label>
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+            <Label className="text-xs sm:w-40 sm:shrink-0">Max order size (USDC)</Label>
             <Input
               type="number"
               min="1"
@@ -237,8 +237,8 @@ export default function SettingsPage() {
               className="w-24 font-mono"
             />
           </div>
-          <div className="flex items-center gap-3">
-            <Label className="text-xs w-40 shrink-0">Max risk per trade</Label>
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+            <Label className="text-xs sm:w-40 sm:shrink-0">Max risk per trade</Label>
             <Input
               type="number"
               min="1"
