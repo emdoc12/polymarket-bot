@@ -269,8 +269,37 @@ function parseClockToMinutes(raw: string) {
   return hour * 60 + minute;
 }
 
+function formatEtClockFromMinutes(totalMinutes: number) {
+  const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+  const hour24 = Math.floor(normalized / 60);
+  const minute = normalized % 60;
+  const ampm = hour24 >= 12 ? "PM" : "AM";
+  let hour12 = hour24 % 12;
+  if (hour12 === 0) hour12 = 12;
+  return `${hour12}:${String(minute).padStart(2, "0")}${ampm}`;
+}
+
 function getComparableEtMinute(year: number, month: number, day: number, minutes: number) {
   return (((year * 100) + month) * 100 + day) * 1440 + minutes;
+}
+
+function getCurrentEtWindowTarget() {
+  const easternNow = getCurrentEasternParts();
+  const month = monthNameToNumber(easternNow.monthName);
+  const nowMinutes = parseClockToMinutes(
+    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
+  ) ?? 0;
+  const bucketStart = Math.floor(nowMinutes / 5) * 5;
+  const bucketEnd = bucketStart + 5;
+  return {
+    year: easternNow.year,
+    month,
+    monthName: easternNow.monthName,
+    day: easternNow.day,
+    bucketStart,
+    bucketEnd,
+    titleFragment: `${easternNow.monthName} ${easternNow.day}, ${formatEtClockFromMinutes(bucketStart)}-${formatEtClockFromMinutes(bucketEnd)} ET`,
+  };
 }
 
 function parseBtcTitleWindow(title?: string) {
@@ -352,13 +381,22 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
 
 function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   const now = Date.now();
-  const easternNow = getCurrentEasternParts();
+  const currentWindow = getCurrentEtWindowTarget();
   const currentComparable = getComparableEtMinute(
-    easternNow.year,
-    monthNameToNumber(easternNow.monthName),
-    easternNow.day,
-    parseClockToMinutes(`${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`) ?? 0,
+    currentWindow.year,
+    currentWindow.month,
+    currentWindow.day,
+    currentWindow.bucketStart,
   );
+
+  const exactTitleMatch = markets.find((market) => {
+    const title = market.question || market._eventTitle || "";
+    return title.includes(currentWindow.titleFragment);
+  });
+
+  if (exactTitleMatch) {
+    return exactTitleMatch;
+  }
 
   const titleTimedMarkets = markets
     .map((market) => ({ market, window: parseBtcTitleWindow(market.question || market._eventTitle) }))
