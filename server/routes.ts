@@ -142,6 +142,11 @@ const FIXED_STRATEGIES = [
       imbalanceThreshold: 0.18,
       maxEntryPrice: 0.56,
       minSecondsLeft: 40,
+      minAgentScore: 0.015,
+      takeProfitPct: 0.012,
+      stopLossPct: 0.01,
+      forceExitSecondsLeft: 18,
+      minHoldSeconds: 8,
       description: "Trade when the BTC 5-minute YES/NO books diverge from fair value and one side is still cheap.",
     }),
   },
@@ -1248,6 +1253,8 @@ function evaluateAgentOpinion(
   let thesis = "neutral market read";
 
   if (strategy.name === "Orderbook Arbitrage & Imbalance") {
+    const threshold = Number(config.imbalanceThreshold ?? 0.18);
+    if (Math.abs(imbalance) < threshold) return null;
     side = imbalance >= 0 ? "YES" : "NO";
     directionalConfidence = 0.5 + Math.min(0.32, Math.abs(imbalance) * 0.55);
     thesis = `${side} book pressure ${imbalance.toFixed(2)}`;
@@ -1269,7 +1276,7 @@ function evaluateAgentOpinion(
   }
 
   const entryPrice = side === "YES" ? yesPrice : noPrice;
-  const maxAgentEntryPrice = Number(config.maxAgentEntryPrice ?? 0.68);
+  const maxAgentEntryPrice = Number(config.maxAgentEntryPrice ?? config.maxEntryPrice ?? 0.68);
   if (entryPrice > maxAgentEntryPrice) return null;
 
   const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");

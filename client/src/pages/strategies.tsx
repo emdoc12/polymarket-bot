@@ -44,12 +44,27 @@ const STRATEGY_META = [
     icon: BookOpen,
     iconColor: "text-blue-400",
     iconBg: "bg-blue-400/10",
-    defaultConfig: { orderSize: 10, imbalanceThreshold: 0.18, maxEntryPrice: 0.56, minSecondsLeft: 40 },
+    defaultConfig: {
+      orderSize: 10,
+      imbalanceThreshold: 0.18,
+      maxEntryPrice: 0.56,
+      minSecondsLeft: 40,
+      minAgentScore: 0.015,
+      takeProfitPct: 0.012,
+      stopLossPct: 0.01,
+      forceExitSecondsLeft: 18,
+      minHoldSeconds: 8,
+    },
     fields: [
       { key: "orderSize", label: "Order size (USDC)", type: "number" },
       { key: "imbalanceThreshold", label: "Imbalance threshold", type: "percent" },
       { key: "maxEntryPrice", label: "Max entry price", type: "percent" },
       { key: "minSecondsLeft", label: "Min seconds left", type: "number" },
+      { key: "minAgentScore", label: "Min edge after fees", type: "percent" },
+      { key: "takeProfitPct", label: "Take profit", type: "percent" },
+      { key: "stopLossPct", label: "Stop loss", type: "percent" },
+      { key: "forceExitSecondsLeft", label: "Force exit under", type: "number" },
+      { key: "minHoldSeconds", label: "Min hold time", type: "number" },
     ],
     description: "Paper-trade the side that still looks underpriced when YES and NO book depth diverge sharply on the current BTC candle.",
   },
@@ -83,6 +98,39 @@ const STRATEGY_META = [
     description: "Paper-trade the lagging side of the BTC candle when spot moves first and the Polymarket price has not caught up yet.",
   },
 ];
+
+const ORDERBOOK_PRESETS: Record<string, Record<string, number>> = {
+  Conservative: {
+    imbalanceThreshold: 0.7,
+    maxEntryPrice: 0.52,
+    minSecondsLeft: 60,
+    minAgentScore: 0.025,
+    takeProfitPct: 0.01,
+    stopLossPct: 0.0075,
+    forceExitSecondsLeft: 25,
+    minHoldSeconds: 10,
+  },
+  Balanced: {
+    imbalanceThreshold: 0.6,
+    maxEntryPrice: 0.54,
+    minSecondsLeft: 45,
+    minAgentScore: 0.018,
+    takeProfitPct: 0.012,
+    stopLossPct: 0.009,
+    forceExitSecondsLeft: 20,
+    minHoldSeconds: 8,
+  },
+  Aggressive: {
+    imbalanceThreshold: 0.48,
+    maxEntryPrice: 0.58,
+    minSecondsLeft: 30,
+    minAgentScore: 0.012,
+    takeProfitPct: 0.015,
+    stopLossPct: 0.012,
+    forceExitSecondsLeft: 15,
+    minHoldSeconds: 6,
+  },
+};
 
 interface LastTrade {
   id: number;
@@ -364,6 +412,26 @@ function StrategySettingsSheet({
         <div className="space-y-4 mt-6 px-1">
           <p className="text-xs text-muted-foreground leading-relaxed">{meta.description}</p>
 
+          {meta.name === "Orderbook Arbitrage & Imbalance" && (
+            <div className="space-y-2">
+              <Label className="text-xs">Preset</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {Object.entries(ORDERBOOK_PRESETS).map(([name, preset]) => (
+                  <Button
+                    key={name}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={() => setConfig((prev) => ({ ...prev, ...preset }))}
+                  >
+                    {name}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="space-y-3">
             {meta.fields.map((field) => (
               <div key={field.key} className="flex items-center gap-3">
@@ -387,6 +455,9 @@ function StrategySettingsSheet({
                     <span className="text-xs text-muted-foreground">%</span>
                   )}
                   {field.key === "minSecondsLeft" && (
+                    <span className="text-xs text-muted-foreground">sec</span>
+                  )}
+                  {(field.key === "forceExitSecondsLeft" || field.key === "minHoldSeconds") && (
                     <span className="text-xs text-muted-foreground">sec</span>
                   )}
                   {field.key === "windowBars" && (
