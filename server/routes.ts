@@ -560,39 +560,52 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     .filter((entry) => entry.window != null && entry.window.durationMinutes === 5);
 
   if (titleTimedMarkets.length > 0) {
+    const getDistance = (entry: (typeof titleTimedMarkets)[number]) => {
+      const window = entry.window!;
+      if (currentComparable < window.startComparable) return window.startComparable - currentComparable;
+      if (currentComparable >= window.endComparable) return currentComparable - window.endComparable;
+      return 0;
+    };
     const rankedByCurrentBucket = [...titleTimedMarkets].sort((a, b) => {
       const aLive = a.window!.startComparable <= currentComparable && currentComparable < a.window!.endComparable;
       const bLive = b.window!.startComparable <= currentComparable && currentComparable < b.window!.endComparable;
       if (aLive !== bLive) return aLive ? -1 : 1;
-
-      const aDistance = currentComparable < a.window!.startComparable
-        ? a.window!.startComparable - currentComparable
-        : currentComparable >= a.window!.endComparable
-          ? currentComparable - a.window!.endComparable
-          : 0;
-      const bDistance = currentComparable < b.window!.startComparable
-        ? b.window!.startComparable - currentComparable
-        : currentComparable >= b.window!.endComparable
-          ? currentComparable - b.window!.endComparable
-          : 0;
+      const aUpcoming = a.window!.startComparable > currentComparable;
+      const bUpcoming = b.window!.startComparable > currentComparable;
+      if (aUpcoming !== bUpcoming) return aUpcoming ? -1 : 1;
+      const aDistance = getDistance(a);
+      const bDistance = getDistance(b);
       if (aDistance !== bDistance) return aDistance - bDistance;
-
       return b.window!.startComparable - a.window!.startComparable;
     });
     engineState.marketDebug.selectorCandidates = rankedByCurrentBucket
       .slice(0, 12)
       .map((entry) => {
-        const window = entry.window!;
-        const distance = currentComparable < window.startComparable
-          ? window.startComparable - currentComparable
-          : currentComparable >= window.endComparable
-            ? currentComparable - window.endComparable
-            : 0;
-        return `${formatTitleWithCurrentEtDate(getMarketTitle(entry.market))} | distance=${distance}m`;
+        const distance = getDistance(entry);
+        const state = entry.window!.startComparable <= currentComparable && currentComparable < entry.window!.endComparable
+          ? "live"
+          : entry.window!.startComparable > currentComparable
+            ? "upcoming"
+            : "expired";
+        return `${formatTitleWithCurrentEtDate(getMarketTitle(entry.market))} | ${state} | distance=${distance}m`;
       });
 
-    engineState.marketDebug.selectorWinner = formatTitleWithCurrentEtDate(getMarketTitle(rankedByCurrentBucket[0].market));
-    return rankedByCurrentBucket[0].market;
+    const liveMarket = rankedByCurrentBucket.find(
+      (entry) => entry.window!.startComparable <= currentComparable && currentComparable < entry.window!.endComparable,
+    );
+    if (liveMarket) {
+      engineState.marketDebug.selectorWinner = formatTitleWithCurrentEtDate(getMarketTitle(liveMarket.market));
+      return liveMarket.market;
+    }
+
+    const upcomingMarket = rankedByCurrentBucket.find((entry) => entry.window!.startComparable > currentComparable);
+    if (upcomingMarket) {
+      engineState.marketDebug.selectorWinner = `waiting_for_live_bucket; next=${formatTitleWithCurrentEtDate(getMarketTitle(upcomingMarket.market))}`;
+      return null;
+    }
+
+    engineState.marketDebug.selectorWinner = "waiting_for_live_bucket; all_candidates_expired";
+    return null;
   }
 
   const now = Date.now();
@@ -651,9 +664,7 @@ async function fetchCurrentBtcCandleMarket() {
       .slice(0, 8);
 
     const directMarket = pickCurrentOrNextMarket(directBtcMarkets);
-    if (directMarket) {
-      return directMarket;
-    }
+    return directMarket;
   }
 
   const events = await polyFetch(GAMMA_API, "/events", {
