@@ -512,6 +512,65 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
+      {/* Strategy Activity */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium">Strategy Activity</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {recentTrades.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">
+              Strategy entries will appear here once the manager opens paper trades.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {recentTrades.slice(0, 8).map((t) => (
+                <div
+                  key={`activity-${t.id}`}
+                  className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium">
+                          {t.strategyName || `Strategy ${t.strategyId ?? "unknown"}`}
+                        </p>
+                        <Badge variant="outline" className="text-[10px]">
+                          {t.side} {t.outcome}
+                        </Badge>
+                        <StatusBadge status={t.status} />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 break-words">
+                        {t.errorMessage || "Paper trade opened by manager"}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground mt-1 font-mono truncate">
+                        {t.marketQuestion || t.tokenId.slice(0, 16) + "..."}
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-mono">
+                        {new Date(t.timestamp).toLocaleTimeString()}
+                      </p>
+                      <p className="text-xs font-mono mt-1">
+                        {(t.price * 100).toFixed(1)}% / ${t.size.toFixed(2)}
+                      </p>
+                      {t.netPnl != null ? (
+                        <p className={cn(
+                          "text-xs font-mono mt-1",
+                          t.netPnl >= 0 ? "text-profit" : "text-loss",
+                        )}>
+                          {t.netPnl >= 0 ? "+" : ""}{t.netPnl.toFixed(2)}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Recent Trade Log */}
       <Card>
         <CardHeader className="pb-3">
