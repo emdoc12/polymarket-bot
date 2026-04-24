@@ -754,6 +754,7 @@ function ensurePaperDefaults() {
   if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "5");
   if (!storage.getSetting("max_daily_trades")) storage.setSetting("max_daily_trades", "24");
   if (!storage.getSetting("max_order_size")) storage.setSetting("max_order_size", "25");
+  if (!storage.getSetting("max_risk_per_trade")) storage.setSetting("max_risk_per_trade", "0.08");
   storage.setSetting("mode", "paper");
 }
 
@@ -1008,6 +1009,7 @@ async function runEngineOnce() {
   engineState.openTrades = storage.getOpenTrades().length;
   const maxDailyTrades = parseInt(storage.getSetting("max_daily_trades") || "24", 10);
   const maxOrderSize = parseFloat(storage.getSetting("max_order_size") || "25");
+  const maxRiskPerTrade = Math.min(0.25, Math.max(0.01, parseFloat(storage.getSetting("max_risk_per_trade") || "0.08")));
   let tradesToday = countTradesToday();
   let openExposure = getOpenExposure();
   let openedTrade = false;
@@ -1058,8 +1060,9 @@ async function runEngineOnce() {
       }
 
       const requestedSize = Number(parseStrategyConfig(strategy).orderSize ?? strategy.orderSize ?? 10);
-      const orderSize = Math.min(requestedSize, maxOrderSize);
       const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+      const riskCapSize = balance * maxRiskPerTrade;
+      const orderSize = Math.min(requestedSize, maxOrderSize, riskCapSize);
       if (tradesToday >= maxDailyTrades) {
         lastSkipReason = "max_daily_trades_reached";
         if (diagnostic) {
@@ -1077,6 +1080,9 @@ async function runEngineOnce() {
           diagnostic.score = null;
         }
         continue;
+      }
+      if (requestedSize > orderSize && diagnostic) {
+        diagnostic.detail = `Sized down to ${orderSize.toFixed(2)} USDC by account risk guardrail`;
       }
       if (openExposure + orderSize > balance) {
         lastSkipReason = `${strategy.name}: insufficient_paper_balance`;

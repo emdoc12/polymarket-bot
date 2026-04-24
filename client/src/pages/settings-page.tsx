@@ -25,6 +25,7 @@ export default function SettingsPage() {
   const [pollingInterval, setPollingInterval] = useState("30");
   const [maxDailyTrades, setMaxDailyTrades] = useState("50");
   const [maxOrderSize, setMaxOrderSize] = useState("100");
+  const [maxRiskPerTrade, setMaxRiskPerTrade] = useState("8");
   const [takerFeeRate, setTakerFeeRate] = useState("1.0");
   const [drawdownLimit, setDrawdownLimit] = useState("10");
   const [multiSourceVerify, setMultiSourceVerify] = useState(true);
@@ -35,6 +36,7 @@ export default function SettingsPage() {
       setPollingInterval(getVal("polling_interval", "5"));
       setMaxDailyTrades(getVal("max_daily_trades", "50"));
       setMaxOrderSize(getVal("max_order_size", "100"));
+      setMaxRiskPerTrade((parseFloat(getVal("max_risk_per_trade", "0.08")) * 100).toFixed(0));
       setTakerFeeRate((parseFloat(getVal("taker_fee_rate", "0.072")) * 100).toFixed(1));
       setDrawdownLimit((parseFloat(getVal("drawdown_limit", "0.10")) * 100).toFixed(0));
       setMultiSourceVerify(getVal("multi_source_verify", "true") === "true");
@@ -48,6 +50,7 @@ export default function SettingsPage() {
         ["polling_interval", pollingInterval],
         ["max_daily_trades", maxDailyTrades],
         ["max_order_size", maxOrderSize],
+        ["max_risk_per_trade", String(parseFloat(maxRiskPerTrade) / 100)],
         ["taker_fee_rate", String(parseFloat(takerFeeRate) / 100)],
         ["drawdown_limit", String(parseFloat(drawdownLimit) / 100)],
         ["multi_source_verify", String(multiSourceVerify)],
@@ -234,6 +237,21 @@ export default function SettingsPage() {
               className="w-24 font-mono"
             />
           </div>
+          <div className="flex items-center gap-3">
+            <Label className="text-xs w-40 shrink-0">Max risk per trade</Label>
+            <Input
+              type="number"
+              min="1"
+              max="25"
+              value={maxRiskPerTrade}
+              onChange={(e) => setMaxRiskPerTrade(e.target.value)}
+              className="w-24 font-mono"
+            />
+            <span className="text-xs text-muted-foreground">% of paper balance</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Every entry is clipped to the smallest of strategy size, max order size, and <span className="font-mono font-medium">{maxRiskPerTrade}% of current balance</span>.
+          </p>
         </CardContent>
       </Card>
 
