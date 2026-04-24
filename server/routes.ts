@@ -338,46 +338,27 @@ function parseBtcTitleWindow(title?: string) {
   const endMinutes = parseClockToMinutes(match[4].toUpperCase());
   if (!month || startMinutes == null || endMinutes == null) return null;
   const year = easternNow.year;
-  const nowMinutes = parseClockToMinutes(
-    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
-  ) ?? 0;
-  let normalizedStart = startMinutes;
-  let normalizedEnd = endMinutes;
-  if (normalizedEnd <= normalizedStart) {
-    normalizedEnd += 1440;
-  }
-  const candidateOffsets = [-1440, 0, 1440];
-  let bestStart = normalizedStart;
-  let bestEnd = normalizedEnd;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const offset of candidateOffsets) {
-    const candidateStart = normalizedStart + offset;
-    const candidateEnd = normalizedEnd + offset;
-    let distance = 0;
-    if (nowMinutes < candidateStart) distance = candidateStart - nowMinutes;
-    else if (nowMinutes >= candidateEnd) distance = nowMinutes - candidateEnd;
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestStart = candidateStart;
-      bestEnd = candidateEnd;
-    }
-  }
+  const normalizedEnd = endMinutes <= startMinutes ? endMinutes + 1440 : endMinutes;
+  const startComparable = getComparableEtMinute(year, month, day, startMinutes);
+  const endComparable = getComparableEtMinute(year, month, day, normalizedEnd);
   return {
     year,
     month,
     day,
     startMinutes,
     endMinutes,
-    normalizedStartMinutes: bestStart,
-    normalizedEndMinutes: bestEnd,
-    durationMinutes: normalizedEnd - normalizedStart,
-    startComparable: bestStart,
-    endComparable: bestEnd,
+    durationMinutes: normalizedEnd - startMinutes,
+    startComparable,
+    endComparable,
   };
 }
 
 function getMarketTitle(market: PolyMarket) {
   return market.question || market._eventTitle || "BTC 5-minute market";
+}
+
+function getMarketWindow(market: PolyMarket) {
+  return parseBtcTitleWindow(market.question) || parseBtcTitleWindow(market._eventTitle);
 }
 
 function getTitleWindowTimeLeftSec(title?: string) {
@@ -387,7 +368,30 @@ function getTitleWindowTimeLeftSec(title?: string) {
   const nowMinutes = parseClockToMinutes(
     `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
   ) ?? 0;
-  const secondsLeft = ((window.normalizedEndMinutes - nowMinutes) * 60) - easternNow.second;
+  const nowComparable = getComparableEtMinute(
+    easternNow.year,
+    monthNameToNumber(easternNow.monthName),
+    easternNow.day,
+    nowMinutes,
+  );
+  const secondsLeft = ((window.endComparable - nowComparable) * 60) - easternNow.second;
+  return Math.max(0, secondsLeft);
+}
+
+function getMarketWindowTimeLeftSec(market: PolyMarket) {
+  const window = getMarketWindow(market);
+  if (!window) return null;
+  const easternNow = getCurrentEasternParts();
+  const nowMinutes = parseClockToMinutes(
+    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
+  ) ?? 0;
+  const nowComparable = getComparableEtMinute(
+    easternNow.year,
+    monthNameToNumber(easternNow.monthName),
+    easternNow.day,
+    nowMinutes,
+  );
+  const secondsLeft = ((window.endComparable - nowComparable) * 60) - easternNow.second;
   return Math.max(0, secondsLeft);
 }
 
@@ -446,6 +450,7 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
     ...market,
     eventStartTime: market.eventStartTime || event.eventStartTime,
     startDate: market.startDate || event.startDate,
+    endDate: market.endDate || event.endDate,
     _eventTitle: event.title,
     _eventImage: event.image,
   }));
@@ -453,7 +458,12 @@ function flattenEvent(event: PolyEvent): PolyMarket[] {
 
 function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   const currentWindow = getCurrentEtWindowTarget();
-  const currentComparable = currentWindow.bucketStart;
+  const currentComparable = getComparableEtMinute(
+    currentWindow.year,
+    currentWindow.month,
+    currentWindow.day,
+    currentWindow.bucketStart,
+  );
 
   const exactTitleMatch = markets.find((market) => {
     const title = getMarketTitle(market);
@@ -465,7 +475,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   }
 
   const titleTimedMarkets = markets
-    .map((market) => ({ market, window: parseBtcTitleWindow(getMarketTitle(market)) }))
+    .map((market) => ({ market, window: getMarketWindow(market) }))
     .filter((entry) => entry.window != null && entry.window.durationMinutes === 5);
 
   if (titleTimedMarkets.length > 0) {
@@ -1060,7 +1070,7 @@ async function runEngineOnce() {
   engineState.currentConditionId = market.conditionId;
   engineState.currentMarketQuestion = getMarketTitle(market);
   engineState.currentMarketEndsAt = market.endDate || null;
-  engineState.currentMarketTimeLeftSec = getTitleWindowTimeLeftSec(getMarketTitle(market));
+  engineState.currentMarketTimeLeftSec = getMarketWindowTimeLeftSec(market);
   engineState.currentYesPrice = snapshot.yesMid;
   engineState.currentNoPrice = snapshot.noMid;
   engineState.openTrades = storage.getOpenTrades().length;
