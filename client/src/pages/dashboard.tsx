@@ -44,6 +44,9 @@ type EngineStatus = {
   marketDebug: {
     matchedEventTitles: string[];
     btcCandidateTitles: string[];
+    selectorTarget: string | null;
+    selectorCandidates: string[];
+    selectorWinner: string | null;
   };
 };
 
@@ -304,6 +307,20 @@ export default function Dashboard() {
               <div className="rounded-md bg-background/70 p-3">
                 <p className="text-xs text-muted-foreground mb-2">BTC Market Discovery Debug</p>
                 <div className="space-y-2">
+                  <div>
+                    <p className="text-[11px] font-medium text-muted-foreground">Selector decision</p>
+                    <div className="mt-1 space-y-1 text-xs font-mono">
+                      <p>Target: {engine?.marketDebug?.selectorTarget || "—"}</p>
+                      <p>Winner: {engine?.marketDebug?.selectorWinner || "—"}</p>
+                    </div>
+                    {engine?.marketDebug?.selectorCandidates?.length ? (
+                      <ul className="mt-1 space-y-1 text-xs">
+                        {engine.marketDebug.selectorCandidates.map((title, index) => (
+                          <li key={`selector-${index}`} className="font-mono break-words">{title}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
                   <div>
                     <p className="text-[11px] font-medium text-muted-foreground">Matched rolling titles</p>
                     {engine?.marketDebug?.matchedEventTitles?.length ? (

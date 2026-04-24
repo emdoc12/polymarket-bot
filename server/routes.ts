@@ -81,6 +81,9 @@ type EngineRuntimeState = {
   marketDebug: {
     matchedEventTitles: string[];
     btcCandidateTitles: string[];
+    selectorTarget: string | null;
+    selectorCandidates: string[];
+    selectorWinner: string | null;
   };
 };
 
@@ -194,6 +197,9 @@ const engineState: EngineRuntimeState = {
   marketDebug: {
     matchedEventTitles: [],
     btcCandidateTitles: [],
+    selectorTarget: null,
+    selectorCandidates: [],
+    selectorWinner: null,
   },
 };
 
@@ -307,6 +313,19 @@ function getComparableEtMinute(year: number, month: number, day: number, minutes
   return (((year * 100) + month) * 100 + day) * 1440 + minutes;
 }
 
+function getCurrentComparableEtMinute() {
+  const easternNow = getCurrentEasternParts();
+  const nowMinutes = parseClockToMinutes(
+    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
+  ) ?? 0;
+  return getComparableEtMinute(
+    easternNow.year,
+    monthNameToNumber(easternNow.monthName),
+    easternNow.day,
+    nowMinutes,
+  );
+}
+
 function getCurrentEtWindowTarget() {
   const easternNow = getCurrentEasternParts();
   const month = monthNameToNumber(easternNow.monthName);
@@ -338,13 +357,17 @@ function parseBtcTitleWindow(title?: string) {
   const endMinutes = parseClockToMinutes(match[4].toUpperCase());
   if (!month || startMinutes == null || endMinutes == null) return null;
   const year = easternNow.year;
+  const currentEtMonth = monthNameToNumber(easternNow.monthName);
+  const currentEtDay = easternNow.day;
   const normalizedEnd = endMinutes <= startMinutes ? endMinutes + 1440 : endMinutes;
-  const startComparable = getComparableEtMinute(year, month, day, startMinutes);
-  const endComparable = getComparableEtMinute(year, month, day, normalizedEnd);
+  const startComparable = getComparableEtMinute(year, currentEtMonth, currentEtDay, startMinutes);
+  const endComparable = getComparableEtMinute(year, currentEtMonth, currentEtDay, normalizedEnd);
   return {
     year,
     month,
     day,
+    effectiveMonth: currentEtMonth,
+    effectiveDay: currentEtDay,
     startMinutes,
     endMinutes,
     durationMinutes: normalizedEnd - startMinutes,
@@ -354,26 +377,55 @@ function parseBtcTitleWindow(title?: string) {
 }
 
 function getMarketTitle(market: PolyMarket) {
-  return market.question || market._eventTitle || "BTC 5-minute market";
+  const titles = [market.question, market._eventTitle]
+    .filter((title): title is string => Boolean(title));
+  if (titles.length === 0) return "BTC 5-minute market";
+  const currentComparable = getCurrentComparableEtMinute();
+  return titles.sort((a, b) => {
+    const aWindow = parseBtcTitleWindow(a);
+    const bWindow = parseBtcTitleWindow(b);
+    if (!aWindow && !bWindow) return 0;
+    if (!aWindow) return 1;
+    if (!bWindow) return -1;
+    const aDistance = currentComparable < aWindow.startComparable
+      ? aWindow.startComparable - currentComparable
+      : currentComparable >= aWindow.endComparable
+        ? currentComparable - aWindow.endComparable
+        : 0;
+    const bDistance = currentComparable < bWindow.startComparable
+      ? bWindow.startComparable - currentComparable
+      : currentComparable >= bWindow.endComparable
+        ? currentComparable - bWindow.endComparable
+        : 0;
+    return aDistance - bDistance;
+  })[0];
 }
 
 function getMarketWindow(market: PolyMarket) {
-  return parseBtcTitleWindow(market.question) || parseBtcTitleWindow(market._eventTitle);
+  const windows = [parseBtcTitleWindow(market.question), parseBtcTitleWindow(market._eventTitle)]
+    .filter((window) => window != null);
+  if (windows.length === 0) return null;
+  const currentComparable = getCurrentComparableEtMinute();
+  return windows.sort((a, b) => {
+    const aDistance = currentComparable < a!.startComparable
+      ? a!.startComparable - currentComparable
+      : currentComparable >= a!.endComparable
+        ? currentComparable - a!.endComparable
+        : 0;
+    const bDistance = currentComparable < b!.startComparable
+      ? b!.startComparable - currentComparable
+      : currentComparable >= b!.endComparable
+        ? currentComparable - b!.endComparable
+        : 0;
+    return aDistance - bDistance;
+  })[0] || null;
 }
 
 function getTitleWindowTimeLeftSec(title?: string) {
   const window = parseBtcTitleWindow(title);
   if (!window) return null;
   const easternNow = getCurrentEasternParts();
-  const nowMinutes = parseClockToMinutes(
-    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
-  ) ?? 0;
-  const nowComparable = getComparableEtMinute(
-    easternNow.year,
-    monthNameToNumber(easternNow.monthName),
-    easternNow.day,
-    nowMinutes,
-  );
+  const nowComparable = getCurrentComparableEtMinute();
   const secondsLeft = ((window.endComparable - nowComparable) * 60) - easternNow.second;
   return Math.max(0, secondsLeft);
 }
@@ -382,15 +434,7 @@ function getMarketWindowTimeLeftSec(market: PolyMarket) {
   const window = getMarketWindow(market);
   if (!window) return null;
   const easternNow = getCurrentEasternParts();
-  const nowMinutes = parseClockToMinutes(
-    `${easternNow.hour}:${String(easternNow.minute).padStart(2, "0")}${easternNow.dayPeriod}`,
-  ) ?? 0;
-  const nowComparable = getComparableEtMinute(
-    easternNow.year,
-    monthNameToNumber(easternNow.monthName),
-    easternNow.day,
-    nowMinutes,
-  );
+  const nowComparable = getCurrentComparableEtMinute();
   const secondsLeft = ((window.endComparable - nowComparable) * 60) - easternNow.second;
   return Math.max(0, secondsLeft);
 }
@@ -464,6 +508,9 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     currentWindow.day,
     currentWindow.bucketStart,
   );
+  engineState.marketDebug.selectorTarget = currentWindow.timeFragment;
+  engineState.marketDebug.selectorCandidates = [];
+  engineState.marketDebug.selectorWinner = null;
 
   const exactTitleMatch = markets.find((market) => {
     const title = getMarketTitle(market);
@@ -471,12 +518,24 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
   });
 
   if (exactTitleMatch) {
+    engineState.marketDebug.selectorWinner = getMarketTitle(exactTitleMatch);
     return exactTitleMatch;
   }
 
   const titleTimedMarkets = markets
     .map((market) => ({ market, window: getMarketWindow(market) }))
     .filter((entry) => entry.window != null && entry.window.durationMinutes === 5);
+  engineState.marketDebug.selectorCandidates = titleTimedMarkets
+    .slice(0, 12)
+    .map((entry) => {
+      const window = entry.window!;
+      const distance = currentComparable < window.startComparable
+        ? window.startComparable - currentComparable
+        : currentComparable >= window.endComparable
+          ? currentComparable - window.endComparable
+          : 0;
+      return `${getMarketTitle(entry.market)} | distance=${distance}m`;
+    });
 
   if (titleTimedMarkets.length > 0) {
     const rankedByCurrentBucket = [...titleTimedMarkets].sort((a, b) => {
@@ -499,6 +558,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
       return b.window!.startComparable - a.window!.startComparable;
     });
 
+    engineState.marketDebug.selectorWinner = getMarketTitle(rankedByCurrentBucket[0].market);
     return rankedByCurrentBucket[0].market;
   }
 
@@ -515,6 +575,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     .sort(entrySortByEnd);
 
   if (currentlyLive.length > 0) {
+    engineState.marketDebug.selectorWinner = getMarketTitle(currentlyLive[0]);
     return currentlyLive[0];
   }
 
@@ -525,6 +586,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
       return aStart - bStart;
     });
 
+  engineState.marketDebug.selectorWinner = upcoming[0] ? getMarketTitle(upcoming[0]) : null;
   return upcoming[0] || null;
 }
 
