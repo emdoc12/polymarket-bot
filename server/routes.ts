@@ -24,6 +24,7 @@ type PolyMarket = {
   volumeNum?: number;
   _eventTitle?: string;
   _eventImage?: string;
+  events?: { title?: string; image?: string }[];
 };
 
 type PolyEvent = {
@@ -471,6 +472,36 @@ function eventLooksBtcRelated(title?: string) {
   );
 }
 
+function marketLooksLikeRollingBtcCandle(market: PolyMarket) {
+  const titles = [
+    market.question,
+    market._eventTitle,
+    ...(Array.isArray(market.events) ? market.events.map((event) => event.title) : []),
+  ].filter((title): title is string => Boolean(title));
+
+  return titles.some((title) => {
+    const normalized = title.toLowerCase();
+    const hasBtc = normalized.includes("bitcoin") || normalized.includes("btc");
+    const hasUpDown = normalized.includes("up") && normalized.includes("down");
+    const window = parseBtcTitleWindow(title);
+    return hasBtc && hasUpDown && window != null && window.durationMinutes === 5;
+  });
+}
+
+function normalizeDirectMarket(market: PolyMarket): PolyMarket {
+  const eventTitle = Array.isArray(market.events)
+    ? market.events.find((event) => event.title)?.title
+    : undefined;
+  const eventImage = Array.isArray(market.events)
+    ? market.events.find((event) => event.image)?.image
+    : undefined;
+  return {
+    ...market,
+    _eventTitle: eventTitle || market._eventTitle,
+    _eventImage: eventImage || market._eventImage,
+  };
+}
+
 function flattenEvent(event: PolyEvent): PolyMarket[] {
   const markets = Array.isArray(event.markets) ? event.markets : [];
   if (markets.length === 0) {
@@ -595,6 +626,34 @@ function entrySortByEnd(a: PolyMarket, b: PolyMarket) {
 }
 
 async function fetchCurrentBtcCandleMarket() {
+  const directMarkets = await polyFetch(GAMMA_API, "/markets", {
+    limit: "250",
+    offset: "0",
+    active: "true",
+    closed: "false",
+    order: "createdAt",
+    ascending: "false",
+  }).catch(() => []) as PolyMarket[];
+
+  const normalizedDirectMarkets = (Array.isArray(directMarkets) ? directMarkets : [])
+    .map(normalizeDirectMarket);
+  const directBtcMarkets = normalizedDirectMarkets.filter(marketLooksLikeRollingBtcCandle);
+
+  if (directBtcMarkets.length > 0) {
+    engineState.marketDebug.btcCandidateTitles = normalizedDirectMarkets
+      .filter((market) => eventLooksBtcRelated(getMarketTitle(market)))
+      .map((market) => getMarketTitle(market))
+      .slice(0, 8);
+    engineState.marketDebug.matchedEventTitles = directBtcMarkets
+      .map((market) => getMarketTitle(market))
+      .slice(0, 8);
+
+    const directMarket = pickCurrentOrNextMarket(directBtcMarkets);
+    if (directMarket) {
+      return directMarket;
+    }
+  }
+
   const events = await polyFetch(GAMMA_API, "/events", {
     limit: "200",
     offset: "0",
