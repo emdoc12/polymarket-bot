@@ -57,6 +57,7 @@ type EngineRuntimeState = {
   currentMarketId: string | null;
   currentConditionId: string | null;
   currentMarketQuestion: string | null;
+  currentMarketRawQuestion: string | null;
   currentMarketEndsAt: string | null;
   currentMarketTimeLeftSec: number | null;
   currentYesPrice: number | null;
@@ -180,6 +181,7 @@ const engineState: EngineRuntimeState = {
   currentMarketId: null,
   currentConditionId: null,
   currentMarketQuestion: null,
+  currentMarketRawQuestion: null,
   currentMarketEndsAt: null,
   currentMarketTimeLeftSec: null,
   currentYesPrice: null,
@@ -375,6 +377,16 @@ function parseBtcTitleWindow(title?: string) {
     startComparable,
     endComparable,
   };
+}
+
+function formatTitleWithCurrentEtDate(title: string) {
+  const window = parseBtcTitleWindow(title);
+  if (!window) return title;
+  const easternNow = getCurrentEasternParts();
+  return title.replace(
+    /-\s*[A-Za-z]+\s+\d{1,2},\s*(\d{1,2}:\d{2}[AP]M)\s*-\s*(\d{1,2}:\d{2}[AP]M)\s*ET/i,
+    `- ${easternNow.monthName} ${easternNow.day}, $1-$2 ET`,
+  );
 }
 
 function getMarketTitle(market: PolyMarket) {
@@ -576,10 +588,10 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
           : currentComparable >= window.endComparable
             ? currentComparable - window.endComparable
             : 0;
-        return `${getMarketTitle(entry.market)} | distance=${distance}m`;
+        return `${formatTitleWithCurrentEtDate(getMarketTitle(entry.market))} | distance=${distance}m`;
       });
 
-    engineState.marketDebug.selectorWinner = getMarketTitle(rankedByCurrentBucket[0].market);
+    engineState.marketDebug.selectorWinner = formatTitleWithCurrentEtDate(getMarketTitle(rankedByCurrentBucket[0].market));
     return rankedByCurrentBucket[0].market;
   }
 
@@ -596,7 +608,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
     .sort(entrySortByEnd);
 
   if (currentlyLive.length > 0) {
-    engineState.marketDebug.selectorWinner = getMarketTitle(currentlyLive[0]);
+    engineState.marketDebug.selectorWinner = formatTitleWithCurrentEtDate(getMarketTitle(currentlyLive[0]));
     return currentlyLive[0];
   }
 
@@ -607,7 +619,7 @@ function pickCurrentOrNextMarket(markets: PolyMarket[]) {
       return aStart - bStart;
     });
 
-  engineState.marketDebug.selectorWinner = upcoming[0] ? getMarketTitle(upcoming[0]) : null;
+  engineState.marketDebug.selectorWinner = upcoming[0] ? formatTitleWithCurrentEtDate(getMarketTitle(upcoming[0])) : null;
   return upcoming[0] || null;
 }
 
@@ -1166,6 +1178,7 @@ async function runEngineOnce() {
     engineState.currentMarketId = null;
     engineState.currentConditionId = null;
     engineState.currentMarketQuestion = null;
+    engineState.currentMarketRawQuestion = null;
     engineState.currentMarketEndsAt = null;
     engineState.currentMarketTimeLeftSec = null;
     engineState.currentYesPrice = null;
@@ -1179,7 +1192,8 @@ async function runEngineOnce() {
   const management = manageOpenTradesForCurrentMarket(market, snapshot, strategies);
   engineState.currentMarketId = market.id;
   engineState.currentConditionId = market.conditionId;
-  engineState.currentMarketQuestion = getMarketTitle(market);
+  engineState.currentMarketRawQuestion = getMarketTitle(market);
+  engineState.currentMarketQuestion = formatTitleWithCurrentEtDate(getMarketTitle(market));
   engineState.currentMarketEndsAt = market.endDate || null;
   engineState.currentMarketTimeLeftSec = getMarketWindowTimeLeftSec(market);
   engineState.currentYesPrice = snapshot.yesMid;
@@ -1978,6 +1992,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       currentMarketId: engineState.currentMarketId,
       currentConditionId: engineState.currentConditionId,
       currentMarketQuestion: engineState.currentMarketQuestion,
+      currentMarketRawQuestion: engineState.currentMarketRawQuestion,
       currentMarketEndsAt: engineState.currentMarketEndsAt,
       currentMarketTimeLeftSec: engineState.currentMarketTimeLeftSec,
       currentYesPrice: engineState.currentYesPrice,

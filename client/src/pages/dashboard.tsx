@@ -20,6 +20,7 @@ type EngineStatus = {
   currentMarketId: string | null;
   currentConditionId: string | null;
   currentMarketQuestion: string | null;
+  currentMarketRawQuestion: string | null;
   currentMarketEndsAt: string | null;
   currentMarketTimeLeftSec: number | null;
   currentYesPrice: number | null;
