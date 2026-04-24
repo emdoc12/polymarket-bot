@@ -35,7 +35,7 @@ export default function SettingsPage() {
     if (settings) {
       setMode(getVal("mode", "paper"));
       setPollingInterval(getVal("polling_interval", "5"));
-      setMaxDailyTrades(getVal("max_daily_trades", "50"));
+      setMaxDailyTrades(getVal("max_daily_trades", "0"));
       setMaxOrderSize(getVal("max_order_size", "100"));
       setMaxRiskPerTrade((parseFloat(getVal("max_risk_per_trade", "0.08")) * 100).toFixed(0));
       setTakerFeeRate((parseFloat(getVal("taker_fee_rate", "0.072")) * 100).toFixed(1));
@@ -251,11 +251,12 @@ export default function SettingsPage() {
             <Label className="text-xs sm:w-40 sm:shrink-0">Max daily trades</Label>
             <Input
               type="number"
-              min="1"
+              min="0"
               value={maxDailyTrades}
               onChange={(e) => setMaxDailyTrades(e.target.value)}
               className="w-24 font-mono"
             />
+            <span className="text-xs text-muted-foreground">0 = unlimited</span>
           </div>
           <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
             <Label className="text-xs sm:w-40 sm:shrink-0">Max order size (USDC)</Label>

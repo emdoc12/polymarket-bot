@@ -1017,7 +1017,7 @@ function ensurePaperDefaults() {
   if (!storage.getSetting("circuit_breaker")) storage.setSetting("circuit_breaker", "ok");
   if (!storage.getSetting("multi_source_verify")) storage.setSetting("multi_source_verify", "true");
   if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "5");
-  if (!storage.getSetting("max_daily_trades")) storage.setSetting("max_daily_trades", "24");
+  if (!storage.getSetting("max_daily_trades")) storage.setSetting("max_daily_trades", "0");
   if (!storage.getSetting("max_order_size")) storage.setSetting("max_order_size", "100");
   if (storage.getSetting("max_order_size") === "25") storage.setSetting("max_order_size", "100");
   if (!storage.getSetting("max_risk_per_trade")) storage.setSetting("max_risk_per_trade", "0.08");
@@ -1355,7 +1355,7 @@ async function runEngineOnce() {
   engineState.currentYesPrice = snapshot.yesMid;
   engineState.currentNoPrice = snapshot.noMid;
   engineState.openTrades = storage.getOpenTrades().length;
-  const maxDailyTrades = parseInt(storage.getSetting("max_daily_trades") || "24", 10);
+  const maxDailyTrades = Math.max(0, parseInt(storage.getSetting("max_daily_trades") || "0", 10));
   const maxOrderSize = parseFloat(storage.getSetting("max_order_size") || "25");
   const maxRiskPerTrade = Math.min(0.25, Math.max(0.01, parseFloat(storage.getSetting("max_risk_per_trade") || "0.08")));
   let tradesToday = countTradesToday();
@@ -1413,7 +1413,7 @@ async function runEngineOnce() {
       const usePercentSizing = storage.getSetting("use_percent_sizing") !== "false";
       const requestedSize = usePercentSizing ? riskCapSize : Number(config.orderSize ?? strategy.orderSize ?? riskCapSize);
       const orderSize = Math.min(requestedSize, maxOrderSize, riskCapSize);
-      if (tradesToday >= maxDailyTrades) {
+      if (maxDailyTrades > 0 && tradesToday >= maxDailyTrades) {
         lastSkipReason = "max_daily_trades_reached";
         if (diagnostic) {
           diagnostic.outcome = "limit_reached";
