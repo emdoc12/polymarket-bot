@@ -95,8 +95,8 @@ docker run -d \
 
 ## Releases
 
-- Git tags like `v1.5.3` publish both the `latest` container tag and the matching versioned image tag
-- Bump [`VERSION`](/Users/emdoc12/jedi-poly/VERSION) and `package.json` together before tagging a release
+- Pushes to `master` publish both the `latest` container tag and the current version tag from [`VERSION`](/Users/emdoc12/jedi-poly/VERSION)
+- Put the version number in the commit title, then push to `master`
 
 ---
 
