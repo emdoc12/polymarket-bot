@@ -52,6 +52,17 @@ export default function Backtest() {
     },
   });
 
+  const clearMutation = useMutation({
+    mutationFn: async () => apiRequest("DELETE", "/api/backtest"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/backtest"] });
+      toast({ title: "Backtest history cleared" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Clear failed", description: e.message, variant: "destructive" });
+    },
+  });
+
   const latestByStrategy: Record<string, BacktestRun> = {};
   (runs || []).forEach((r) => {
     if (!latestByStrategy[r.strategyName]) latestByStrategy[r.strategyName] = r;
@@ -59,11 +70,24 @@ export default function Backtest() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Backtest</h2>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Replay each BTC candle strategy against historical BTC minute data with paper-style resolution and fee assumptions.
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">Backtest</h2>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Replay each BTC candle strategy against historical BTC minute data with paper-style resolution and fee assumptions.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="gap-1.5 self-start"
+          onClick={() => clearMutation.mutate()}
+          disabled={clearMutation.isPending || !runs?.length}
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Clear History
+        </Button>
       </div>
 
       {/* Run config */}
@@ -73,6 +97,9 @@ export default function Backtest() {
             <FlaskConical className="w-4 h-4 text-primary" />
             <CardTitle className="text-sm font-medium">Run Backtest</CardTitle>
           </div>
+          <p className="text-xs text-muted-foreground">
+            This is a spot-price proxy, not a replay of historical Polymarket order books.
+          </p>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-4 items-end">

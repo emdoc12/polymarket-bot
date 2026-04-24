@@ -148,6 +148,7 @@ export interface IStorage {
   // Backtest runs
   saveBacktestRun(run: InsertBacktestRun): BacktestRun;
   getBacktestRuns(strategyName?: string): BacktestRun[];
+  clearBacktestRuns(): void;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -282,6 +283,10 @@ export class DatabaseStorage implements IStorage {
         .orderBy(desc(backtestRuns.id)).all();
     }
     return db.select().from(backtestRuns).orderBy(desc(backtestRuns.id)).all();
+  }
+
+  clearBacktestRuns(): void {
+    db.delete(backtestRuns).run();
   }
 }
 

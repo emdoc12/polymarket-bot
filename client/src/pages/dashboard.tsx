@@ -1,8 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Bot, Activity, DollarSign, Trophy, TrendingDown, ShieldAlert, ShieldCheck, Wifi, Zap, TimerReset, Radar, CircleDot } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type { TradeLog, Strategy } from "@shared/schema";
 
 type EngineStatus = {
@@ -52,6 +55,7 @@ type EngineStatus = {
 };
 
 export default function Dashboard() {
+  const { toast } = useToast();
   const { data: status } = useQuery<{
     mode: string;
     activeStrategies: number;
@@ -96,6 +100,17 @@ export default function Dashboard() {
   const secondsToExpiry = engine?.currentMarketTimeLeftSec ?? (engine?.currentMarketEndsAt
     ? Math.max(0, Math.floor((new Date(engine.currentMarketEndsAt).getTime() - Date.now()) / 1000))
     : null);
+  const resetSafeguardsMutation = useMutation({
+    mutationFn: async () => apiRequest("POST", "/api/safeguards/reset"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/safeguards"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
+      toast({ title: "Safeguards reset" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Reset failed", description: e.message, variant: "destructive" });
+    },
+  });
 
   return (
     <div className="space-y-6">
@@ -405,9 +420,22 @@ export default function Dashboard() {
                 : <ShieldCheck className="w-4 h-4 text-profit" />}
               <CardTitle className="text-sm font-medium">Safeguards</CardTitle>
             </div>
-            {safeguards?.circuitBreaker === "triggered" && (
-              <Badge variant="destructive" className="text-[10px]">Circuit Breaker Triggered</Badge>
-            )}
+            <div className="flex items-center gap-2">
+              {safeguards?.circuitBreaker === "triggered" && (
+                <Badge variant="destructive" className="text-[10px]">Circuit Breaker Triggered</Badge>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant={safeguards?.circuitBreaker === "triggered" ? "destructive" : "outline"}
+                className="h-7 gap-1.5 px-2 text-xs"
+                onClick={() => resetSafeguardsMutation.mutate()}
+                disabled={resetSafeguardsMutation.isPending}
+              >
+                <TimerReset className="w-3.5 h-3.5" />
+                Reset
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>

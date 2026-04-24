@@ -2036,10 +2036,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
         const recent = segment.slice(0, 10);
         const future = segment.slice(10);
+        const prior = recent.slice(0, -1);
         const start = recent[recent.length - 1].close;
         const end = future[future.length - 1].close;
-        const delta = start > 0 ? (end - start) / start : 0;
-        const simulatedYesPrice = clampProbability(0.5 - delta * 6);
+        const priorStart = prior[0]?.close ?? start;
+        const recentDelta = priorStart > 0 ? (start - priorStart) / priorStart : 0;
+        const priorClose = prior[prior.length - 1]?.close ?? start;
+        const lastMove = priorClose > 0 ? (start - priorClose) / priorClose : 0;
+        const simulatedYesPrice = clampProbability(0.5 + recentDelta * 8 + lastMove * 12);
         const simulatedNoPrice = clampProbability(1 - simulatedYesPrice);
 
         let side: "YES" | "NO" | null = null;
@@ -2047,13 +2051,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           const greenRatio = recent.filter((c: any) => c.close > c.open).length / recent.length;
           if (greenRatio >= 0.6 && simulatedYesPrice <= 0.48) side = "YES";
         } else if (strategyName === "Orderbook Arbitrage & Imbalance") {
-          if (Math.abs(delta) >= 0.0015) side = delta >= 0 ? "YES" : "NO";
+          if (Math.abs(recentDelta) >= 0.0015) side = recentDelta >= 0 ? "YES" : "NO";
         } else if (strategyName === "Spot Correlation Reversion Scalp") {
           const low = Math.min(...recent.map((c: any) => c.low ?? c.close));
           const rebound = low > 0 ? (recent[recent.length - 1].close - low) / low : 0;
           if (rebound >= 0.0025 && simulatedYesPrice <= 0.46) side = "YES";
         } else if (strategyName === "Oracle Lead Arbitrage") {
-          if (Math.abs(delta) >= 0.002) side = delta >= 0 ? "YES" : "NO";
+          if (Math.abs(lastMove) >= 0.002) side = lastMove >= 0 ? "YES" : "NO";
         }
 
         if (!side) continue;
@@ -2102,6 +2106,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/backtest", (_req, res) => {
     res.json(storage.getBacktestRuns());
+  });
+
+  app.delete("/api/backtest", (_req, res) => {
+    storage.clearBacktestRuns();
+    res.json({ ok: true });
   });
 
   app.get("/api/bot/status", async (_req, res) => {
