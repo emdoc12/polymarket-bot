@@ -28,6 +28,7 @@ type PolyEvent = {
   id: string;
   title?: string;
   image?: string;
+  startDate?: string;
   endDate?: string;
   volume?: string;
   markets?: PolyMarket[];
@@ -224,17 +225,26 @@ function parseStrategyConfig(strategy: Strategy): Record<string, number> {
   }
 }
 
-function eventLooksLikeRollingBtcCandle(title?: string) {
+function eventLooksLikeRollingBtcCandle(event: PolyEvent) {
+  const title = event.title;
   const normalized = (title || "").toLowerCase();
   const hasBtc = normalized.includes("bitcoin") || normalized.includes("btc");
   const hasUpDown = normalized.includes("up") && normalized.includes("down");
   const hasMinute = normalized.includes("minute") || normalized.includes("min");
   const hasFive = normalized.includes("5 minute") || normalized.includes("5-minute") || normalized.includes("5 min");
+  const hasExplicitTimeRange = /\b\d{1,2}:\d{2}\s?(am|pm)?\s*-\s*\d{1,2}:\d{2}\s?(am|pm)?/i.test(title || "");
+  const durationMs = event.startDate && event.endDate
+    ? new Date(event.endDate).getTime() - new Date(event.startDate).getTime()
+    : null;
+  const looksLikeShortRollingWindow = durationMs != null && durationMs > 0 && durationMs <= 6 * 60 * 1000;
   return (
     hasBtc &&
     hasUpDown &&
-    hasMinute &&
-    hasFive
+    (
+      (hasMinute && hasFive) ||
+      hasExplicitTimeRange ||
+      looksLikeShortRollingWindow
+    )
   );
 }
 
@@ -293,7 +303,7 @@ async function fetchCurrentBtcCandleMarket() {
     .map((event) => event.title || "")
     .slice(0, 8);
 
-  const matchedEvents = allEvents.filter((event) => eventLooksLikeRollingBtcCandle(event.title));
+  const matchedEvents = allEvents.filter((event) => eventLooksLikeRollingBtcCandle(event));
   engineState.marketDebug.matchedEventTitles = matchedEvents
     .map((event) => event.title || "")
     .slice(0, 8);
