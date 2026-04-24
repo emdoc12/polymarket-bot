@@ -514,6 +514,30 @@ function normalizeDirectMarket(market: PolyMarket): PolyMarket {
   };
 }
 
+function getCurrentUtcBucketSeconds(offsetBuckets = 0) {
+  const bucketMs = 5 * 60 * 1000;
+  return Math.floor(Date.now() / bucketMs) * 300 + (offsetBuckets * 300);
+}
+
+async function fetchBtcMarketBySlugBuckets() {
+  const offsets = [0, 1, -1, 2];
+  const results: PolyMarket[] = [];
+  for (const offset of offsets) {
+    const slug = `btc-updown-5m-${getCurrentUtcBucketSeconds(offset)}`;
+    try {
+      const markets = await polyFetch(GAMMA_API, "/markets", { slug }) as PolyMarket[];
+      if (Array.isArray(markets)) {
+        for (const market of markets) {
+          results.push(normalizeDirectMarket(market));
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  return results.filter(marketLooksLikeRollingBtcCandle);
+}
+
 function flattenEvent(event: PolyEvent): PolyMarket[] {
   const markets = Array.isArray(event.markets) ? event.markets : [];
   if (markets.length === 0) {
@@ -641,6 +665,21 @@ function entrySortByEnd(a: PolyMarket, b: PolyMarket) {
 }
 
 async function fetchCurrentBtcCandleMarket() {
+  const slugMarkets = await fetchBtcMarketBySlugBuckets();
+  if (slugMarkets.length > 0) {
+    engineState.marketDebug.btcCandidateTitles = slugMarkets
+      .map((market) => getMarketTitle(market))
+      .slice(0, 8);
+    engineState.marketDebug.matchedEventTitles = slugMarkets
+      .map((market) => getMarketTitle(market))
+      .slice(0, 8);
+
+    const slugMarket = pickCurrentOrNextMarket(slugMarkets);
+    if (slugMarket) {
+      return slugMarket;
+    }
+  }
+
   const directMarkets = await polyFetch(GAMMA_API, "/markets", {
     limit: "250",
     offset: "0",
