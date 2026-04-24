@@ -32,7 +32,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (settings) {
       setMode(getVal("mode", "paper"));
-      setPollingInterval(getVal("polling_interval", "30"));
+      setPollingInterval(getVal("polling_interval", "5"));
       setMaxDailyTrades(getVal("max_daily_trades", "50"));
       setMaxOrderSize(getVal("max_order_size", "100"));
       setTakerFeeRate((parseFloat(getVal("taker_fee_rate", "0.072")) * 100).toFixed(1));

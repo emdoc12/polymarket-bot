@@ -83,6 +83,8 @@ type EngineRuntimeState = {
   };
 };
 
+type StrategyRuntimeConfig = Record<string, number>;
+
 const FIXED_STRATEGIES = [
   {
     name: "Last-Second Momentum Snipe",
@@ -226,6 +228,24 @@ function parseStrategyConfig(strategy: Strategy): Record<string, number> {
   } catch {
     return {};
   }
+}
+
+function getStrategyNumberConfig(config: StrategyRuntimeConfig, key: string, fallback: number) {
+  const raw = config[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : fallback;
+}
+
+function getStrategyCooldownMs(strategy: Strategy) {
+  const config = parseStrategyConfig(strategy);
+  const configuredSeconds = getStrategyNumberConfig(config, "cooldownSeconds", NaN);
+  if (Number.isFinite(configuredSeconds)) {
+    return Math.max(2, configuredSeconds) * 1000;
+  }
+  const cooldownMinutes = Math.max(0, strategy.cooldownMinutes ?? 0);
+  if (strategy.autoRoll) {
+    return Math.min(Math.max(5, cooldownMinutes * 60), 15) * 1000;
+  }
+  return Math.max(1, cooldownMinutes) * 60 * 1000;
 }
 
 function getCurrentEasternParts() {
@@ -579,6 +599,127 @@ function calculateTakerFee(stake: number, price: number, feeRate: number) {
   return stake * feeRate * (1 - safePrice);
 }
 
+function getCurrentMarkedPriceForTrade(trade: TradeLog, snapshot: PriceSnapshot) {
+  if (trade.outcome === "YES") return snapshot.yesMid != null ? clampProbability(snapshot.yesMid) : null;
+  if (trade.outcome === "NO") return snapshot.noMid != null ? clampProbability(snapshot.noMid) : null;
+  return null;
+}
+
+function getMarkedTradePnl(trade: TradeLog, markPrice: number, feeRate: number) {
+  const entryPrice = clampProbability(trade.price);
+  const shares = trade.size / entryPrice;
+  const proceeds = shares * clampProbability(markPrice);
+  const grossPnl = proceeds - trade.size;
+  const entryFee = trade.feePaid ?? calculateTakerFee(trade.size, entryPrice, feeRate);
+  const exitFee = calculateTakerFee(proceeds, markPrice, feeRate);
+  const netPnl = grossPnl - entryFee - exitFee;
+  const pnlPercent = trade.size > 0 ? netPnl / trade.size : 0;
+  return {
+    shares,
+    proceeds,
+    grossPnl,
+    entryFee,
+    exitFee,
+    netPnl,
+    pnlPercent,
+  };
+}
+
+function closePaperTradeAtMark(
+  trade: TradeLog,
+  strategy: Strategy | undefined,
+  exitPrice: number,
+  exitReason: string,
+  feeRate: number,
+) {
+  const { grossPnl, entryFee, exitFee, netPnl, pnlPercent } = getMarkedTradePnl(trade, exitPrice, feeRate);
+  storage.updateTradeLog(trade.id, {
+    status: "closed",
+    exitPrice,
+    pnl: grossPnl,
+    pnlPercent: pnlPercent * 100,
+    feePaid: entryFee + exitFee,
+    netPnl,
+    errorMessage: `Paper exit (${exitReason}) at ${(exitPrice * 100).toFixed(1)}%`,
+    closedAt: new Date().toISOString(),
+  });
+
+  if (trade.strategyId) {
+    storage.updateStrategyPnl(trade.strategyId, netPnl, netPnl > 0);
+  }
+  const currentBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
+  storage.setSetting("paper_balance", String(currentBalance + netPnl));
+
+  const startOfDayBalance = parseFloat(storage.getSetting("day_start_balance") || storage.getSetting("paper_balance") || "1000");
+  const newBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
+  const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
+  const drawdownPct = startOfDayBalance > 0 ? (startOfDayBalance - newBalance) / startOfDayBalance : 0;
+  if (drawdownPct >= drawdownLimit) {
+    storage.setSetting("circuit_breaker", "triggered");
+    storage.setSetting("circuit_breaker_at", new Date().toISOString());
+  }
+
+  return {
+    strategyName: strategy?.name || trade.strategyName || "Unknown strategy",
+    exitReason,
+    netPnl,
+    pnlPercent,
+  };
+}
+
+function manageOpenTradesForCurrentMarket(
+  market: PolyMarket,
+  snapshot: PriceSnapshot,
+  strategies: Strategy[],
+) {
+  const now = Date.now();
+  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const secondsLeft = market.endDate
+    ? Math.max(0, Math.floor((new Date(market.endDate).getTime() - now) / 1000))
+    : 0;
+  const strategyMap = new Map(strategies.map((strategy) => [strategy.id, strategy]));
+  const currentTrades = storage.getOpenTrades().filter((trade) => trade.conditionId === market.conditionId);
+  const closed: Array<{ strategyName: string; exitReason: string; netPnl: number; pnlPercent: number }> = [];
+
+  for (const trade of currentTrades) {
+    const strategy = trade.strategyId != null ? strategyMap.get(trade.strategyId) : undefined;
+    const config = strategy ? parseStrategyConfig(strategy) : {};
+    const minHoldSeconds = getStrategyNumberConfig(config, "minHoldSeconds", 8);
+    const takeProfitPct = getStrategyNumberConfig(config, "takeProfitPct", getStrategyNumberConfig(config, "tpPct", 0.012));
+    const stopLossPct = getStrategyNumberConfig(config, "stopLossPct", getStrategyNumberConfig(config, "slPct", 0.01));
+    const forceExitSecondsLeft = getStrategyNumberConfig(config, "forceExitSecondsLeft", 18);
+    const scalpExitPct = getStrategyNumberConfig(config, "scalpExitPct", 0.005);
+    const createdAt = new Date(trade.timestamp).getTime();
+    const ageSeconds = Number.isFinite(createdAt) ? (now - createdAt) / 1000 : 0;
+    const exitPrice = getCurrentMarkedPriceForTrade(trade, snapshot);
+    if (exitPrice == null) continue;
+
+    const marked = getMarkedTradePnl(trade, exitPrice, feeRate);
+    const netReturn = marked.pnlPercent;
+    let exitReason: string | null = null;
+
+    if (ageSeconds >= minHoldSeconds && netReturn >= takeProfitPct) {
+      exitReason = "take_profit";
+    } else if (ageSeconds >= minHoldSeconds && netReturn <= -stopLossPct) {
+      exitReason = "stop_loss";
+    } else if (secondsLeft <= forceExitSecondsLeft && netReturn > 0) {
+      exitReason = "late_profit_lock";
+    } else if (secondsLeft <= Math.max(10, forceExitSecondsLeft) && netReturn >= scalpExitPct) {
+      exitReason = "scalp_exit";
+    }
+
+    if (!exitReason) continue;
+    closed.push(closePaperTradeAtMark(trade, strategy, exitPrice, exitReason, feeRate));
+  }
+
+  return {
+    closed,
+    summary: closed.length > 0
+      ? closed.map((entry) => `${entry.strategyName}:${entry.exitReason}`).join(", ")
+      : null,
+  };
+}
+
 function getResolutionPriceForOutcome(market: PolyMarket, outcome: "YES" | "NO") {
   const outcomePrices = getOutcomePrices(market);
   if (outcomePrices.length < 2) return null;
@@ -610,7 +751,7 @@ function ensurePaperDefaults() {
   if (!storage.getSetting("drawdown_limit")) storage.setSetting("drawdown_limit", "0.10");
   if (!storage.getSetting("circuit_breaker")) storage.setSetting("circuit_breaker", "ok");
   if (!storage.getSetting("multi_source_verify")) storage.setSetting("multi_source_verify", "true");
-  if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "15");
+  if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "5");
   if (!storage.getSetting("max_daily_trades")) storage.setSetting("max_daily_trades", "24");
   if (!storage.getSetting("max_order_size")) storage.setSetting("max_order_size", "25");
   storage.setSetting("mode", "paper");
@@ -857,18 +998,27 @@ async function runEngineOnce() {
 
   const snapshot = await getPriceSnapshot(market);
   const candles = await fetchRecentBtcCandles(15).catch(() => []);
+  const management = manageOpenTradesForCurrentMarket(market, snapshot, strategies);
   engineState.currentMarketId = market.id;
   engineState.currentConditionId = market.conditionId;
   engineState.currentMarketQuestion = market._eventTitle || market.question || "BTC 5-minute market";
   engineState.currentMarketEndsAt = market.endDate || null;
   engineState.currentYesPrice = snapshot.yesMid;
   engineState.currentNoPrice = snapshot.noMid;
+  engineState.openTrades = storage.getOpenTrades().length;
   const maxDailyTrades = parseInt(storage.getSetting("max_daily_trades") || "24", 10);
   const maxOrderSize = parseFloat(storage.getSetting("max_order_size") || "25");
   let tradesToday = countTradesToday();
   let openExposure = getOpenExposure();
   let openedTrade = false;
-  let lastSkipReason = "scanned_no_signal";
+  let lastSkipReason = management.summary ? `managed_open_trades: ${management.summary}` : "scanned_no_signal";
+
+  if (management.closed.length > 0) {
+    const latest = management.closed[management.closed.length - 1];
+    engineState.lastSignalAt = new Date().toISOString();
+    engineState.lastSignalStrategy = latest.strategyName;
+    engineState.lastSignalReason = `Exited ${latest.strategyName} via ${latest.exitReason} (${(latest.netPnl >= 0 ? "+" : "")}${latest.netPnl.toFixed(2)} USDC)`;
+  }
   const recommendations: Array<{
     strategy: Strategy;
     diagnostic: NonNullable<EngineRuntimeState["strategyDiagnostics"]>[number] | undefined;
@@ -895,12 +1045,12 @@ async function runEngineOnce() {
       }
 
       if (strategy.lastTriggered) {
-        const cooldownMs = Math.max(1, strategy.cooldownMinutes ?? 1) * 60 * 1000;
+        const cooldownMs = getStrategyCooldownMs(strategy);
         if (Date.now() - new Date(strategy.lastTriggered).getTime() < cooldownMs) {
           lastSkipReason = `${strategy.name}: cooldown_active`;
         if (diagnostic) {
           diagnostic.outcome = "cooldown";
-          diagnostic.detail = "Waiting for strategy cooldown to expire";
+          diagnostic.detail = `Waiting for cooldown to expire (${Math.ceil(cooldownMs / 1000)}s)`;
           diagnostic.score = null;
         }
         continue;
@@ -981,7 +1131,7 @@ async function runEngineOnce() {
 
   recommendations.sort((a, b) => b.signal.score - a.signal.score);
   const winner = recommendations[0];
-  const managerScoreThreshold = 0.62;
+  const managerScoreThreshold = 0.48;
   engineState.managerDecision = {
     chosenStrategyId: winner.strategy.id,
     chosenStrategyName: winner.strategy.name,
