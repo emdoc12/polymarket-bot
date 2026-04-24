@@ -105,7 +105,6 @@ const FIXED_STRATEGIES = [
     autoRoll: true,
     config: JSON.stringify({
       triggerPrice: 0.48,
-      orderSize: 10,
       momentumThreshold: 0.65,
       minSecondsLeft: 45,
       description: "Buy YES when the BTC candle is still underpriced during late positive momentum.",
@@ -123,7 +122,6 @@ const FIXED_STRATEGIES = [
     isActive: false,
     autoRoll: true,
     config: JSON.stringify({
-      orderSize: 10,
       imbalanceThreshold: 0.18,
       maxEntryPrice: 0.56,
       minSecondsLeft: 40,
@@ -143,7 +141,6 @@ const FIXED_STRATEGIES = [
     autoRoll: true,
     config: JSON.stringify({
       triggerPrice: 0.46,
-      orderSize: 10,
       reboundThreshold: 0.0025,
       windowBars: 8,
       minSecondsLeft: 60,
@@ -162,7 +159,6 @@ const FIXED_STRATEGIES = [
     isActive: false,
     autoRoll: true,
     config: JSON.stringify({
-      orderSize: 10,
       spotMoveThreshold: 0.002,
       maxEntryPrice: 0.6,
       minSecondsLeft: 75,
@@ -991,8 +987,10 @@ function ensurePaperDefaults() {
   if (!storage.getSetting("multi_source_verify")) storage.setSetting("multi_source_verify", "true");
   if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "5");
   if (!storage.getSetting("max_daily_trades")) storage.setSetting("max_daily_trades", "24");
-  if (!storage.getSetting("max_order_size")) storage.setSetting("max_order_size", "25");
+  if (!storage.getSetting("max_order_size")) storage.setSetting("max_order_size", "100");
+  if (storage.getSetting("max_order_size") === "25") storage.setSetting("max_order_size", "100");
   if (!storage.getSetting("max_risk_per_trade")) storage.setSetting("max_risk_per_trade", "0.08");
+  if (!storage.getSetting("use_percent_sizing")) storage.setSetting("use_percent_sizing", "true");
   storage.setSetting("mode", "paper");
 }
 
@@ -1377,9 +1375,11 @@ async function runEngineOnce() {
       }
       }
 
-      const requestedSize = Number(parseStrategyConfig(strategy).orderSize ?? strategy.orderSize ?? 10);
+      const config = parseStrategyConfig(strategy);
       const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
       const riskCapSize = balance * maxRiskPerTrade;
+      const usePercentSizing = storage.getSetting("use_percent_sizing") !== "false";
+      const requestedSize = usePercentSizing ? riskCapSize : Number(config.orderSize ?? strategy.orderSize ?? riskCapSize);
       const orderSize = Math.min(requestedSize, maxOrderSize, riskCapSize);
       if (tradesToday >= maxDailyTrades) {
         lastSkipReason = "max_daily_trades_reached";
@@ -1399,8 +1399,8 @@ async function runEngineOnce() {
         }
         continue;
       }
-      if (requestedSize > orderSize && diagnostic) {
-        diagnostic.detail = `Sized down to ${orderSize.toFixed(2)} USDC by account risk guardrail`;
+      if (diagnostic) {
+        diagnostic.detail = `Sizing ${orderSize.toFixed(2)} USDC (${(orderSize / balance * 100).toFixed(1)}% of paper balance)`;
       }
       if (openExposure + orderSize > balance) {
         lastSkipReason = `${strategy.name}: insufficient_paper_balance`;
