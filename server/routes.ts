@@ -64,6 +64,23 @@ type PriceSnapshot = {
   noBook: any | null;
 };
 
+type TradeSignal = {
+  side: "YES" | "NO";
+  score: number;
+  reason: string;
+  arb?: {
+    yesPrice: number;
+    noPrice: number;
+    yesSize: number;
+    noSize: number;
+    shares: number;
+    netProfit: number;
+    netEdgePct: number;
+    totalCost: number;
+    totalFees: number;
+  };
+};
+
 type EngineRuntimeState = {
   running: boolean;
   lastPollAt: string | null;
@@ -160,6 +177,25 @@ const ORDERBOOK_OPTIMIZER_PROFILES = [
 ];
 
 const FIXED_STRATEGIES = [
+  {
+    name: "Pure YES/NO Arbitrage",
+    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
+    side: "YES" as const,
+    triggerType: "price_below",
+    triggerPrice: 0.99,
+    orderSize: 10,
+    orderType: "MARKET",
+    cooldownMinutes: 1,
+    isActive: false,
+    autoRoll: true,
+    config: JSON.stringify({
+      maxPairCost: 0.985,
+      minNetEdgePct: 0.005,
+      minProfitUsdc: 0.25,
+      minSecondsLeft: 20,
+      description: "Paper-buy matched YES and NO shares when executable asks lock a guaranteed net profit after fees.",
+    }),
+  },
   {
     name: "Last-Second Momentum Snipe",
     marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
@@ -871,6 +907,36 @@ function sumBookSize(levels: any[] | undefined) {
   }, 0);
 }
 
+function parseBookLevel(level: any) {
+  const price = parseFloat(level?.price ?? level?.p ?? "0");
+  const size = parseFloat(level?.size ?? level?.quantity ?? level?.q ?? "0");
+  return {
+    price,
+    size,
+  };
+}
+
+function getBookLevels(book: any, side: "asks" | "bids") {
+  const levels = Array.isArray(book?.[side]) ? book[side] : [];
+  return levels
+    .map(parseBookLevel)
+    .filter((level: { price: number; size: number }) =>
+      Number.isFinite(level.price) &&
+      Number.isFinite(level.size) &&
+      level.price > 0 &&
+      level.size > 0,
+    );
+}
+
+function getBestAsk(book: any) {
+  const asks = getBookLevels(book, "asks");
+  if (asks.length === 0) return null;
+  return asks.reduce((best: { price: number; size: number } | null, level: { price: number; size: number }) => {
+    if (!best || level.price < best.price) return level;
+    return best;
+  }, null);
+}
+
 function getOrderbookRangeConfig(strategy: Strategy) {
   const config = parseStrategyConfig(strategy);
   const targetImbalance = Number(config.imbalanceThreshold ?? 0.18);
@@ -924,6 +990,88 @@ function buildStrategyWithConfig(strategy: Strategy, overrides: Record<string, n
   } as Strategy;
 }
 
+function evaluatePureArbitrage(
+  strategy: Strategy,
+  market: PolyMarket,
+  snapshot: PriceSnapshot,
+  orderSize: number,
+) {
+  const config = parseStrategyConfig(strategy);
+  const timeLeftMs = market.endDate ? new Date(market.endDate).getTime() - Date.now() : 0;
+  const secondsLeft = Math.max(0, Math.floor(timeLeftMs / 1000));
+  const minSecondsLeft = Number(config.minSecondsLeft ?? 20);
+  if (secondsLeft < minSecondsLeft) return null;
+
+  const yesAsk = getBestAsk(snapshot.yesBook);
+  const noAsk = getBestAsk(snapshot.noBook);
+  if (!yesAsk || !noAsk) return null;
+
+  const yesPrice = clampProbability(yesAsk.price);
+  const noPrice = clampProbability(noAsk.price);
+  const pairCost = yesPrice + noPrice;
+  const maxPairCost = Number(config.maxPairCost ?? 0.985);
+  if (pairCost > maxPairCost) return null;
+
+  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const maxSharesByBudget = orderSize / pairCost;
+  const shares = Math.min(maxSharesByBudget, yesAsk.size, noAsk.size);
+  if (!Number.isFinite(shares) || shares <= 0) return null;
+
+  const yesSize = shares * yesPrice;
+  const noSize = shares * noPrice;
+  const totalCost = yesSize + noSize;
+  const yesFee = calculateTakerFee(yesSize, yesPrice, feeRate);
+  const noFee = calculateTakerFee(noSize, noPrice, feeRate);
+  const totalFees = yesFee + noFee;
+  const netProfit = shares - totalCost - totalFees;
+  const netEdgePct = totalCost > 0 ? netProfit / totalCost : 0;
+  const minNetEdgePct = Number(config.minNetEdgePct ?? 0.005);
+  const minProfitUsdc = Number(config.minProfitUsdc ?? 0.25);
+
+  if (netProfit < minProfitUsdc || netEdgePct < minNetEdgePct) {
+    return null;
+  }
+
+  return {
+    side: "YES" as const,
+    score: netEdgePct,
+    reason: `Pure arb YES ${yesPrice.toFixed(3)} + NO ${noPrice.toFixed(3)} = ${pairCost.toFixed(3)}; locked +${netProfit.toFixed(2)} USDC (${(netEdgePct * 100).toFixed(2)}%) after fees`,
+    arb: {
+      yesPrice,
+      noPrice,
+      yesSize,
+      noSize,
+      shares,
+      netProfit,
+      netEdgePct,
+      totalCost,
+      totalFees,
+    },
+  };
+}
+
+function describePureArbState(strategy: Strategy, snapshot: PriceSnapshot, orderSize: number) {
+  const config = parseStrategyConfig(strategy);
+  const yesAsk = getBestAsk(snapshot.yesBook);
+  const noAsk = getBestAsk(snapshot.noBook);
+  if (!yesAsk || !noAsk) return "Missing executable YES/NO asks";
+
+  const yesPrice = clampProbability(yesAsk.price);
+  const noPrice = clampProbability(noAsk.price);
+  const pairCost = yesPrice + noPrice;
+  const maxPairCost = Number(config.maxPairCost ?? 0.985);
+  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const shares = Math.min(orderSize / pairCost, yesAsk.size, noAsk.size);
+  const yesSize = shares * yesPrice;
+  const noSize = shares * noPrice;
+  const totalCost = yesSize + noSize;
+  const totalFees = calculateTakerFee(yesSize, yesPrice, feeRate) + calculateTakerFee(noSize, noPrice, feeRate);
+  const netProfit = shares - totalCost - totalFees;
+  const netEdgePct = totalCost > 0 ? netProfit / totalCost : 0;
+
+  return `YES ask ${(yesPrice * 100).toFixed(1)}% + NO ask ${(noPrice * 100).toFixed(1)}% = ${(pairCost * 100).toFixed(1)}% vs ${(maxPairCost * 100).toFixed(1)}% cap; net ${netProfit.toFixed(2)} USDC (${(netEdgePct * 100).toFixed(2)}%)`;
+}
+
 async function optimizeOrderbookStrategy(
   strategy: Strategy,
   market: PolyMarket,
@@ -945,7 +1093,7 @@ async function optimizeOrderbookStrategy(
   let best: {
     strategy: Strategy;
     profileName: string;
-    signal: { side: "YES" | "NO"; score: number; reason: string };
+    signal: TradeSignal;
   } | null = null;
   let bestRejectedStrategy = strategy;
   let bestRejectedScore = Number.NEGATIVE_INFINITY;
@@ -1130,6 +1278,9 @@ function manageOpenTradesForCurrentMarket(
 
   for (const trade of currentTrades) {
     const strategy = trade.strategyId != null ? strategyMap.get(trade.strategyId) : undefined;
+    if (strategy?.name === "Pure YES/NO Arbitrage" || trade.strategyName === "Pure YES/NO Arbitrage") {
+      continue;
+    }
     const config = strategy ? parseStrategyConfig(strategy) : {};
     const minHoldSeconds = getStrategyNumberConfig(config, "minHoldSeconds", 8);
     const takeProfitPct = getStrategyNumberConfig(config, "takeProfitPct", getStrategyNumberConfig(config, "tpPct", 0.012));
@@ -1569,7 +1720,7 @@ async function runEngineOnce() {
   const recommendations: Array<{
     strategy: Strategy;
     diagnostic: NonNullable<EngineRuntimeState["strategyDiagnostics"]>[number] | undefined;
-    signal: { side: "YES" | "NO"; score: number; reason: string };
+    signal: TradeSignal;
     orderSize: number;
   }> = [];
 
@@ -1641,7 +1792,12 @@ async function runEngineOnce() {
         continue;
       }
 
-      const optimization = await optimizeOrderbookStrategy(strategy, market, snapshot, candles);
+      const pureArbSignal = strategy.name === "Pure YES/NO Arbitrage"
+        ? evaluatePureArbitrage(strategy, market, snapshot, orderSize)
+        : null;
+      const optimization = pureArbSignal
+        ? { strategy, profileName: "paired", signal: pureArbSignal, scanned: 1, bestRejectedStrategy: strategy }
+        : await optimizeOrderbookStrategy(strategy, market, snapshot, candles);
       const evaluationStrategy = optimization.strategy;
       const signal = optimization.signal;
       if (!signal) {
@@ -1650,7 +1806,9 @@ async function runEngineOnce() {
           diagnostic.outcome = "no_signal";
           diagnostic.detail = strategy.name === "Orderbook Arbitrage & Imbalance"
             ? `Optimizer scanned ${optimization.scanned} profiles; ${describeOrderbookState(optimization.bestRejectedStrategy, snapshot)}`
-            : "Agent did not find positive edge after fees";
+            : strategy.name === "Pure YES/NO Arbitrage"
+              ? describePureArbState(strategy, snapshot, orderSize)
+              : "Agent did not find positive edge after fees";
           diagnostic.score = null;
         }
         continue;
@@ -1658,7 +1816,9 @@ async function runEngineOnce() {
 
       if (diagnostic) {
         diagnostic.outcome = "recommended";
-        diagnostic.detail = strategy.name === "Orderbook Arbitrage & Imbalance"
+        diagnostic.detail = strategy.name === "Pure YES/NO Arbitrage"
+          ? signal.reason
+          : strategy.name === "Orderbook Arbitrage & Imbalance"
           ? `Optimizer selected ${optimization.profileName}: ${signal.reason}`
           : signal.reason;
         diagnostic.score = Number(signal.score.toFixed(3));
@@ -1693,6 +1853,8 @@ async function runEngineOnce() {
   const winnerConfig = parseStrategyConfig(winner.strategy);
   const managerScoreThreshold = winner.strategy.name === "Orderbook Arbitrage & Imbalance"
     ? Number(winnerConfig.managerScoreThreshold ?? winnerConfig.minAgentScore ?? 0.006)
+    : winner.strategy.name === "Pure YES/NO Arbitrage"
+      ? Number(winnerConfig.minNetEdgePct ?? 0.005)
     : 0.015;
   engineState.managerDecision = {
     chosenStrategyId: winner.strategy.id,
@@ -1724,6 +1886,73 @@ async function runEngineOnce() {
 
   const diagnostic = winner.diagnostic;
   try {
+      if (winner.signal.arb) {
+        const arb = winner.signal.arb;
+        if (!snapshot.yesTokenId || !snapshot.noTokenId) {
+          lastSkipReason = `${winner.strategy.name}: invalid_arb_snapshot`;
+          if (diagnostic) {
+            diagnostic.outcome = "bad_snapshot";
+            diagnostic.detail = "Missing YES or NO token for paired arbitrage entry";
+            diagnostic.score = Number(winner.signal.score.toFixed(3));
+          }
+          engineState.lastPollOutcome = lastSkipReason;
+          return;
+        }
+
+        const yesFee = calculateTakerFee(arb.yesSize, arb.yesPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
+        const noFee = calculateTakerFee(arb.noSize, arb.noPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
+        const timestamp = new Date().toISOString();
+        const marketQuestion = market._eventTitle || market.question || winner.strategy.marketQuestion;
+        storage.createTradeLog({
+          strategyId: winner.strategy.id,
+          strategyName: winner.strategy.name,
+          marketId: market.id,
+          conditionId: market.conditionId,
+          tokenId: snapshot.yesTokenId,
+          side: "BUY",
+          outcome: "YES",
+          price: arb.yesPrice,
+          size: arb.yesSize,
+          status: "open",
+          timestamp,
+          marketQuestion,
+          feePaid: yesFee,
+          errorMessage: `Paired arb YES leg: ${winner.signal.reason}`,
+        });
+        storage.createTradeLog({
+          strategyId: winner.strategy.id,
+          strategyName: winner.strategy.name,
+          marketId: market.id,
+          conditionId: market.conditionId,
+          tokenId: snapshot.noTokenId,
+          side: "BUY",
+          outcome: "NO",
+          price: arb.noPrice,
+          size: arb.noSize,
+          status: "open",
+          timestamp,
+          marketQuestion,
+          feePaid: noFee,
+          errorMessage: `Paired arb NO leg: ${winner.signal.reason}`,
+        });
+
+        storage.markStrategyTriggered(winner.strategy.id);
+        tradesToday += 1;
+        openExposure += arb.totalCost;
+        openedTrade = true;
+        engineState.lastSignalAt = timestamp;
+        engineState.lastSignalStrategy = winner.strategy.name;
+        engineState.lastSignalReason = `Manager selected paired arb: ${winner.signal.reason}`;
+        engineState.openTrades = storage.getOpenTrades().length;
+        if (diagnostic) {
+          diagnostic.outcome = "entered";
+          diagnostic.detail = `Manager entered paired arb: ${winner.signal.reason}`;
+          diagnostic.score = Number(winner.signal.score.toFixed(3));
+        }
+        engineState.lastPollOutcome = "opened_paper_trade";
+        return;
+      }
+
       const entry = chooseEntryFromSignal(winner.signal.side, snapshot);
       if (!entry.tokenId || !Number.isFinite(entry.price) || entry.price <= 0) {
         lastSkipReason = `${winner.strategy.name}: invalid_entry_snapshot`;

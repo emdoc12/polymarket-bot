@@ -26,6 +26,21 @@ import type { Strategy } from "@shared/schema";
 // Fixed strategy metadata (matches server seeds by name)
 const STRATEGY_META = [
   {
+    name: "Pure YES/NO Arbitrage",
+    icon: BookOpen,
+    iconColor: "text-cyan-400",
+    iconBg: "bg-cyan-400/10",
+    defaultConfig: { orderSize: 10, maxPairCost: 0.985, minNetEdgePct: 0.005, minProfitUsdc: 0.25, minSecondsLeft: 20 },
+    fields: [
+      { key: "orderSize", label: "Total pair size (USDC)", type: "number" },
+      { key: "maxPairCost", label: "Max YES+NO ask", type: "percent" },
+      { key: "minNetEdgePct", label: "Min net edge", type: "percent" },
+      { key: "minProfitUsdc", label: "Min profit (USDC)", type: "number" },
+      { key: "minSecondsLeft", label: "Min seconds left", type: "number" },
+    ],
+    description: "Paper-buy matched YES and NO shares when executable asks lock a guaranteed profit after fees.",
+  },
+  {
     name: "Last-Second Momentum Snipe",
     icon: Zap,
     iconColor: "text-yellow-400",
