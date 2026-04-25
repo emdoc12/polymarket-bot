@@ -1795,7 +1795,7 @@ async function runEngineOnce() {
       const pureArbSignal = strategy.name === "Pure YES/NO Arbitrage"
         ? evaluatePureArbitrage(strategy, market, snapshot, orderSize)
         : null;
-      const optimization = pureArbSignal
+      const optimization = strategy.name === "Pure YES/NO Arbitrage"
         ? { strategy, profileName: "paired", signal: pureArbSignal, scanned: 1, bestRejectedStrategy: strategy }
         : await optimizeOrderbookStrategy(strategy, market, snapshot, candles);
       const evaluationStrategy = optimization.strategy;
@@ -1886,6 +1886,17 @@ async function runEngineOnce() {
 
   const diagnostic = winner.diagnostic;
   try {
+      if (winner.strategy.name === "Pure YES/NO Arbitrage" && !winner.signal.arb) {
+        lastSkipReason = `${winner.strategy.name}: invalid_unpaired_signal`;
+        if (diagnostic) {
+          diagnostic.outcome = "bad_signal";
+          diagnostic.detail = "Pure arbitrage refused an unpaired directional signal";
+          diagnostic.score = Number(winner.signal.score.toFixed(3));
+        }
+        engineState.lastPollOutcome = lastSkipReason;
+        return;
+      }
+
       if (winner.signal.arb) {
         const arb = winner.signal.arb;
         if (!snapshot.yesTokenId || !snapshot.noTokenId) {
