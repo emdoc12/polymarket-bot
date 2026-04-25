@@ -48,6 +48,7 @@ function runMigrations() {
       token_id TEXT NOT NULL,
       side TEXT NOT NULL,
       outcome TEXT NOT NULL,
+      trade_group_id TEXT,
       price REAL NOT NULL,
       size REAL NOT NULL,
       status TEXT NOT NULL,
@@ -85,6 +86,7 @@ function runMigrations() {
   if (!logColNames.has("strategy_name")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN strategy_name TEXT;");
   if (!logColNames.has("market_id")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN market_id TEXT;");
   if (!logColNames.has("condition_id")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN condition_id TEXT;");
+  if (!logColNames.has("trade_group_id")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN trade_group_id TEXT;");
   if (!logColNames.has("exit_price")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN exit_price REAL;");
   if (!logColNames.has("pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN pnl REAL;");
   if (!logColNames.has("pnl_percent")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN pnl_percent REAL;");

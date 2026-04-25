@@ -3,10 +3,85 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { TradeLog } from "@shared/schema";
 
+type DisplayTrade = {
+  key: string;
+  timestamp: string;
+  marketQuestion: string | null;
+  tokenId: string;
+  action: string;
+  priceLabel: string;
+  size: number;
+  status: string;
+  strategyName: string | null;
+  strategyId: number | null;
+  netPnl: number | null;
+  ids: number[];
+};
+
+function groupTradesForDisplay(trades: TradeLog[]): DisplayTrade[] {
+  const grouped = new Map<string, TradeLog[]>();
+  const singles: TradeLog[] = [];
+  for (const trade of trades) {
+    if (trade.tradeGroupId) {
+      const legs = grouped.get(trade.tradeGroupId) ?? [];
+      legs.push(trade);
+      grouped.set(trade.tradeGroupId, legs);
+    } else {
+      singles.push(trade);
+    }
+  }
+
+  const groupedItems = Array.from(grouped.entries()).map(([tradeGroupId, legs]) => {
+    const first = legs[0];
+    const totalSize = legs.reduce((sum, leg) => sum + leg.size, 0);
+    const netPnl = legs.every((leg) => leg.netPnl != null)
+      ? legs.reduce((sum, leg) => sum + (leg.netPnl ?? 0), 0)
+      : null;
+    const status = legs.some((leg) => leg.status === "open") ? "open" : first.status;
+    const avgPrice = totalSize > 0
+      ? legs.reduce((sum, leg) => sum + leg.price * leg.size, 0) / totalSize
+      : first.price;
+    return {
+      key: tradeGroupId,
+      timestamp: first.timestamp,
+      marketQuestion: first.marketQuestion,
+      tokenId: first.tokenId,
+      action: "BUY YES+NO",
+      priceLabel: `pair avg ${(avgPrice * 100).toFixed(1)}%`,
+      size: totalSize,
+      status,
+      strategyName: first.strategyName,
+      strategyId: first.strategyId,
+      netPnl,
+      ids: legs.map((leg) => leg.id),
+    };
+  });
+
+  const singleItems = singles.map((trade) => ({
+    key: String(trade.id),
+    timestamp: trade.timestamp,
+    marketQuestion: trade.marketQuestion,
+    tokenId: trade.tokenId,
+    action: `${trade.side} ${trade.outcome}`,
+    priceLabel: `${(trade.price * 100).toFixed(1)}%`,
+    size: trade.size,
+    status: trade.status,
+    strategyName: trade.strategyName,
+    strategyId: trade.strategyId,
+    netPnl: trade.netPnl,
+    ids: [trade.id],
+  }));
+
+  return [...groupedItems, ...singleItems].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+  );
+}
+
 export default function Trades() {
-  const { data: trades, isLoading } = useQuery<TradeLog[]>({
+  const { data: trades } = useQuery<TradeLog[]>({
     queryKey: ["/api/trades"],
   });
+  const displayTrades = groupTradesForDisplay(trades ?? []);
 
   return (
     <div className="space-y-6">
@@ -19,7 +94,7 @@ export default function Trades() {
 
       <Card>
         <CardContent className="p-0">
-          {!trades || trades.length === 0 ? (
+          {displayTrades.length === 0 ? (
             <div className="py-12 text-center">
               <p className="text-sm text-muted-foreground">
                 No trades logged yet.
@@ -28,11 +103,11 @@ export default function Trades() {
           ) : (
             <>
             <div className="space-y-2 p-3 sm:hidden">
-              {trades.map((t) => (
+              {displayTrades.map((t) => (
                 <div
-                  key={`trade-card-${t.id}`}
+                  key={`trade-card-${t.key}`}
                   className="rounded-md border border-border/60 bg-muted/20 p-3"
-                  data-testid={`trade-log-card-${t.id}`}
+                  data-testid={`trade-log-card-${t.key}`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -48,11 +123,11 @@ export default function Trades() {
                   <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                     <div>
                       <p className="text-muted-foreground">Action</p>
-                      <p className="font-mono">{t.side} {t.outcome}</p>
+                      <p className="font-mono">{t.action}</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Price</p>
-                      <p className="font-mono">{(t.price * 100).toFixed(1)}%</p>
+                      <p className="font-mono">{t.priceLabel}</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Size</p>
@@ -84,11 +159,11 @@ export default function Trades() {
                   </tr>
                 </thead>
                 <tbody>
-                  {trades.map((t) => (
+                  {displayTrades.map((t) => (
                     <tr
-                      key={t.id}
+                      key={t.key}
                       className="border-b border-border/50 last:border-0 hover:bg-muted/20 transition-colors"
-                      data-testid={`trade-log-row-${t.id}`}
+                      data-testid={`trade-log-row-${t.key}`}
                     >
                       <td className="py-2.5 px-4 text-xs text-muted-foreground font-mono whitespace-nowrap">
                         {new Date(t.timestamp).toLocaleString()}
@@ -100,11 +175,11 @@ export default function Trades() {
                       </td>
                       <td className="py-2.5 px-4">
                         <Badge variant="outline" className="text-[11px] font-mono">
-                          {t.side} {t.outcome}
+                          {t.action}
                         </Badge>
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono text-sm">
-                        {(t.price * 100).toFixed(1)}%
+                        {t.priceLabel}
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono text-sm">
                         ${t.size.toFixed(2)}
@@ -113,7 +188,7 @@ export default function Trades() {
                         <StatusBadge status={t.status} />
                       </td>
                       <td className="py-2.5 px-4 text-xs text-muted-foreground">
-                        {t.strategyId ? `#${t.strategyId}` : "—"}
+                        {t.strategyName || (t.strategyId ? `#${t.strategyId}` : "—")}
                       </td>
                     </tr>
                   ))}

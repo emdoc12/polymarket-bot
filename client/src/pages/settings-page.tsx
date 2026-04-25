@@ -28,6 +28,10 @@ export default function SettingsPage() {
   const [maxRiskPerTrade, setMaxRiskPerTrade] = useState("8");
   const [takerFeeRate, setTakerFeeRate] = useState("1.0");
   const [drawdownLimit, setDrawdownLimit] = useState("10");
+  const [enableDrawdownCircuitBreaker, setEnableDrawdownCircuitBreaker] = useState(false);
+  const [enableDynamicSizing, setEnableDynamicSizing] = useState(false);
+  const [basePositionPct, setBasePositionPct] = useState("2");
+  const [maxPositionPct, setMaxPositionPct] = useState("5");
   const [multiSourceVerify, setMultiSourceVerify] = useState(true);
   const [enableMultiAssetMarkets, setEnableMultiAssetMarkets] = useState(false);
   const [enableOrderbookOptimizer, setEnableOrderbookOptimizer] = useState(true);
@@ -41,6 +45,10 @@ export default function SettingsPage() {
       setMaxRiskPerTrade((parseFloat(getVal("max_risk_per_trade", "0.08")) * 100).toFixed(0));
       setTakerFeeRate((parseFloat(getVal("taker_fee_rate", "0.072")) * 100).toFixed(1));
       setDrawdownLimit((parseFloat(getVal("drawdown_limit", "0.10")) * 100).toFixed(0));
+      setEnableDrawdownCircuitBreaker(getVal("enable_drawdown_circuit_breaker", "false") === "true");
+      setEnableDynamicSizing(getVal("enable_dynamic_sizing", "false") === "true");
+      setBasePositionPct((parseFloat(getVal("base_position_pct", "0.02")) * 100).toFixed(1));
+      setMaxPositionPct((parseFloat(getVal("max_position_pct", "0.05")) * 100).toFixed(1));
       setMultiSourceVerify(getVal("multi_source_verify", "true") === "true");
       setEnableMultiAssetMarkets(getVal("enable_multi_asset_markets", "false") === "true");
       setEnableOrderbookOptimizer(getVal("enable_orderbook_optimizer", "true") === "true");
@@ -57,6 +65,10 @@ export default function SettingsPage() {
         ["max_risk_per_trade", String(parseFloat(maxRiskPerTrade) / 100)],
         ["taker_fee_rate", String(parseFloat(takerFeeRate) / 100)],
         ["drawdown_limit", String(parseFloat(drawdownLimit) / 100)],
+        ["enable_drawdown_circuit_breaker", String(enableDrawdownCircuitBreaker)],
+        ["enable_dynamic_sizing", String(enableDynamicSizing)],
+        ["base_position_pct", String(parseFloat(basePositionPct) / 100)],
+        ["max_position_pct", String(parseFloat(maxPositionPct) / 100)],
         ["multi_source_verify", String(multiSourceVerify)],
         ["enable_multi_asset_markets", String(enableMultiAssetMarkets)],
         ["enable_orderbook_optimizer", String(enableOrderbookOptimizer)],
@@ -156,6 +168,15 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center gap-3">
+            <Switch
+              checked={enableDrawdownCircuitBreaker}
+              onCheckedChange={setEnableDrawdownCircuitBreaker}
+            />
+            <Label className="text-xs">
+              {enableDrawdownCircuitBreaker ? "Enabled — bot pauses on drawdown" : "Disabled — testing will keep running"}
+            </Label>
+          </div>
+          <div className="flex items-center gap-3">
             <Label className="text-xs w-40 shrink-0">Daily drawdown limit</Label>
             <Input
               type="number"
@@ -169,7 +190,7 @@ export default function SettingsPage() {
             <span className="text-xs text-muted-foreground">%</span>
           </div>
           <p className="text-xs text-muted-foreground">
-            If today's losses exceed <span className="font-mono font-medium">{drawdownLimit}%</span> of opening balance, all strategies pause automatically.
+            If enabled and today's losses exceed <span className="font-mono font-medium">{drawdownLimit}%</span> of opening balance, all strategies pause automatically.
           </p>
         </CardContent>
       </Card>
@@ -307,8 +328,49 @@ export default function SettingsPage() {
             />
             <span className="text-xs text-muted-foreground">% of paper balance</span>
           </div>
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={enableDynamicSizing}
+              onCheckedChange={setEnableDynamicSizing}
+            />
+            <Label className="text-xs">
+              {enableDynamicSizing ? "Dynamic sizing enabled" : "Dynamic sizing disabled"}
+            </Label>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Dynamic base size</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="25"
+                  value={basePositionPct}
+                  onChange={(e) => setBasePositionPct(e.target.value)}
+                  className="w-24 font-mono"
+                />
+                <span className="text-xs text-muted-foreground">% balance</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Dynamic max size</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="50"
+                  value={maxPositionPct}
+                  onChange={(e) => setMaxPositionPct(e.target.value)}
+                  className="w-24 font-mono"
+                />
+                <span className="text-xs text-muted-foreground">% balance</span>
+              </div>
+            </div>
+          </div>
           <p className="text-xs text-muted-foreground">
-            Every entry is clipped to the smallest of strategy size, max order size, and <span className="font-mono font-medium">{maxRiskPerTrade}% of current balance</span>.
+            Standard sizing clips entries to <span className="font-mono font-medium">{maxRiskPerTrade}%</span>. Dynamic sizing starts at <span className="font-mono font-medium">{basePositionPct}%</span>, scales with streaks, and caps at <span className="font-mono font-medium">{maxPositionPct}%</span>.
           </p>
         </CardContent>
       </Card>

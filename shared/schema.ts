@@ -40,6 +40,7 @@ export const tradeLogs = sqliteTable("trade_logs", {
   tokenId: text("token_id").notNull(),
   side: text("side").notNull(), // BUY or SELL
   outcome: text("outcome").notNull(), // YES or NO
+  tradeGroupId: text("trade_group_id"),
   price: real("price").notNull(),
   size: real("size").notNull(),
   status: text("status").notNull(), // "open", "closed", "failed", "simulated", "pending_resolution"

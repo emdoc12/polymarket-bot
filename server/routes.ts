@@ -1245,14 +1245,7 @@ function closePaperTradeAtMark(
   const currentBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
   storage.setSetting("paper_balance", String(currentBalance + netPnl));
 
-  const startOfDayBalance = parseFloat(storage.getSetting("day_start_balance") || storage.getSetting("paper_balance") || "1000");
-  const newBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
-  const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
-  const drawdownPct = startOfDayBalance > 0 ? (startOfDayBalance - newBalance) / startOfDayBalance : 0;
-  if (drawdownPct >= drawdownLimit) {
-    storage.setSetting("circuit_breaker", "triggered");
-    storage.setSetting("circuit_breaker_at", new Date().toISOString());
-  }
+  maybeTriggerDrawdownCircuitBreaker();
 
   return {
     strategyName: strategy?.name || trade.strategyName || "Unknown strategy",
@@ -1342,11 +1335,110 @@ function getTodayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function drawdownStopsEnabled() {
+  return storage.getSetting("enable_drawdown_circuit_breaker") === "true";
+}
+
+function maybeTriggerDrawdownCircuitBreaker() {
+  if (!drawdownStopsEnabled()) return;
+  const currentBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
+  const startOfDayBalance = parseFloat(storage.getSetting("day_start_balance") || String(currentBalance));
+  const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
+  const drawdownPct = startOfDayBalance > 0 ? (startOfDayBalance - currentBalance) / startOfDayBalance : 0;
+  if (drawdownPct >= drawdownLimit) {
+    storage.setSetting("circuit_breaker", "triggered");
+    storage.setSetting("circuit_breaker_at", new Date().toISOString());
+  }
+}
+
+function getRecentStrategyResults(strategyId: number) {
+  const trades = storage.getTradeLogsByStrategy(strategyId)
+    .filter((trade) => trade.status === "closed" && trade.netPnl != null);
+  const grouped = new Map<string, TradeLog[]>();
+  const results: { netPnl: number; closedAt: string }[] = [];
+
+  for (const trade of trades) {
+    if (trade.tradeGroupId) {
+      const legs = grouped.get(trade.tradeGroupId) ?? [];
+      legs.push(trade);
+      grouped.set(trade.tradeGroupId, legs);
+    } else {
+      results.push({
+        netPnl: trade.netPnl ?? 0,
+        closedAt: trade.closedAt || trade.timestamp,
+      });
+    }
+  }
+
+  for (const legs of grouped.values()) {
+    if (!legs.every((leg) => leg.netPnl != null)) continue;
+    results.push({
+      netPnl: legs.reduce((sum, leg) => sum + (leg.netPnl ?? 0), 0),
+      closedAt: legs[0]?.closedAt || legs[0]?.timestamp || new Date(0).toISOString(),
+    });
+  }
+
+  return results.sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime());
+}
+
+function calculateStrategySizing(strategy: Strategy, config: Record<string, any>, balance: number, maxOrderSize: number) {
+  const legacyMaxRiskPct = Math.min(0.25, Math.max(0.01, parseFloat(storage.getSetting("max_risk_per_trade") || "0.08")));
+  const dynamicSizingEnabled = storage.getSetting("enable_dynamic_sizing") === "true";
+  const usePercentSizing = storage.getSetting("use_percent_sizing") !== "false";
+
+  if (!dynamicSizingEnabled) {
+    const riskCapSize = balance * legacyMaxRiskPct;
+    const requestedSize = usePercentSizing ? riskCapSize : Number(config.orderSize ?? strategy.orderSize ?? riskCapSize);
+    const orderSize = Math.min(requestedSize, maxOrderSize, riskCapSize);
+    return {
+      orderSize,
+      detail: `Sizing ${orderSize.toFixed(2)} USDC (${(orderSize / balance * 100).toFixed(1)}% of paper balance)`,
+    };
+  }
+
+  const basePct = Math.min(0.25, Math.max(0.001, parseFloat(storage.getSetting("base_position_pct") || "0.02")));
+  const maxPct = Math.min(0.50, Math.max(basePct, parseFloat(storage.getSetting("max_position_pct") || "0.05")));
+  const lossReducePct = Math.min(0.75, Math.max(0, parseFloat(storage.getSetting("loss_streak_reduce_pct") || "0.20")));
+  const winIncreasePct = Math.min(0.75, Math.max(0, parseFloat(storage.getSetting("win_streak_increase_pct") || "0.10")));
+  const recent = getRecentStrategyResults(strategy.id);
+
+  let lossStreak = 0;
+  let winStreak = 0;
+  for (const result of recent) {
+    const net = result.netPnl;
+    if (net < 0 && winStreak === 0) {
+      lossStreak += 1;
+      continue;
+    }
+    if (net > 0 && lossStreak === 0) {
+      winStreak += 1;
+      continue;
+    }
+    break;
+  }
+
+  const lossMultiplier = lossStreak >= 3
+    ? Math.pow(1 - lossReducePct, lossStreak - 2)
+    : 1;
+  const winMultiplier = winStreak >= 5
+    ? Math.pow(1 + winIncreasePct, winStreak - 4)
+    : 1;
+  const dynamicPct = Math.min(maxPct, Math.max(0.001, basePct * lossMultiplier * winMultiplier));
+  const riskCapSize = balance * maxPct;
+  const requestedSize = balance * dynamicPct;
+  const orderSize = Math.min(requestedSize, maxOrderSize, riskCapSize);
+  return {
+    orderSize,
+    detail: `Dynamic sizing ${orderSize.toFixed(2)} USDC (${(dynamicPct * 100).toFixed(1)}% target, ${(maxPct * 100).toFixed(1)}% cap; W${winStreak}/L${lossStreak})`,
+  };
+}
+
 function ensurePaperDefaults() {
   if (!storage.getSetting("paper_balance")) storage.setSetting("paper_balance", "1000");
   if (!storage.getSetting("day_start_balance")) storage.setSetting("day_start_balance", "1000");
   if (!storage.getSetting("taker_fee_rate")) storage.setSetting("taker_fee_rate", "0.072");
   if (!storage.getSetting("drawdown_limit")) storage.setSetting("drawdown_limit", "0.10");
+  if (!storage.getSetting("enable_drawdown_circuit_breaker")) storage.setSetting("enable_drawdown_circuit_breaker", "false");
   if (!storage.getSetting("circuit_breaker")) storage.setSetting("circuit_breaker", "ok");
   if (!storage.getSetting("multi_source_verify")) storage.setSetting("multi_source_verify", "true");
   if (!storage.getSetting("polling_interval")) storage.setSetting("polling_interval", "5");
@@ -1355,6 +1447,11 @@ function ensurePaperDefaults() {
   if (storage.getSetting("max_order_size") === "25") storage.setSetting("max_order_size", "100");
   if (!storage.getSetting("max_risk_per_trade")) storage.setSetting("max_risk_per_trade", "0.08");
   if (!storage.getSetting("use_percent_sizing")) storage.setSetting("use_percent_sizing", "true");
+  if (!storage.getSetting("enable_dynamic_sizing")) storage.setSetting("enable_dynamic_sizing", "false");
+  if (!storage.getSetting("base_position_pct")) storage.setSetting("base_position_pct", "0.02");
+  if (!storage.getSetting("max_position_pct")) storage.setSetting("max_position_pct", "0.05");
+  if (!storage.getSetting("loss_streak_reduce_pct")) storage.setSetting("loss_streak_reduce_pct", "0.20");
+  if (!storage.getSetting("win_streak_increase_pct")) storage.setSetting("win_streak_increase_pct", "0.10");
   if (!storage.getSetting("enable_multi_asset_markets")) storage.setSetting("enable_multi_asset_markets", "false");
   if (!storage.getSetting("enable_orderbook_optimizer")) storage.setSetting("enable_orderbook_optimizer", "true");
   storage.setSetting("mode", "paper");
@@ -1383,8 +1480,72 @@ function maybeRollDayStartBalance() {
 async function settleResolvedTrades() {
   const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
   const openTrades = storage.getOpenTrades();
+  const processedTradeIds = new Set<number>();
+  const arbGroups = new Map<string, TradeLog[]>();
 
   for (const trade of openTrades) {
+    if (trade.strategyName !== "Pure YES/NO Arbitrage" || !trade.tradeGroupId) continue;
+    const legs = arbGroups.get(trade.tradeGroupId) ?? [];
+    legs.push(trade);
+    arbGroups.set(trade.tradeGroupId, legs);
+  }
+
+  for (const [tradeGroupId, legs] of arbGroups) {
+    const first = legs[0];
+    if (!first.marketId) continue;
+
+    try {
+      const market = await fetchMarketById(first.marketId);
+      if (!isResolvedMarket(market)) continue;
+
+      let groupNetPnl = 0;
+      let groupSize = 0;
+      const closedAt = new Date().toISOString();
+
+      for (const leg of legs) {
+        const resolutionPrice = getResolutionPriceForOutcome(
+          market,
+          leg.outcome === "YES" ? "YES" : "NO",
+        );
+        if (resolutionPrice == null) continue;
+
+        const entryPrice = clampProbability(leg.price);
+        const shares = leg.size / entryPrice;
+        const payout = shares * resolutionPrice;
+        const grossPnl = payout - leg.size;
+        const entryFee = leg.feePaid ?? calculateTakerFee(leg.size, entryPrice, feeRate);
+        const netPnl = grossPnl - entryFee;
+        const pnlPercent = leg.size > 0 ? (netPnl / leg.size) * 100 : 0;
+
+        groupNetPnl += netPnl;
+        groupSize += leg.size;
+        processedTradeIds.add(leg.id);
+
+        storage.updateTradeLog(leg.id, {
+          status: "closed",
+          exitPrice: resolutionPrice,
+          pnl: grossPnl,
+          pnlPercent,
+          feePaid: entryFee,
+          netPnl,
+          errorMessage: `Paired arb settled as group ${tradeGroupId}`,
+          closedAt,
+        });
+      }
+
+      if (groupSize <= 0) continue;
+      storage.updateStrategyPnl(first.strategyId ?? 0, groupNetPnl, groupNetPnl > 0);
+      const currentBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
+      storage.setSetting("paper_balance", String(currentBalance + groupNetPnl));
+      maybeTriggerDrawdownCircuitBreaker();
+    } catch {
+      continue;
+    }
+  }
+
+  for (const trade of openTrades) {
+    if (processedTradeIds.has(trade.id)) continue;
+    if (trade.strategyName === "Pure YES/NO Arbitrage" && trade.tradeGroupId) continue;
     if (!trade.marketId) continue;
 
     try {
@@ -1422,13 +1583,7 @@ async function settleResolvedTrades() {
       const newBalance = currentBalance + netPnl;
       storage.setSetting("paper_balance", String(newBalance));
 
-      const startOfDayBalance = parseFloat(storage.getSetting("day_start_balance") || String(newBalance));
-      const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
-      const drawdownPct = startOfDayBalance > 0 ? (startOfDayBalance - newBalance) / startOfDayBalance : 0;
-      if (drawdownPct >= drawdownLimit) {
-        storage.setSetting("circuit_breaker", "triggered");
-        storage.setSetting("circuit_breaker_at", new Date().toISOString());
-      }
+      maybeTriggerDrawdownCircuitBreaker();
     } catch {
       continue;
     }
@@ -1648,7 +1803,7 @@ async function runEngineOnce() {
   engineState.lastPollAt = new Date().toISOString();
   engineState.openTrades = storage.getOpenTrades().length;
 
-  if (storage.getSetting("circuit_breaker") === "triggered") {
+  if (drawdownStopsEnabled() && storage.getSetting("circuit_breaker") === "triggered") {
     engineState.lastPollOutcome = "paused_by_circuit_breaker";
     return;
   }
@@ -1705,7 +1860,6 @@ async function runEngineOnce() {
   engineState.openTrades = storage.getOpenTrades().length;
   const maxDailyTrades = Math.max(0, parseInt(storage.getSetting("max_daily_trades") || "0", 10));
   const maxOrderSize = parseFloat(storage.getSetting("max_order_size") || "25");
-  const maxRiskPerTrade = Math.min(0.25, Math.max(0.01, parseFloat(storage.getSetting("max_risk_per_trade") || "0.08")));
   let tradesToday = countTradesToday();
   let openExposure = getOpenExposure();
   let openedTrade = false;
@@ -1757,10 +1911,8 @@ async function runEngineOnce() {
 
       const config = parseStrategyConfig(strategy);
       const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
-      const riskCapSize = balance * maxRiskPerTrade;
-      const usePercentSizing = storage.getSetting("use_percent_sizing") !== "false";
-      const requestedSize = usePercentSizing ? riskCapSize : Number(config.orderSize ?? strategy.orderSize ?? riskCapSize);
-      const orderSize = Math.min(requestedSize, maxOrderSize, riskCapSize);
+      const sizing = calculateStrategySizing(strategy, config, balance, maxOrderSize);
+      const orderSize = sizing.orderSize;
       if (maxDailyTrades > 0 && tradesToday >= maxDailyTrades) {
         lastSkipReason = "max_daily_trades_reached";
         if (diagnostic) {
@@ -1780,7 +1932,7 @@ async function runEngineOnce() {
         continue;
       }
       if (diagnostic) {
-        diagnostic.detail = `Sizing ${orderSize.toFixed(2)} USDC (${(orderSize / balance * 100).toFixed(1)}% of paper balance)`;
+        diagnostic.detail = sizing.detail;
       }
       if (openExposure + orderSize > balance) {
         lastSkipReason = `${strategy.name}: insufficient_paper_balance`;
@@ -1914,6 +2066,7 @@ async function runEngineOnce() {
         const noFee = calculateTakerFee(arb.noSize, arb.noPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
         const timestamp = new Date().toISOString();
         const marketQuestion = market._eventTitle || market.question || winner.strategy.marketQuestion;
+        const tradeGroupId = `arb-${market.conditionId || market.id}-${Date.now()}`;
         storage.createTradeLog({
           strategyId: winner.strategy.id,
           strategyName: winner.strategy.name,
@@ -1922,6 +2075,7 @@ async function runEngineOnce() {
           tokenId: snapshot.yesTokenId,
           side: "BUY",
           outcome: "YES",
+          tradeGroupId,
           price: arb.yesPrice,
           size: arb.yesSize,
           status: "open",
@@ -1938,6 +2092,7 @@ async function runEngineOnce() {
           tokenId: snapshot.noTokenId,
           side: "BUY",
           outcome: "NO",
+          tradeGroupId,
           price: arb.noPrice,
           size: arb.noSize,
           status: "open",
@@ -2405,6 +2560,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const drawdownLimit = parseFloat(storage.getSetting("drawdown_limit") || "0.10");
     const circuitBreaker = storage.getSetting("circuit_breaker") || "ok";
     const circuitBreakerAt = storage.getSetting("circuit_breaker_at") || null;
+    const drawdownCircuitBreakerEnabled = drawdownStopsEnabled();
     const drawdownPct = startOfDayBalance > 0
       ? Math.max(0, (startOfDayBalance - balance) / startOfDayBalance)
       : 0;
@@ -2442,6 +2598,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       drawdownLimit: parseFloat((drawdownLimit * 100).toFixed(0)),
       circuitBreaker,
       circuitBreakerAt,
+      drawdownCircuitBreakerEnabled,
       latencyMs,
       lagScore,
       polyPrice,

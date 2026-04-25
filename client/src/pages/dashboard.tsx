@@ -56,6 +56,78 @@ type EngineStatus = {
   };
 };
 
+type ActivityTrade = {
+  key: string;
+  timestamp: string;
+  marketQuestion: string | null;
+  tokenId: string;
+  action: string;
+  priceLabel: string;
+  size: number;
+  status: string;
+  strategyName: string | null;
+  strategyId: number | null;
+  netPnl: number | null;
+  message: string | null;
+};
+
+function groupTradesForActivity(trades: TradeLog[]): ActivityTrade[] {
+  const grouped = new Map<string, TradeLog[]>();
+  const singles: TradeLog[] = [];
+  for (const trade of trades) {
+    if (trade.tradeGroupId) {
+      const legs = grouped.get(trade.tradeGroupId) ?? [];
+      legs.push(trade);
+      grouped.set(trade.tradeGroupId, legs);
+    } else {
+      singles.push(trade);
+    }
+  }
+
+  const groupedItems = Array.from(grouped.entries()).map(([tradeGroupId, legs]) => {
+    const first = legs[0];
+    const totalSize = legs.reduce((sum, leg) => sum + leg.size, 0);
+    const avgPrice = totalSize > 0
+      ? legs.reduce((sum, leg) => sum + leg.price * leg.size, 0) / totalSize
+      : first.price;
+    return {
+      key: tradeGroupId,
+      timestamp: first.timestamp,
+      marketQuestion: first.marketQuestion,
+      tokenId: first.tokenId,
+      action: "BUY YES+NO",
+      priceLabel: `pair avg ${(avgPrice * 100).toFixed(1)}%`,
+      size: totalSize,
+      status: legs.some((leg) => leg.status === "open") ? "open" : first.status,
+      strategyName: first.strategyName,
+      strategyId: first.strategyId,
+      netPnl: legs.every((leg) => leg.netPnl != null)
+        ? legs.reduce((sum, leg) => sum + (leg.netPnl ?? 0), 0)
+        : null,
+      message: first.errorMessage?.replace(/^Paired arb (YES|NO) leg: /, "Paired arb: ") ?? null,
+    };
+  });
+
+  const singleItems = singles.map((trade) => ({
+    key: String(trade.id),
+    timestamp: trade.timestamp,
+    marketQuestion: trade.marketQuestion,
+    tokenId: trade.tokenId,
+    action: `${trade.side} ${trade.outcome}`,
+    priceLabel: `${(trade.price * 100).toFixed(1)}%`,
+    size: trade.size,
+    status: trade.status,
+    strategyName: trade.strategyName,
+    strategyId: trade.strategyId,
+    netPnl: trade.netPnl,
+    message: trade.errorMessage,
+  }));
+
+  return [...groupedItems, ...singleItems].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+  );
+}
+
 export default function Dashboard() {
   const { toast } = useToast();
   const [balanceResetValue, setBalanceResetValue] = useState("1000");
@@ -88,6 +160,7 @@ export default function Dashboard() {
   const { data: safeguards } = useQuery<{
     drawdownPct: number; drawdownLimit: number; circuitBreaker: string;
     circuitBreakerAt: string | null; latencyMs: number | null;
+    drawdownCircuitBreakerEnabled: boolean;
     lagScore: number | null; polyPrice: number | null; chainlinkPrice: number | null;
   }>({
     queryKey: ["/api/safeguards"],
@@ -96,6 +169,7 @@ export default function Dashboard() {
 
   const activeStrats = strategies?.filter((s) => s.isActive) || [];
   const recentTrades = status?.recentTrades || [];
+  const activityTrades = groupTradesForActivity(recentTrades);
   const totalExecutions = strategies?.reduce((sum, s) => sum + s.totalExecutions, 0) || 0;
   const paperBalance = pnl?.paperBalance ?? 1000;
   const totalPnl = pnl?.totalPnl ?? 0;
@@ -493,6 +567,9 @@ export default function Dashboard() {
                 {safeguards?.drawdownPct?.toFixed(1) ?? "0.0"}%
               </p>
               <p className="text-[11px] text-muted-foreground">limit {safeguards?.drawdownLimit ?? 10}%</p>
+              <p className="text-[11px] text-muted-foreground">
+                {safeguards?.drawdownCircuitBreakerEnabled ? "auto-pause on" : "auto-pause off"}
+              </p>
             </div>
             {/* Latency */}
             <div>
@@ -587,15 +664,15 @@ export default function Dashboard() {
           <CardTitle className="text-sm font-medium">Strategy Activity</CardTitle>
         </CardHeader>
         <CardContent>
-          {recentTrades.length === 0 ? (
+          {activityTrades.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
               Strategy entries will appear here once the manager opens paper trades.
             </p>
           ) : (
             <div className="space-y-2">
-              {recentTrades.slice(0, 8).map((t) => (
+              {activityTrades.slice(0, 8).map((t) => (
                 <div
-                  key={`activity-${t.id}`}
+                  key={`activity-${t.key}`}
                   className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5"
                 >
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -605,12 +682,12 @@ export default function Dashboard() {
                           {t.strategyName || `Strategy ${t.strategyId ?? "unknown"}`}
                         </p>
                         <Badge variant="outline" className="text-[10px]">
-                          {t.side} {t.outcome}
+                          {t.action}
                         </Badge>
                         <StatusBadge status={t.status} />
                       </div>
                       <p className="text-xs text-muted-foreground mt-1 break-words">
-                        {t.errorMessage || "Paper trade opened by manager"}
+                        {t.message || "Paper trade opened by manager"}
                       </p>
                       <p className="text-[11px] text-muted-foreground mt-1 font-mono truncate">
                         {t.marketQuestion || t.tokenId.slice(0, 16) + "..."}
@@ -621,7 +698,7 @@ export default function Dashboard() {
                         {new Date(t.timestamp).toLocaleTimeString()}
                       </p>
                       <p className="text-xs font-mono mt-1">
-                        {(t.price * 100).toFixed(1)}% / ${t.size.toFixed(2)}
+                        {t.priceLabel} / ${t.size.toFixed(2)}
                       </p>
                       {t.netPnl != null ? (
                         <p className={cn(
@@ -646,15 +723,15 @@ export default function Dashboard() {
           <CardTitle className="text-sm font-medium">Recent Trades</CardTitle>
         </CardHeader>
         <CardContent>
-          {recentTrades.length === 0 ? (
+          {activityTrades.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
               No trades logged yet. Simulate a strategy to see results here.
             </p>
           ) : (
             <>
             <div className="space-y-2 sm:hidden">
-              {recentTrades.map((t) => (
-                <div key={`trade-card-${t.id}`} className="rounded-md bg-muted/30 p-3">
+              {activityTrades.map((t) => (
+                <div key={`trade-card-${t.key}`} className="rounded-md bg-muted/30 p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">
@@ -669,11 +746,11 @@ export default function Dashboard() {
                   <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                     <div>
                       <p className="text-muted-foreground">Side</p>
-                      <p className="font-mono">{t.side} {t.outcome}</p>
+                      <p className="font-mono">{t.action}</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Price</p>
-                      <p className="font-mono">{(t.price * 100).toFixed(1)}%</p>
+                      <p className="font-mono">{t.priceLabel}</p>
                     </div>
                     <div>
                       <p className="text-muted-foreground">Size</p>
@@ -696,8 +773,8 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recentTrades.map((t) => (
-                    <tr key={t.id} className="border-b border-border/50 last:border-0" data-testid={`trade-row-${t.id}`}>
+                  {activityTrades.map((t) => (
+                    <tr key={t.key} className="border-b border-border/50 last:border-0" data-testid={`trade-row-${t.key}`}>
                       <td className="py-2 text-xs text-muted-foreground font-mono">
                         {new Date(t.timestamp).toLocaleTimeString()}
                       </td>
@@ -706,11 +783,11 @@ export default function Dashboard() {
                       </td>
                       <td className="py-2">
                         <Badge variant="outline" className="text-[11px]">
-                          {t.side} {t.outcome}
+                          {t.action}
                         </Badge>
                       </td>
                       <td className="py-2 text-right font-mono">
-                        {(t.price * 100).toFixed(1)}%
+                        {t.priceLabel}
                       </td>
                       <td className="py-2 text-right font-mono">
                         ${t.size.toFixed(2)}
