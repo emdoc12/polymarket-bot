@@ -139,8 +139,10 @@ const FIXED_STRATEGIES = [
     isActive: false,
     autoRoll: true,
     config: JSON.stringify({
+      minImbalanceThreshold: 0.12,
       imbalanceThreshold: 0.18,
       maxEntryPrice: 0.56,
+      hardMaxEntryPrice: 0.72,
       minSecondsLeft: 40,
       minAgentScore: 0.015,
       takeProfitPct: 0.012,
@@ -818,15 +820,28 @@ function sumBookSize(levels: any[] | undefined) {
   }, 0);
 }
 
-function describeOrderbookState(strategy: Strategy, snapshot: PriceSnapshot) {
+function getOrderbookRangeConfig(strategy: Strategy) {
   const config = parseStrategyConfig(strategy);
+  const targetImbalance = Number(config.imbalanceThreshold ?? 0.18);
+  const minImbalance = Number(config.minImbalanceThreshold ?? Math.min(targetImbalance, 0.18));
+  const targetMaxEntry = Number(config.maxEntryPrice ?? 0.56);
+  const hardMaxEntry = Number(config.hardMaxEntryPrice ?? Math.max(targetMaxEntry, 0.72));
+  return {
+    config,
+    minImbalance: Math.max(0, Math.min(minImbalance, targetImbalance)),
+    targetImbalance: Math.max(0, targetImbalance),
+    targetMaxEntry: clampProbability(targetMaxEntry),
+    hardMaxEntry: clampProbability(Math.max(targetMaxEntry, hardMaxEntry)),
+  };
+}
+
+function describeOrderbookState(strategy: Strategy, snapshot: PriceSnapshot) {
+  const { config, minImbalance, targetImbalance, targetMaxEntry, hardMaxEntry } = getOrderbookRangeConfig(strategy);
   const yesPrice = clampProbability(snapshot.yesMid);
   const noPrice = clampProbability(snapshot.noMid, 1 - yesPrice);
   const yesBidDepth = sumBookSize(snapshot.yesBook?.bids);
   const noBidDepth = sumBookSize(snapshot.noBook?.bids);
   const totalDepth = yesBidDepth + noBidDepth;
-  const threshold = Number(config.imbalanceThreshold ?? 0.18);
-  const maxEntryPrice = Number(config.maxEntryPrice ?? 0.56);
   const minAgentScore = Number(config.minAgentScore ?? 0.015);
 
   if (totalDepth <= 0) {
@@ -836,11 +851,11 @@ function describeOrderbookState(strategy: Strategy, snapshot: PriceSnapshot) {
   const imbalance = (yesBidDepth - noBidDepth) / totalDepth;
   const favoredSide = imbalance >= 0 ? "YES" : "NO";
   const favoredPrice = favoredSide === "YES" ? yesPrice : noPrice;
-  const thresholdBlocked = Math.abs(imbalance) < threshold;
-  const priceBlocked = favoredPrice > maxEntryPrice;
+  const thresholdBlocked = Math.abs(imbalance) < minImbalance;
+  const priceBlocked = favoredPrice > hardMaxEntry;
   const pieces = [
-    `${favoredSide} book imbalance ${(Math.abs(imbalance) * 100).toFixed(1)}% vs ${(threshold * 100).toFixed(1)}% threshold`,
-    `${favoredSide} price ${(favoredPrice * 100).toFixed(1)}% vs ${(maxEntryPrice * 100).toFixed(1)}% cap`,
+    `${favoredSide} book imbalance ${(Math.abs(imbalance) * 100).toFixed(1)}% vs ${(minImbalance * 100).toFixed(1)}%-${(targetImbalance * 100).toFixed(1)}% range`,
+    `${favoredSide} price ${(favoredPrice * 100).toFixed(1)}% vs ${(targetMaxEntry * 100).toFixed(1)}%-${(hardMaxEntry * 100).toFixed(1)}% range`,
     `min edge ${(minAgentScore * 100).toFixed(1)}%`,
   ];
 
@@ -1186,20 +1201,23 @@ async function evaluateSignal(
     const totalDepth = yesBidDepth + noBidDepth;
     if (totalDepth <= 0) return null;
     const imbalance = (yesBidDepth - noBidDepth) / totalDepth;
-    const threshold = Number(config.imbalanceThreshold ?? 0.18);
-    const maxEntryPrice = Number(config.maxEntryPrice ?? 0.56);
-    if (imbalance >= threshold && yesPrice <= maxEntryPrice) {
+    const { minImbalance, targetImbalance, targetMaxEntry, hardMaxEntry } = getOrderbookRangeConfig(strategy);
+    if (imbalance >= minImbalance && yesPrice <= hardMaxEntry) {
+      const softPenalty = Math.max(0, targetImbalance - Math.abs(imbalance)) * 0.9
+        + Math.max(0, yesPrice - targetMaxEntry) * 1.2;
       return {
         side: "YES" as const,
-        score: Math.abs(imbalance) * 1.6 + Math.max(0, maxEntryPrice - yesPrice) * 4,
-        reason: `YES bid imbalance ${imbalance.toFixed(2)}`,
+        score: Math.abs(imbalance) * 1.6 + Math.max(0, targetMaxEntry - yesPrice) * 4 - softPenalty,
+        reason: `YES bid imbalance ${imbalance.toFixed(2)} with ${(yesPrice * 100).toFixed(1)}% entry`,
       };
     }
-    if (imbalance <= -threshold && noPrice <= maxEntryPrice) {
+    if (imbalance <= -minImbalance && noPrice <= hardMaxEntry) {
+      const softPenalty = Math.max(0, targetImbalance - Math.abs(imbalance)) * 0.9
+        + Math.max(0, noPrice - targetMaxEntry) * 1.2;
       return {
         side: "NO" as const,
-        score: Math.abs(imbalance) * 1.6 + Math.max(0, maxEntryPrice - noPrice) * 4,
-        reason: `NO bid imbalance ${imbalance.toFixed(2)}`,
+        score: Math.abs(imbalance) * 1.6 + Math.max(0, targetMaxEntry - noPrice) * 4 - softPenalty,
+        reason: `NO bid imbalance ${imbalance.toFixed(2)} with ${(noPrice * 100).toFixed(1)}% entry`,
       };
     }
     return null;
@@ -1285,8 +1303,8 @@ function evaluateAgentOpinion(
   let thesis = "neutral market read";
 
   if (strategy.name === "Orderbook Arbitrage & Imbalance") {
-    const threshold = Number(config.imbalanceThreshold ?? 0.18);
-    if (Math.abs(imbalance) < threshold) return null;
+    const { minImbalance } = getOrderbookRangeConfig(strategy);
+    if (Math.abs(imbalance) < minImbalance) return null;
     side = imbalance >= 0 ? "YES" : "NO";
     directionalConfidence = 0.5 + Math.min(0.32, Math.abs(imbalance) * 0.55);
     thesis = `${side} book pressure ${imbalance.toFixed(2)}`;
@@ -1308,7 +1326,9 @@ function evaluateAgentOpinion(
   }
 
   const entryPrice = side === "YES" ? yesPrice : noPrice;
-  const maxAgentEntryPrice = Number(config.maxAgentEntryPrice ?? config.maxEntryPrice ?? 0.68);
+  const maxAgentEntryPrice = strategy.name === "Orderbook Arbitrage & Imbalance"
+    ? getOrderbookRangeConfig(strategy).hardMaxEntry
+    : Number(config.maxAgentEntryPrice ?? config.maxEntryPrice ?? 0.68);
   if (entryPrice > maxAgentEntryPrice) return null;
 
   const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
@@ -1318,7 +1338,14 @@ function evaluateAgentOpinion(
   const estimatedExitFeeDrag = feeRate * estimatedExitPrice * (1 - estimatedExitPrice) / entryPrice;
   const estimatedFeeDrag = estimatedEntryFeeDrag + estimatedExitFeeDrag;
   const riskPenalty = entryPrice > 0.78 ? (entryPrice - 0.78) * 0.8 : 0;
-  const score = expectedGrossEdge - estimatedFeeDrag - riskPenalty;
+  const orderbookRangePenalty = strategy.name === "Orderbook Arbitrage & Imbalance"
+    ? (() => {
+        const { targetImbalance, targetMaxEntry } = getOrderbookRangeConfig(strategy);
+        return Math.max(0, targetImbalance - Math.abs(imbalance)) * 0.35
+          + Math.max(0, entryPrice - targetMaxEntry) * 0.45;
+      })()
+    : 0;
+  const score = expectedGrossEdge - estimatedFeeDrag - riskPenalty - orderbookRangePenalty;
   const minAgentScore = Number(config.minAgentScore ?? 0.015);
 
   if (score < minAgentScore) {
