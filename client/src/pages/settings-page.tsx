@@ -30,6 +30,7 @@ export default function SettingsPage() {
   const [drawdownLimit, setDrawdownLimit] = useState("10");
   const [multiSourceVerify, setMultiSourceVerify] = useState(true);
   const [enableMultiAssetMarkets, setEnableMultiAssetMarkets] = useState(false);
+  const [enableOrderbookOptimizer, setEnableOrderbookOptimizer] = useState(true);
 
   useEffect(() => {
     if (settings) {
@@ -42,6 +43,7 @@ export default function SettingsPage() {
       setDrawdownLimit((parseFloat(getVal("drawdown_limit", "0.10")) * 100).toFixed(0));
       setMultiSourceVerify(getVal("multi_source_verify", "true") === "true");
       setEnableMultiAssetMarkets(getVal("enable_multi_asset_markets", "false") === "true");
+      setEnableOrderbookOptimizer(getVal("enable_orderbook_optimizer", "true") === "true");
     }
   }, [settings]);
 
@@ -57,6 +59,7 @@ export default function SettingsPage() {
         ["drawdown_limit", String(parseFloat(drawdownLimit) / 100)],
         ["multi_source_verify", String(multiSourceVerify)],
         ["enable_multi_asset_markets", String(enableMultiAssetMarkets)],
+        ["enable_orderbook_optimizer", String(enableOrderbookOptimizer)],
       ];
       for (const [key, value] of pairs) {
         await apiRequest("POST", "/api/settings", { key, value });
@@ -190,6 +193,30 @@ export default function SettingsPage() {
             />
             <Label className="text-xs">
               {multiSourceVerify ? "Enabled — spot data must confirm entries" : "Disabled — using Polymarket price action only"}
+            </Label>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Adaptive strategy research */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">Adaptive Orderbook Optimizer</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Sweep orderbook profiles on each poll and let the manager use the strongest current paper setup.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={enableOrderbookOptimizer}
+              onCheckedChange={setEnableOrderbookOptimizer}
+            />
+            <Label className="text-xs">
+              {enableOrderbookOptimizer ? "Enabled — testing profiles each poll" : "Disabled — using saved strategy settings only"}
             </Label>
           </div>
         </CardContent>

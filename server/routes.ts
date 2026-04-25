@@ -108,6 +108,57 @@ type EngineRuntimeState = {
 
 type StrategyRuntimeConfig = Record<string, number>;
 
+const ORDERBOOK_OPTIMIZER_PROFILES = [
+  {
+    name: "current",
+    config: {},
+  },
+  {
+    name: "tight",
+    config: {
+      minImbalanceThreshold: 0.28,
+      imbalanceThreshold: 0.45,
+      maxEntryPrice: 0.56,
+      hardMaxEntryPrice: 0.68,
+      minAgentScore: 0.018,
+    },
+  },
+  {
+    name: "balanced",
+    config: {
+      minImbalanceThreshold: 0.18,
+      imbalanceThreshold: 0.32,
+      maxEntryPrice: 0.62,
+      hardMaxEntryPrice: 0.76,
+      minAgentScore: 0.01,
+    },
+  },
+  {
+    name: "active",
+    config: {
+      minImbalanceThreshold: 0.1,
+      imbalanceThreshold: 0.22,
+      maxEntryPrice: 0.68,
+      hardMaxEntryPrice: 0.82,
+      minAgentScore: 0.006,
+    },
+  },
+  {
+    name: "scalp",
+    config: {
+      minImbalanceThreshold: 0.06,
+      imbalanceThreshold: 0.16,
+      maxEntryPrice: 0.72,
+      hardMaxEntryPrice: 0.86,
+      minAgentScore: 0.004,
+      takeProfitPct: 0.008,
+      stopLossPct: 0.008,
+      minHoldSeconds: 5,
+      forceExitSecondsLeft: 12,
+    },
+  },
+];
+
 const FIXED_STRATEGIES = [
   {
     name: "Last-Second Momentum Snipe",
@@ -865,6 +916,85 @@ function describeOrderbookState(strategy: Strategy, snapshot: PriceSnapshot) {
   return `${pieces.join("; ")}; below after-fee edge score`;
 }
 
+function buildStrategyWithConfig(strategy: Strategy, overrides: Record<string, number>) {
+  const config = { ...parseStrategyConfig(strategy), ...overrides };
+  return {
+    ...strategy,
+    config: JSON.stringify(config),
+  } as Strategy;
+}
+
+async function optimizeOrderbookStrategy(
+  strategy: Strategy,
+  market: PolyMarket,
+  snapshot: PriceSnapshot,
+  candles: any[],
+) {
+  if (strategy.name !== "Orderbook Arbitrage & Imbalance" || storage.getSetting("enable_orderbook_optimizer") === "false") {
+    const strictSignal = await evaluateSignal(strategy, market, snapshot, candles);
+    const signal = strictSignal ?? evaluateAgentOpinion(strategy, market, snapshot, candles);
+    return {
+      strategy,
+      profileName: "manual",
+      signal,
+      scanned: 1,
+      bestRejectedStrategy: strategy,
+    };
+  }
+
+  let best: {
+    strategy: Strategy;
+    profileName: string;
+    signal: { side: "YES" | "NO"; score: number; reason: string };
+  } | null = null;
+  let bestRejectedStrategy = strategy;
+  let bestRejectedScore = Number.NEGATIVE_INFINITY;
+
+  for (const profile of ORDERBOOK_OPTIMIZER_PROFILES) {
+    const candidate = buildStrategyWithConfig(strategy, profile.config);
+    const strictSignal = await evaluateSignal(candidate, market, snapshot, candles);
+    const agentSignal = strictSignal ?? evaluateAgentOpinion(candidate, market, snapshot, candles);
+    if (agentSignal) {
+      const profilePenalty = profile.name === "current" ? 0 : 0.002;
+      const adjustedSignal = {
+        ...agentSignal,
+        score: agentSignal.score - profilePenalty,
+        reason: `${profile.name} profile: ${agentSignal.reason}`,
+      };
+      if (!best || adjustedSignal.score > best.signal.score) {
+        best = { strategy: candidate, profileName: profile.name, signal: adjustedSignal };
+      }
+      continue;
+    }
+
+    const { minImbalance, targetImbalance, targetMaxEntry, hardMaxEntry } = getOrderbookRangeConfig(candidate);
+    const yesPrice = clampProbability(snapshot.yesMid);
+    const noPrice = clampProbability(snapshot.noMid, 1 - yesPrice);
+    const yesBidDepth = sumBookSize(snapshot.yesBook?.bids);
+    const noBidDepth = sumBookSize(snapshot.noBook?.bids);
+    const totalDepth = yesBidDepth + noBidDepth;
+    if (totalDepth <= 0) continue;
+    const imbalance = Math.abs((yesBidDepth - noBidDepth) / totalDepth);
+    const favoredPrice = yesBidDepth >= noBidDepth ? yesPrice : noPrice;
+    const nearMissScore = imbalance - minImbalance
+      - Math.max(0, favoredPrice - hardMaxEntry)
+      - Math.max(0, targetImbalance - imbalance) * 0.2
+      - Math.max(0, favoredPrice - targetMaxEntry) * 0.2;
+    if (nearMissScore > bestRejectedScore) {
+      bestRejectedScore = nearMissScore;
+      bestRejectedStrategy = candidate;
+    }
+  }
+
+  return {
+    strategy: best?.strategy ?? strategy,
+    profileName: best?.profileName ?? null,
+    signal: best?.signal ?? null,
+    scanned: ORDERBOOK_OPTIMIZER_PROFILES.length,
+    bestRejectedStrategy,
+  };
+}
+
 async function getPriceSnapshot(market: PolyMarket): Promise<PriceSnapshot> {
   const { yesTokenId, noTokenId } = getTokenIds(market);
   const [yesMid, noMid, yesBook, noBook] = await Promise.all([
@@ -1075,6 +1205,7 @@ function ensurePaperDefaults() {
   if (!storage.getSetting("max_risk_per_trade")) storage.setSetting("max_risk_per_trade", "0.08");
   if (!storage.getSetting("use_percent_sizing")) storage.setSetting("use_percent_sizing", "true");
   if (!storage.getSetting("enable_multi_asset_markets")) storage.setSetting("enable_multi_asset_markets", "false");
+  if (!storage.getSetting("enable_orderbook_optimizer")) storage.setSetting("enable_orderbook_optimizer", "true");
   storage.setSetting("mode", "paper");
 }
 
@@ -1510,14 +1641,15 @@ async function runEngineOnce() {
         continue;
       }
 
-      const strictSignal = await evaluateSignal(strategy, market, snapshot, candles);
-      const signal = strictSignal ?? evaluateAgentOpinion(strategy, market, snapshot, candles);
+      const optimization = await optimizeOrderbookStrategy(strategy, market, snapshot, candles);
+      const evaluationStrategy = optimization.strategy;
+      const signal = optimization.signal;
       if (!signal) {
         lastSkipReason = `${strategy.name}: no_signal`;
         if (diagnostic) {
           diagnostic.outcome = "no_signal";
           diagnostic.detail = strategy.name === "Orderbook Arbitrage & Imbalance"
-            ? describeOrderbookState(strategy, snapshot)
+            ? `Optimizer scanned ${optimization.scanned} profiles; ${describeOrderbookState(optimization.bestRejectedStrategy, snapshot)}`
             : "Agent did not find positive edge after fees";
           diagnostic.score = null;
         }
@@ -1526,10 +1658,12 @@ async function runEngineOnce() {
 
       if (diagnostic) {
         diagnostic.outcome = "recommended";
-        diagnostic.detail = strictSignal ? signal.reason : `Agentic read: ${signal.reason}`;
+        diagnostic.detail = strategy.name === "Orderbook Arbitrage & Imbalance"
+          ? `Optimizer selected ${optimization.profileName}: ${signal.reason}`
+          : signal.reason;
         diagnostic.score = Number(signal.score.toFixed(3));
       }
-      recommendations.push({ strategy, diagnostic, signal, orderSize });
+      recommendations.push({ strategy: evaluationStrategy, diagnostic, signal, orderSize });
     } catch {
       if (diagnostic) {
         diagnostic.outcome = "error";
@@ -1556,7 +1690,10 @@ async function runEngineOnce() {
 
   recommendations.sort((a, b) => b.signal.score - a.signal.score);
   const winner = recommendations[0];
-  const managerScoreThreshold = 0.015;
+  const winnerConfig = parseStrategyConfig(winner.strategy);
+  const managerScoreThreshold = winner.strategy.name === "Orderbook Arbitrage & Imbalance"
+    ? Number(winnerConfig.managerScoreThreshold ?? winnerConfig.minAgentScore ?? 0.006)
+    : 0.015;
   engineState.managerDecision = {
     chosenStrategyId: winner.strategy.id,
     chosenStrategyName: winner.strategy.name,
@@ -1601,6 +1738,11 @@ async function runEngineOnce() {
 
       const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
       const entryFee = calculateTakerFee(winner.orderSize, entry.price, feeRate);
+      if (winner.strategy.name === "Orderbook Arbitrage & Imbalance" && storage.getSetting("enable_orderbook_optimizer") !== "false") {
+        storage.updateStrategy(winner.strategy.id, {
+          config: winner.strategy.config,
+        });
+      }
       storage.createTradeLog({
         strategyId: winner.strategy.id,
         strategyName: winner.strategy.name,
