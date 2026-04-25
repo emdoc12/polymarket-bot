@@ -2373,6 +2373,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
     storage.setSetting("paper_balance", String(balance));
     storage.setSetting("day_start_balance", String(balance));
+    storage.setSetting("day_balance_reset", getTodayKey());
+    storage.setSetting("circuit_breaker", "ok");
+    storage.setSetting("circuit_breaker_at", "");
     res.json({ balance });
   });
 

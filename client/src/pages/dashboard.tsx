@@ -2,10 +2,12 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Bot, Activity, DollarSign, Trophy, TrendingDown, ShieldAlert, ShieldCheck, Wifi, Zap, TimerReset, Radar, CircleDot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useEffect, useState } from "react";
 import type { TradeLog, Strategy } from "@shared/schema";
 
 type EngineStatus = {
@@ -56,6 +58,7 @@ type EngineStatus = {
 
 export default function Dashboard() {
   const { toast } = useToast();
+  const [balanceResetValue, setBalanceResetValue] = useState("1000");
   const { data: status } = useQuery<{
     mode: string;
     activeStrategies: number;
@@ -111,6 +114,25 @@ export default function Dashboard() {
       toast({ title: "Reset failed", description: e.message, variant: "destructive" });
     },
   });
+  const resetBalanceMutation = useMutation({
+    mutationFn: async () => apiRequest("POST", "/api/paper-balance", { balance: parseFloat(balanceResetValue) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/pnl"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper-balance"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/safeguards"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
+      toast({ title: "Paper balance reset" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Balance reset failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  useEffect(() => {
+    if (pnl?.paperBalance != null) {
+      setBalanceResetValue(String(Math.round(pnl.paperBalance)));
+    }
+  }, [pnl?.paperBalance]);
 
   return (
     <div className="space-y-6">
@@ -144,6 +166,25 @@ export default function Dashboard() {
                   ${paperBalance.toFixed(2)}
                 </p>
                 <p className="text-[11px] text-muted-foreground mt-0.5">started at $1,000</p>
+                <div className="mt-3 flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={balanceResetValue}
+                    onChange={(event) => setBalanceResetValue(event.target.value)}
+                    className="h-8 w-24 font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    onClick={() => resetBalanceMutation.mutate()}
+                    disabled={resetBalanceMutation.isPending || !Number.isFinite(parseFloat(balanceResetValue))}
+                  >
+                    Reset
+                  </Button>
+                </div>
               </div>
               <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center">
                 <DollarSign className="w-4 h-4 text-primary" />
