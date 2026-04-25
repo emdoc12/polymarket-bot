@@ -818,6 +818,38 @@ function sumBookSize(levels: any[] | undefined) {
   }, 0);
 }
 
+function describeOrderbookState(strategy: Strategy, snapshot: PriceSnapshot) {
+  const config = parseStrategyConfig(strategy);
+  const yesPrice = clampProbability(snapshot.yesMid);
+  const noPrice = clampProbability(snapshot.noMid, 1 - yesPrice);
+  const yesBidDepth = sumBookSize(snapshot.yesBook?.bids);
+  const noBidDepth = sumBookSize(snapshot.noBook?.bids);
+  const totalDepth = yesBidDepth + noBidDepth;
+  const threshold = Number(config.imbalanceThreshold ?? 0.18);
+  const maxEntryPrice = Number(config.maxEntryPrice ?? 0.56);
+  const minAgentScore = Number(config.minAgentScore ?? 0.015);
+
+  if (totalDepth <= 0) {
+    return "No usable YES/NO bid depth from the order book";
+  }
+
+  const imbalance = (yesBidDepth - noBidDepth) / totalDepth;
+  const favoredSide = imbalance >= 0 ? "YES" : "NO";
+  const favoredPrice = favoredSide === "YES" ? yesPrice : noPrice;
+  const thresholdBlocked = Math.abs(imbalance) < threshold;
+  const priceBlocked = favoredPrice > maxEntryPrice;
+  const pieces = [
+    `${favoredSide} book imbalance ${(Math.abs(imbalance) * 100).toFixed(1)}% vs ${(threshold * 100).toFixed(1)}% threshold`,
+    `${favoredSide} price ${(favoredPrice * 100).toFixed(1)}% vs ${(maxEntryPrice * 100).toFixed(1)}% cap`,
+    `min edge ${(minAgentScore * 100).toFixed(1)}%`,
+  ];
+
+  if (thresholdBlocked && priceBlocked) return `${pieces.join("; ")}; blocked by imbalance and price`;
+  if (thresholdBlocked) return `${pieces.join("; ")}; blocked by imbalance`;
+  if (priceBlocked) return `${pieces.join("; ")}; blocked by price cap`;
+  return `${pieces.join("; ")}; below after-fee edge score`;
+}
+
 async function getPriceSnapshot(market: PolyMarket): Promise<PriceSnapshot> {
   const { yesTokenId, noTokenId } = getTokenIds(market);
   const [yesMid, noMid, yesBook, noBook] = await Promise.all([
@@ -1457,7 +1489,9 @@ async function runEngineOnce() {
         lastSkipReason = `${strategy.name}: no_signal`;
         if (diagnostic) {
           diagnostic.outcome = "no_signal";
-          diagnostic.detail = "Agent did not find positive edge after fees";
+          diagnostic.detail = strategy.name === "Orderbook Arbitrage & Imbalance"
+            ? describeOrderbookState(strategy, snapshot)
+            : "Agent did not find positive edge after fees";
           diagnostic.score = null;
         }
         continue;
