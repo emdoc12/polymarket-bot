@@ -996,80 +996,133 @@ function evaluatePureArbitrage(
   snapshot: PriceSnapshot,
   orderSize: number,
 ) {
-  const config = parseStrategyConfig(strategy);
-  const timeLeftMs = market.endDate ? new Date(market.endDate).getTime() - Date.now() : 0;
-  const secondsLeft = Math.max(0, Math.floor(timeLeftMs / 1000));
-  const minSecondsLeft = Number(config.minSecondsLeft ?? 20);
-  if (secondsLeft < minSecondsLeft) return null;
-
-  const yesAsk = getBestAsk(snapshot.yesBook);
-  const noAsk = getBestAsk(snapshot.noBook);
-  if (!yesAsk || !noAsk) return null;
-
-  const yesPrice = clampProbability(yesAsk.price);
-  const noPrice = clampProbability(noAsk.price);
-  const pairCost = yesPrice + noPrice;
-  const maxPairCost = Number(config.maxPairCost ?? 0.985);
-  if (pairCost > maxPairCost) return null;
-
-  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
-  const maxSharesByBudget = orderSize / pairCost;
-  const shares = Math.min(maxSharesByBudget, yesAsk.size, noAsk.size);
-  if (!Number.isFinite(shares) || shares <= 0) return null;
-
-  const yesSize = shares * yesPrice;
-  const noSize = shares * noPrice;
-  const totalCost = yesSize + noSize;
-  const yesFee = calculateTakerFee(yesSize, yesPrice, feeRate);
-  const noFee = calculateTakerFee(noSize, noPrice, feeRate);
-  const totalFees = yesFee + noFee;
-  const netProfit = shares - totalCost - totalFees;
-  const netEdgePct = totalCost > 0 ? netProfit / totalCost : 0;
-  const minNetEdgePct = Number(config.minNetEdgePct ?? 0.005);
-  const minProfitUsdc = Number(config.minProfitUsdc ?? 0.25);
-
-  if (netProfit < minProfitUsdc || netEdgePct < minNetEdgePct) {
+  const analysis = analyzePureArbitrage(strategy, market, snapshot, orderSize);
+  if (!analysis.ready) {
     return null;
   }
 
   return {
     side: "YES" as const,
-    score: netEdgePct,
-    reason: `Pure arb YES ${yesPrice.toFixed(3)} + NO ${noPrice.toFixed(3)} = ${pairCost.toFixed(3)}; locked +${netProfit.toFixed(2)} USDC (${(netEdgePct * 100).toFixed(2)}%) after fees`,
+    score: analysis.netEdgePct,
+    reason: `Pure arb YES ${analysis.yesPrice.toFixed(3)} + NO ${analysis.noPrice.toFixed(3)} = ${analysis.pairCost.toFixed(3)}; locked +${analysis.netProfit.toFixed(2)} USDC (${(analysis.netEdgePct * 100).toFixed(2)}%) after fees`,
     arb: {
-      yesPrice,
-      noPrice,
-      yesSize,
-      noSize,
-      shares,
-      netProfit,
-      netEdgePct,
-      totalCost,
-      totalFees,
+      yesPrice: analysis.yesPrice,
+      noPrice: analysis.noPrice,
+      yesSize: analysis.yesSize,
+      noSize: analysis.noSize,
+      shares: analysis.shares,
+      netProfit: analysis.netProfit,
+      netEdgePct: analysis.netEdgePct,
+      totalCost: analysis.totalCost,
+      totalFees: analysis.totalFees,
     },
   };
 }
 
-function describePureArbState(strategy: Strategy, snapshot: PriceSnapshot, orderSize: number) {
+function analyzePureArbitrage(
+  strategy: Strategy,
+  market: PolyMarket,
+  snapshot: PriceSnapshot,
+  orderSize: number,
+) {
   const config = parseStrategyConfig(strategy);
+  const timeLeftMs = market.endDate ? new Date(market.endDate).getTime() - Date.now() : 0;
+  const secondsLeft = Math.max(0, Math.floor(timeLeftMs / 1000));
+  const minSecondsLeft = Number(config.minSecondsLeft ?? 20);
   const yesAsk = getBestAsk(snapshot.yesBook);
   const noAsk = getBestAsk(snapshot.noBook);
-  if (!yesAsk || !noAsk) return "Missing executable YES/NO asks";
+  const maxPairCost = Number(config.maxPairCost ?? 0.985);
+  const minNetEdgePct = Number(config.minNetEdgePct ?? 0.005);
+  const minProfitUsdc = Number(config.minProfitUsdc ?? 0.25);
+
+  if (secondsLeft < minSecondsLeft) {
+    return {
+      ready: false,
+      detail: `Too late for pure arb: ${secondsLeft}s left vs ${minSecondsLeft}s minimum`,
+      yesPrice: 0.5,
+      noPrice: 0.5,
+      pairCost: 1,
+      shares: 0,
+      yesSize: 0,
+      noSize: 0,
+      totalCost: 0,
+      totalFees: 0,
+      netProfit: 0,
+      netEdgePct: 0,
+    };
+  }
+
+  if (!yesAsk || !noAsk) {
+    return {
+      ready: false,
+      detail: "Missing executable YES/NO asks from CLOB order books",
+      yesPrice: 0.5,
+      noPrice: 0.5,
+      pairCost: 1,
+      shares: 0,
+      yesSize: 0,
+      noSize: 0,
+      totalCost: 0,
+      totalFees: 0,
+      netProfit: 0,
+      netEdgePct: 0,
+    };
+  }
 
   const yesPrice = clampProbability(yesAsk.price);
   const noPrice = clampProbability(noAsk.price);
   const pairCost = yesPrice + noPrice;
-  const maxPairCost = Number(config.maxPairCost ?? 0.985);
   const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
   const shares = Math.min(orderSize / pairCost, yesAsk.size, noAsk.size);
+  if (!Number.isFinite(shares) || shares <= 0) {
+    return {
+      ready: false,
+      detail: `No executable paired depth: YES depth ${yesAsk.size.toFixed(2)}, NO depth ${noAsk.size.toFixed(2)}`,
+      yesPrice,
+      noPrice,
+      pairCost,
+      shares: 0,
+      yesSize: 0,
+      noSize: 0,
+      totalCost: 0,
+      totalFees: 0,
+      netProfit: 0,
+      netEdgePct: 0,
+    };
+  }
+
   const yesSize = shares * yesPrice;
   const noSize = shares * noPrice;
   const totalCost = yesSize + noSize;
   const totalFees = calculateTakerFee(yesSize, yesPrice, feeRate) + calculateTakerFee(noSize, noPrice, feeRate);
   const netProfit = shares - totalCost - totalFees;
   const netEdgePct = totalCost > 0 ? netProfit / totalCost : 0;
+  const blockers: string[] = [];
+  if (pairCost > maxPairCost) blockers.push(`pair cost ${(pairCost * 100).toFixed(1)}% > cap ${(maxPairCost * 100).toFixed(1)}%`);
+  if (netProfit < minProfitUsdc) blockers.push(`profit ${netProfit.toFixed(2)} < ${minProfitUsdc.toFixed(2)} USDC`);
+  if (netEdgePct < minNetEdgePct) blockers.push(`edge ${(netEdgePct * 100).toFixed(2)}% < ${(minNetEdgePct * 100).toFixed(2)}%`);
+  const ready = blockers.length === 0;
+  const feeDragPct = shares > 0 ? (totalFees / shares) * 100 : 0;
+  const detail = `YES ask ${(yesPrice * 100).toFixed(1)}% + NO ask ${(noPrice * 100).toFixed(1)}% = ${(pairCost * 100).toFixed(1)}%; fees ${feeDragPct.toFixed(2)}% of payout; net ${netProfit.toFixed(2)} USDC (${(netEdgePct * 100).toFixed(2)}%); ${ready ? "ready" : `blocked by ${blockers.join(", ")}`}`;
 
-  return `YES ask ${(yesPrice * 100).toFixed(1)}% + NO ask ${(noPrice * 100).toFixed(1)}% = ${(pairCost * 100).toFixed(1)}% vs ${(maxPairCost * 100).toFixed(1)}% cap; net ${netProfit.toFixed(2)} USDC (${(netEdgePct * 100).toFixed(2)}%)`;
+  return {
+    ready,
+    detail,
+    yesPrice,
+    noPrice,
+    pairCost,
+    shares,
+    yesSize,
+    noSize,
+    totalCost,
+    totalFees,
+    netProfit,
+    netEdgePct,
+  };
+}
+
+function describePureArbState(strategy: Strategy, market: PolyMarket, snapshot: PriceSnapshot, orderSize: number) {
+  return analyzePureArbitrage(strategy, market, snapshot, orderSize).detail;
 }
 
 async function optimizeOrderbookStrategy(
@@ -1959,7 +2012,7 @@ async function runEngineOnce() {
           diagnostic.detail = strategy.name === "Orderbook Arbitrage & Imbalance"
             ? `Optimizer scanned ${optimization.scanned} profiles; ${describeOrderbookState(optimization.bestRejectedStrategy, snapshot)}`
             : strategy.name === "Pure YES/NO Arbitrage"
-              ? describePureArbState(strategy, snapshot, orderSize)
+              ? describePureArbState(strategy, market, snapshot, orderSize)
               : "Agent did not find positive edge after fees";
           diagnostic.score = null;
         }
