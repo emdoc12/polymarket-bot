@@ -173,7 +173,6 @@ export default function Dashboard() {
   const totalExecutions = strategies?.reduce((sum, s) => sum + s.totalExecutions, 0) || 0;
   const paperBalance = pnl?.paperBalance ?? 1000;
   const totalPnl = pnl?.totalPnl ?? 0;
-  const startBalance = 1000;
   const secondsToExpiry = engine?.currentMarketTimeLeftSec ?? (engine?.currentMarketEndsAt
     ? Math.max(0, Math.floor((new Date(engine.currentMarketEndsAt).getTime() - Date.now()) / 1000))
     : null);
@@ -239,7 +238,6 @@ export default function Dashboard() {
                 <p className="text-2xl font-semibold mt-1 font-mono tracking-tight">
                   ${paperBalance.toFixed(2)}
                 </p>
-                <p className="text-[11px] text-muted-foreground mt-0.5">started at $1,000</p>
                 <div className="mt-3 flex items-center gap-2">
                   <Input
                     type="number"
@@ -280,7 +278,7 @@ export default function Dashboard() {
                   {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
                 </p>
                 <p className="text-[11px] text-muted-foreground mt-0.5">
-                  {((paperBalance - startBalance) / startBalance * 100).toFixed(1)}% return
+                  {pnl?.totalWins ?? 0}W / {pnl?.totalLosses ?? 0}L
                 </p>
               </div>
               <div className={cn(
