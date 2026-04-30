@@ -5,6 +5,7 @@ import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeL
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const CLOB_API = "https://clob.polymarket.com";
+const BOND_STRATEGY_NAME = "Bond Market Scanner";
 
 const ROLLING_CRYPTO_MARKETS = [
   { symbol: "BTC", slugPrefix: "btc-updown-5m", names: ["bitcoin", "btc"] },
@@ -36,6 +37,7 @@ type PolyMarket = {
   closed?: boolean;
   image?: string;
   slug?: string;
+  liquidity?: string;
   volume?: string;
   volumeNum?: number;
   _eventTitle?: string;
@@ -68,6 +70,9 @@ type TradeSignal = {
   side: "YES" | "NO";
   score: number;
   reason: string;
+  entryPrice?: number;
+  entrySize?: number;
+  tokenId?: string;
   arb?: {
     yesPrice: number;
     noPrice: number;
@@ -79,6 +84,15 @@ type TradeSignal = {
     totalCost: number;
     totalFees: number;
   };
+};
+
+type StrategyRecommendation = {
+  strategy: Strategy;
+  diagnostic: NonNullable<EngineRuntimeState["strategyDiagnostics"]>[number] | undefined;
+  signal: TradeSignal;
+  orderSize: number;
+  market: PolyMarket;
+  snapshot: PriceSnapshot;
 };
 
 type EngineRuntimeState = {
@@ -123,7 +137,7 @@ type EngineRuntimeState = {
   };
 };
 
-type StrategyRuntimeConfig = Record<string, number>;
+type StrategyRuntimeConfig = Record<string, any>;
 
 const ORDERBOOK_OPTIMIZER_PROFILES = [
   {
@@ -177,6 +191,31 @@ const ORDERBOOK_OPTIMIZER_PROFILES = [
 ];
 
 const FIXED_STRATEGIES = [
+  {
+    name: BOND_STRATEGY_NAME,
+    marketQuestion: "Non-BTC high-confidence markets (scanner)",
+    side: "YES" as const,
+    triggerType: "price_above",
+    triggerPrice: 0.95,
+    orderSize: 10,
+    orderType: "MARKET",
+    cooldownMinutes: 2,
+    isActive: false,
+    autoRoll: false,
+    config: JSON.stringify({
+      minEntryPrice: 0.95,
+      maxEntryPrice: 0.99,
+      minNetReturnPct: 0.005,
+      minProfitUsdc: 0.05,
+      minLiquidity: 1000,
+      scanLimit: 100,
+      excludeCryptoUpDown: true,
+      enableParlay: false,
+      parlayLegs: 3,
+      maxParlayStakePct: 0.01,
+      description: "Paper-buy non-BTC outcomes priced like bonds when the remaining payout still clears fees and risk filters.",
+    }),
+  },
   {
     name: "Pure YES/NO Arbitrage",
     marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
@@ -338,7 +377,7 @@ function parseJsonArray(value?: string | null): string[] {
   }
 }
 
-function parseStrategyConfig(strategy: Strategy): Record<string, number> {
+function parseStrategyConfig(strategy: Strategy): StrategyRuntimeConfig {
   if (!strategy.config) return {};
   try {
     const parsed = JSON.parse(strategy.config);
@@ -894,6 +933,22 @@ function getOutcomeNames(market: PolyMarket) {
   return names.length === 2 ? names : ["Yes", "No"];
 }
 
+function isBondStrategy(strategy: Strategy) {
+  return strategy.name === BOND_STRATEGY_NAME;
+}
+
+function strategyUsesBtcMarket(strategy: Strategy) {
+  return !isBondStrategy(strategy);
+}
+
+function isRollingCryptoMarketTitle(title: string) {
+  const lower = title.toLowerCase();
+  return ROLLING_CRYPTO_MARKETS.some((asset) =>
+    asset.names.some((name) => lower.includes(name)) &&
+    (lower.includes("up or down") || lower.includes("up/down") || lower.includes("5 minutes")),
+  );
+}
+
 function clampProbability(value: number | null, fallback = 0.5) {
   if (value == null || !Number.isFinite(value)) return fallback;
   return Math.min(0.99, Math.max(0.01, value));
@@ -1213,6 +1268,98 @@ async function getPriceSnapshot(market: PolyMarket): Promise<PriceSnapshot> {
     noMid: noMid ?? (prices[1] ?? (prices[0] != null ? 1 - prices[0] : null)),
     yesBook,
     noBook,
+  };
+}
+
+async function fetchBondCandidateMarkets(strategy: Strategy) {
+  const config = parseStrategyConfig(strategy);
+  const limit = String(Math.min(250, Math.max(25, Number(config.scanLimit ?? 100))));
+  const markets = await polyFetch(GAMMA_API, "/markets", {
+    active: "true",
+    closed: "false",
+    order: "volume",
+    ascending: "false",
+    limit,
+  }) as PolyMarket[];
+
+  return (Array.isArray(markets) ? markets : [])
+    .filter((market) => market.conditionId && market.clobTokenIds)
+    .filter((market) => {
+      const title = getMarketTitle(market);
+      if (Number(config.excludeCryptoUpDown ?? 1) === 0) return true;
+      return !isRollingCryptoMarketTitle(title);
+    });
+}
+
+async function evaluateBondMarketStrategy(strategy: Strategy, orderSize: number) {
+  const config = parseStrategyConfig(strategy);
+  const minEntryPrice = Number(config.minEntryPrice ?? 0.95);
+  const maxEntryPrice = Number(config.maxEntryPrice ?? 0.99);
+  const minNetReturnPct = Number(config.minNetReturnPct ?? 0.005);
+  const minProfitUsdc = Number(config.minProfitUsdc ?? 0.05);
+  const minLiquidity = Number(config.minLiquidity ?? 1000);
+  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const candidates = await fetchBondCandidateMarkets(strategy);
+  let bestRejected = "No eligible non-BTC markets returned";
+
+  for (const candidate of candidates) {
+    const liquidity = Number(candidate.liquidityNum ?? candidate.liquidity ?? 0);
+    if (Number.isFinite(liquidity) && liquidity < minLiquidity) {
+      bestRejected = `${getMarketTitle(candidate)}: liquidity ${liquidity.toFixed(0)} < ${minLiquidity.toFixed(0)}`;
+      continue;
+    }
+
+    const snapshot = await getPriceSnapshot(candidate);
+    const outcomeNames = getOutcomeNames(candidate);
+    const sides = [
+      { side: "YES" as const, label: outcomeNames[0] || "YES", ask: getBestAsk(snapshot.yesBook), tokenId: snapshot.yesTokenId },
+      { side: "NO" as const, label: outcomeNames[1] || "NO", ask: getBestAsk(snapshot.noBook), tokenId: snapshot.noTokenId },
+    ];
+
+    for (const side of sides) {
+      if (!side.ask || !side.tokenId) {
+        bestRejected = `${getMarketTitle(candidate)}: missing executable ${side.side} ask`;
+        continue;
+      }
+      const price = clampProbability(side.ask.price);
+      if (price < minEntryPrice || price > maxEntryPrice) {
+        bestRejected = `${getMarketTitle(candidate)}: ${side.label} ask ${(price * 100).toFixed(1)}% outside ${(minEntryPrice * 100).toFixed(1)}%-${(maxEntryPrice * 100).toFixed(1)}% band`;
+        continue;
+      }
+
+      const size = Math.min(orderSize, side.ask.size * price);
+      const entryFee = calculateTakerFee(size, price, feeRate);
+      const shares = size / price;
+      const netProfit = shares - size - entryFee;
+      const netReturnPct = size > 0 ? netProfit / size : 0;
+      if (netProfit < minProfitUsdc || netReturnPct < minNetReturnPct) {
+        bestRejected = `${getMarketTitle(candidate)}: ${side.label} net ${netProfit.toFixed(2)} USDC (${(netReturnPct * 100).toFixed(2)}%) below target`;
+        continue;
+      }
+
+      const signal: TradeSignal = {
+        side: side.side,
+        score: netReturnPct,
+        reason: `Bond scanner picked ${side.label} at ${(price * 100).toFixed(1)}% on "${getMarketTitle(candidate)}"; projected +${netProfit.toFixed(2)} USDC (${(netReturnPct * 100).toFixed(2)}%) if it resolves to 100`,
+        entryPrice: price,
+        entrySize: size,
+        tokenId: side.tokenId,
+      };
+
+      return {
+        market: candidate,
+        snapshot,
+        signal,
+        detail: signal.reason,
+      };
+    }
+  }
+
+  return {
+    market: null,
+    snapshot: null,
+    signal: null,
+    detail: bestRejected,
   };
 }
 
@@ -1885,8 +2032,18 @@ async function runEngineOnce() {
     return;
   }
 
-  const market = await fetchCurrentBtcCandleMarket();
-  if (!market || !market.conditionId) {
+  const btcStrategies = strategies.filter(strategyUsesBtcMarket);
+  const bondStrategies = strategies.filter(isBondStrategy);
+  let market: PolyMarket | null = null;
+  let snapshot: PriceSnapshot | null = null;
+  let candles: any[] = [];
+  let management: ReturnType<typeof manageOpenTradesForCurrentMarket> = { closed: [], summary: null };
+
+  if (btcStrategies.length > 0) {
+    market = await fetchCurrentBtcCandleMarket();
+  }
+
+  if (btcStrategies.length > 0 && (!market || !market.conditionId)) {
     engineState.currentMarketId = null;
     engineState.currentConditionId = null;
     engineState.currentMarketQuestion = null;
@@ -1895,21 +2052,34 @@ async function runEngineOnce() {
     engineState.currentMarketTimeLeftSec = null;
     engineState.currentYesPrice = null;
     engineState.currentNoPrice = null;
-    engineState.lastPollOutcome = "waiting_for_current_btc_market";
-    return;
+    if (bondStrategies.length === 0) {
+      engineState.lastPollOutcome = "waiting_for_current_btc_market";
+      return;
+    }
   }
 
-  const snapshot = await getPriceSnapshot(market);
-  const candles = await fetchRecentCryptoCandles(getMarketAssetSymbol(market), 15).catch(() => []);
-  const management = manageOpenTradesForCurrentMarket(market, snapshot, strategies);
-  engineState.currentMarketId = market.id;
-  engineState.currentConditionId = market.conditionId;
-  engineState.currentMarketRawQuestion = getMarketTitle(market);
-  engineState.currentMarketQuestion = formatTitleWithCurrentEtDate(getMarketTitle(market));
-  engineState.currentMarketEndsAt = market.endDate || null;
-  engineState.currentMarketTimeLeftSec = getMarketWindowTimeLeftSec(market);
-  engineState.currentYesPrice = snapshot.yesMid;
-  engineState.currentNoPrice = snapshot.noMid;
+  if (market?.conditionId) {
+    snapshot = await getPriceSnapshot(market);
+    candles = await fetchRecentCryptoCandles(getMarketAssetSymbol(market), 15).catch(() => []);
+    management = manageOpenTradesForCurrentMarket(market, snapshot, btcStrategies);
+    engineState.currentMarketId = market.id;
+    engineState.currentConditionId = market.conditionId;
+    engineState.currentMarketRawQuestion = getMarketTitle(market);
+    engineState.currentMarketQuestion = formatTitleWithCurrentEtDate(getMarketTitle(market));
+    engineState.currentMarketEndsAt = market.endDate || null;
+    engineState.currentMarketTimeLeftSec = getMarketWindowTimeLeftSec(market);
+    engineState.currentYesPrice = snapshot.yesMid;
+    engineState.currentNoPrice = snapshot.noMid;
+  } else if (btcStrategies.length === 0) {
+    engineState.currentMarketId = null;
+    engineState.currentConditionId = null;
+    engineState.currentMarketQuestion = null;
+    engineState.currentMarketRawQuestion = null;
+    engineState.currentMarketEndsAt = null;
+    engineState.currentMarketTimeLeftSec = null;
+    engineState.currentYesPrice = null;
+    engineState.currentNoPrice = null;
+  }
   engineState.openTrades = storage.getOpenTrades().length;
   const maxDailyTrades = Math.max(0, parseInt(storage.getSetting("max_daily_trades") || "0", 10));
   const maxOrderSize = parseFloat(storage.getSetting("max_order_size") || "25");
@@ -1924,14 +2094,10 @@ async function runEngineOnce() {
     engineState.lastSignalStrategy = latest.strategyName;
     engineState.lastSignalReason = `Exited ${latest.strategyName} via ${latest.exitReason} (${(latest.netPnl >= 0 ? "+" : "")}${latest.netPnl.toFixed(2)} USDC)`;
   }
-  const recommendations: Array<{
-    strategy: Strategy;
-    diagnostic: NonNullable<EngineRuntimeState["strategyDiagnostics"]>[number] | undefined;
-    signal: TradeSignal;
-    orderSize: number;
-  }> = [];
+  const recommendations: StrategyRecommendation[] = [];
 
-  for (const strategy of strategies) {
+  for (const strategy of btcStrategies) {
+    if (!market?.conditionId || !snapshot) continue;
     const diagnostic = engineState.strategyDiagnostics.find((item) => item.strategyId === strategy.id);
     try {
       storage.updateStrategy(strategy.id, {
@@ -2028,11 +2194,117 @@ async function runEngineOnce() {
           : signal.reason;
         diagnostic.score = Number(signal.score.toFixed(3));
       }
-      recommendations.push({ strategy: evaluationStrategy, diagnostic, signal, orderSize });
+      recommendations.push({ strategy: evaluationStrategy, diagnostic, signal, orderSize, market, snapshot });
     } catch {
       if (diagnostic) {
         diagnostic.outcome = "error";
         diagnostic.detail = "Strategy evaluation failed";
+        diagnostic.score = null;
+      }
+      continue;
+    }
+  }
+
+  for (const strategy of bondStrategies) {
+    const diagnostic = engineState.strategyDiagnostics.find((item) => item.strategyId === strategy.id);
+    try {
+      if (strategy.lastTriggered) {
+        const cooldownMs = getStrategyCooldownMs(strategy);
+        if (Date.now() - new Date(strategy.lastTriggered).getTime() < cooldownMs) {
+          lastSkipReason = `${strategy.name}: cooldown_active`;
+          if (diagnostic) {
+            diagnostic.outcome = "cooldown";
+            diagnostic.detail = `Waiting for cooldown to expire (${Math.ceil(cooldownMs / 1000)}s)`;
+            diagnostic.score = null;
+          }
+          continue;
+        }
+      }
+
+      const config = parseStrategyConfig(strategy);
+      const balance = parseFloat(storage.getSetting("paper_balance") || "1000");
+      const sizing = calculateStrategySizing(strategy, config, balance, maxOrderSize);
+      const orderSize = sizing.orderSize;
+      if (maxDailyTrades > 0 && tradesToday >= maxDailyTrades) {
+        lastSkipReason = "max_daily_trades_reached";
+        if (diagnostic) {
+          diagnostic.outcome = "limit_reached";
+          diagnostic.detail = "Max daily trades reached";
+          diagnostic.score = null;
+        }
+        break;
+      }
+      if (orderSize <= 0) {
+        lastSkipReason = `${strategy.name}: invalid_order_size`;
+        if (diagnostic) {
+          diagnostic.outcome = "invalid_size";
+          diagnostic.detail = "Order size must be greater than zero";
+          diagnostic.score = null;
+        }
+        continue;
+      }
+      if (openExposure + orderSize > balance) {
+        lastSkipReason = `${strategy.name}: insufficient_paper_balance`;
+        if (diagnostic) {
+          diagnostic.outcome = "balance_blocked";
+          diagnostic.detail = "Paper balance would be exceeded";
+          diagnostic.score = null;
+        }
+        continue;
+      }
+
+      if (config.enableParlay === true || config.enableParlay === 1) {
+        lastSkipReason = `${strategy.name}: parlay_disabled_in_engine`;
+        if (diagnostic) {
+          diagnostic.outcome = "parlay_disabled";
+          diagnostic.detail = "Parlay settings are available, but execution is intentionally disabled for this test build";
+          diagnostic.score = null;
+        }
+        continue;
+      }
+
+      const evaluation = await evaluateBondMarketStrategy(strategy, orderSize);
+      if (!evaluation.signal || !evaluation.market || !evaluation.snapshot) {
+        lastSkipReason = `${strategy.name}: no_bond_signal`;
+        if (diagnostic) {
+          diagnostic.outcome = "no_signal";
+          diagnostic.detail = evaluation.detail || sizing.detail;
+          diagnostic.score = null;
+        }
+        continue;
+      }
+
+      if (storage.getOpenTradeByStrategyAndCondition(strategy.id, evaluation.market.conditionId || "")) {
+        lastSkipReason = `${strategy.name}: already_open_for_market`;
+        if (diagnostic) {
+          diagnostic.outcome = "already_open";
+          diagnostic.detail = "Bond trade already open for this market";
+          diagnostic.score = null;
+        }
+        continue;
+      }
+
+      storage.updateStrategy(strategy.id, {
+        currentConditionId: evaluation.market.conditionId,
+        marketQuestion: getMarketTitle(evaluation.market),
+      });
+      if (diagnostic) {
+        diagnostic.outcome = "recommended";
+        diagnostic.detail = evaluation.detail;
+        diagnostic.score = Number(evaluation.signal.score.toFixed(3));
+      }
+      recommendations.push({
+        strategy,
+        diagnostic,
+        signal: evaluation.signal,
+        orderSize,
+        market: evaluation.market,
+        snapshot: evaluation.snapshot,
+      });
+    } catch {
+      if (diagnostic) {
+        diagnostic.outcome = "error";
+        diagnostic.detail = "Bond scanner evaluation failed";
         diagnostic.score = null;
       }
       continue;
@@ -2060,6 +2332,8 @@ async function runEngineOnce() {
     ? Number(winnerConfig.managerScoreThreshold ?? winnerConfig.minAgentScore ?? 0.006)
     : winner.strategy.name === "Pure YES/NO Arbitrage"
       ? Number(winnerConfig.minNetEdgePct ?? 0.005)
+      : winner.strategy.name === BOND_STRATEGY_NAME
+      ? Number(winnerConfig.minNetReturnPct ?? 0.005)
     : 0.015;
   engineState.managerDecision = {
     chosenStrategyId: winner.strategy.id,
@@ -2104,7 +2378,7 @@ async function runEngineOnce() {
 
       if (winner.signal.arb) {
         const arb = winner.signal.arb;
-        if (!snapshot.yesTokenId || !snapshot.noTokenId) {
+        if (!winner.snapshot.yesTokenId || !winner.snapshot.noTokenId) {
           lastSkipReason = `${winner.strategy.name}: invalid_arb_snapshot`;
           if (diagnostic) {
             diagnostic.outcome = "bad_snapshot";
@@ -2118,14 +2392,14 @@ async function runEngineOnce() {
         const yesFee = calculateTakerFee(arb.yesSize, arb.yesPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
         const noFee = calculateTakerFee(arb.noSize, arb.noPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
         const timestamp = new Date().toISOString();
-        const marketQuestion = market._eventTitle || market.question || winner.strategy.marketQuestion;
-        const tradeGroupId = `arb-${market.conditionId || market.id}-${Date.now()}`;
+        const marketQuestion = winner.market._eventTitle || winner.market.question || winner.strategy.marketQuestion;
+        const tradeGroupId = `arb-${winner.market.conditionId || winner.market.id}-${Date.now()}`;
         storage.createTradeLog({
           strategyId: winner.strategy.id,
           strategyName: winner.strategy.name,
-          marketId: market.id,
-          conditionId: market.conditionId,
-          tokenId: snapshot.yesTokenId,
+          marketId: winner.market.id,
+          conditionId: winner.market.conditionId,
+          tokenId: winner.snapshot.yesTokenId,
           side: "BUY",
           outcome: "YES",
           tradeGroupId,
@@ -2140,9 +2414,9 @@ async function runEngineOnce() {
         storage.createTradeLog({
           strategyId: winner.strategy.id,
           strategyName: winner.strategy.name,
-          marketId: market.id,
-          conditionId: market.conditionId,
-          tokenId: snapshot.noTokenId,
+          marketId: winner.market.id,
+          conditionId: winner.market.conditionId,
+          tokenId: winner.snapshot.noTokenId,
           side: "BUY",
           outcome: "NO",
           tradeGroupId,
@@ -2172,7 +2446,9 @@ async function runEngineOnce() {
         return;
       }
 
-      const entry = chooseEntryFromSignal(winner.signal.side, snapshot);
+      const entry = chooseEntryFromSignal(winner.signal.side, winner.snapshot);
+      if (winner.signal.tokenId) entry.tokenId = winner.signal.tokenId;
+      if (winner.signal.entryPrice != null) entry.price = winner.signal.entryPrice;
       if (!entry.tokenId || !Number.isFinite(entry.price) || entry.price <= 0) {
         lastSkipReason = `${winner.strategy.name}: invalid_entry_snapshot`;
         if (diagnostic) {
@@ -2185,7 +2461,8 @@ async function runEngineOnce() {
       }
 
       const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
-      const entryFee = calculateTakerFee(winner.orderSize, entry.price, feeRate);
+      const entrySize = winner.signal.entrySize ?? winner.orderSize;
+      const entryFee = calculateTakerFee(entrySize, entry.price, feeRate);
       if (winner.strategy.name === "Orderbook Arbitrage & Imbalance" && storage.getSetting("enable_orderbook_optimizer") !== "false") {
         storage.updateStrategy(winner.strategy.id, {
           config: winner.strategy.config,
@@ -2194,23 +2471,23 @@ async function runEngineOnce() {
       storage.createTradeLog({
         strategyId: winner.strategy.id,
         strategyName: winner.strategy.name,
-        marketId: market.id,
-        conditionId: market.conditionId,
+        marketId: winner.market.id,
+        conditionId: winner.market.conditionId,
         tokenId: entry.tokenId,
         side: entry.side,
         outcome: entry.outcome,
         price: entry.price,
-        size: winner.orderSize,
+        size: entrySize,
         status: "open",
         timestamp: new Date().toISOString(),
-        marketQuestion: market._eventTitle || market.question || winner.strategy.marketQuestion,
+        marketQuestion: winner.market._eventTitle || winner.market.question || winner.strategy.marketQuestion,
         feePaid: entryFee,
         errorMessage: `Manager chose ${winner.strategy.name}: ${winner.signal.reason}`,
       });
 
       storage.markStrategyTriggered(winner.strategy.id);
       tradesToday += 1;
-      openExposure += winner.orderSize;
+      openExposure += entrySize;
       openedTrade = true;
       engineState.lastSignalAt = new Date().toISOString();
       engineState.lastSignalStrategy = winner.strategy.name;

@@ -16,7 +16,7 @@ import {
 import {
   Zap, BookOpen, TrendingUp, Link2,
   Settings2, RefreshCw, Trophy, TrendingDown, Minus,
-  Radio, ArrowUpCircle, ArrowDownCircle
+  Radio, ArrowUpCircle, ArrowDownCircle, Landmark
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -25,6 +25,37 @@ import type { Strategy } from "@shared/schema";
 
 // Fixed strategy metadata (matches server seeds by name)
 const STRATEGY_META = [
+  {
+    name: "Bond Market Scanner",
+    icon: Landmark,
+    iconColor: "text-emerald-400",
+    iconBg: "bg-emerald-400/10",
+    defaultConfig: {
+      orderSize: 10,
+      minEntryPrice: 0.95,
+      maxEntryPrice: 0.99,
+      minNetReturnPct: 0.005,
+      minProfitUsdc: 0.05,
+      minLiquidity: 1000,
+      scanLimit: 100,
+      enableParlay: false,
+      parlayLegs: 3,
+      maxParlayStakePct: 0.01,
+    },
+    fields: [
+      { key: "orderSize", label: "Order size (USDC)", type: "number" },
+      { key: "minEntryPrice", label: "Min entry price", type: "percent" },
+      { key: "maxEntryPrice", label: "Max entry price", type: "percent" },
+      { key: "minNetReturnPct", label: "Min net return", type: "percent" },
+      { key: "minProfitUsdc", label: "Min profit (USDC)", type: "number" },
+      { key: "minLiquidity", label: "Min liquidity", type: "number" },
+      { key: "scanLimit", label: "Markets scanned", type: "number" },
+      { key: "enableParlay", label: "Enable parlay mode", type: "boolean" },
+      { key: "parlayLegs", label: "Parlay legs", type: "number" },
+      { key: "maxParlayStakePct", label: "Max parlay stake", type: "percent" },
+    ],
+    description: "Separate non-BTC scanner for high-confidence markets priced like bonds. Parlay controls are present but off by default while we collect paper data.",
+  },
   {
     name: "Pure YES/NO Arbitrage",
     icon: BookOpen,
@@ -228,7 +259,7 @@ export default function Strategies() {
       <div>
         <h2 className="text-xl font-semibold tracking-tight">Strategies</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Toggle paper strategies on or off. Each one auto-rolls on the current BTC 5-minute candle market.
+          Toggle paper strategies on or off. BTC strategies auto-roll on 5-minute candles; bond strategies scan separate non-BTC markets.
         </p>
       </div>
 
@@ -392,7 +423,7 @@ function StrategySettingsSheet({
     ? (() => { try { return JSON.parse(strategy.config!); } catch { return {}; } })()
     : meta.defaultConfig;
 
-  const [config, setConfig] = useState<Record<string, number>>({ ...meta.defaultConfig, ...existingConfig });
+  const [config, setConfig] = useState<Record<string, any>>({ ...meta.defaultConfig, ...existingConfig });
   const [orderSize, setOrderSize] = useState(String(strategy.orderSize));
 
   const saveMutation = useMutation({
@@ -414,7 +445,7 @@ function StrategySettingsSheet({
     },
   });
 
-  const formatVal = (key: string, val: number) => {
+  const formatVal = (key: string, val: any) => {
     const field = meta.fields.find((f) => f.key === key);
     if (field?.type === "percent") return (val * 100).toFixed(1);
     return String(val);
@@ -462,20 +493,27 @@ function StrategySettingsSheet({
               <div key={field.key} className="flex items-center gap-3">
                 <Label className="text-xs w-44 shrink-0">{field.label}</Label>
                 <div className="flex items-center gap-1.5 flex-1">
-                  <Input
-                    type="number"
-                    step={field.type === "percent" ? "0.1" : "1"}
-                    min="0"
-                    value={field.key === "orderSize" ? orderSize : formatVal(field.key, config[field.key] ?? 0)}
-                    onChange={(e) => {
-                      if (field.key === "orderSize") {
-                        setOrderSize(e.target.value);
-                      } else {
-                        setConfig((prev) => ({ ...prev, [field.key]: parseVal(field.key, e.target.value) }));
-                      }
-                    }}
-                    className="font-mono"
-                  />
+                  {field.type === "boolean" ? (
+                    <Switch
+                      checked={Boolean(config[field.key])}
+                      onCheckedChange={(checked) => setConfig((prev) => ({ ...prev, [field.key]: checked }))}
+                    />
+                  ) : (
+                    <Input
+                      type="number"
+                      step={field.type === "percent" ? "0.1" : "1"}
+                      min="0"
+                      value={field.key === "orderSize" ? orderSize : formatVal(field.key, config[field.key] ?? 0)}
+                      onChange={(e) => {
+                        if (field.key === "orderSize") {
+                          setOrderSize(e.target.value);
+                        } else {
+                          setConfig((prev) => ({ ...prev, [field.key]: parseVal(field.key, e.target.value) }));
+                        }
+                      }}
+                      className="font-mono"
+                    />
+                  )}
                   {field.type === "percent" && (
                     <span className="text-xs text-muted-foreground">%</span>
                   )}
