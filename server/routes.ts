@@ -992,6 +992,23 @@ function getBestAsk(book: any) {
   }, null);
 }
 
+function getBestBid(book: any) {
+  const bids = getBookLevels(book, "bids");
+  if (bids.length === 0) return null;
+  return bids.reduce((best: { price: number; size: number } | null, level: { price: number; size: number }) => {
+    if (!best || level.price > best.price) return level;
+    return best;
+  }, null);
+}
+
+function logEngineError(phase: string, context: Record<string, unknown>, err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  const stack = err instanceof Error && err.stack ? err.stack : undefined;
+  console.error(
+    `${new Date().toISOString()} [error] [engine:${phase}] ${message} ${JSON.stringify(context)}${stack ? `\n${stack}` : ""}`,
+  );
+}
+
 function getOrderbookRangeConfig(strategy: Strategy) {
   const config = parseStrategyConfig(strategy);
   const targetImbalance = Number(config.imbalanceThreshold ?? 0.18);
@@ -1395,6 +1412,12 @@ function calculateTakerFee(stake: number, price: number, feeRate: number) {
 }
 
 function getCurrentMarkedPriceForTrade(trade: TradeLog, snapshot: PriceSnapshot) {
+  // For a held BUY, the realisable exit price is the bid on that side. Mid is
+  // optimistic — using bid makes paper TP/SL fire on prices we could actually
+  // hit. Fall back to mid only when the book is unavailable.
+  const book = trade.outcome === "YES" ? snapshot.yesBook : trade.outcome === "NO" ? snapshot.noBook : null;
+  const bid = book ? getBestBid(book) : null;
+  if (bid) return clampProbability(bid.price);
   if (trade.outcome === "YES") return snapshot.yesMid != null ? clampProbability(snapshot.yesMid) : null;
   if (trade.outcome === "NO") return snapshot.noMid != null ? clampProbability(snapshot.noMid) : null;
   return null;
@@ -1636,7 +1659,11 @@ function calculateStrategySizing(strategy: Strategy, config: Record<string, any>
 function ensurePaperDefaults() {
   if (!storage.getSetting("paper_balance")) storage.setSetting("paper_balance", "1000");
   if (!storage.getSetting("day_start_balance")) storage.setSetting("day_start_balance", "1000");
-  if (!storage.getSetting("taker_fee_rate")) storage.setSetting("taker_fee_rate", "0.072");
+  if (!storage.getSetting("taker_fee_rate")) storage.setSetting("taker_fee_rate", "0");
+  // Polymarket's actual taker fee on the BTC up/down markets is 0%; the
+  // historical 0.072 (7.2%) default was making paper edges look 3-4x worse
+  // than reality. Migrate existing installs that still hold that value.
+  if (storage.getSetting("taker_fee_rate") === "0.072") storage.setSetting("taker_fee_rate", "0");
   if (!storage.getSetting("drawdown_limit")) storage.setSetting("drawdown_limit", "0.10");
   if (!storage.getSetting("enable_drawdown_circuit_breaker")) storage.setSetting("enable_drawdown_circuit_breaker", "false");
   if (!storage.getSetting("circuit_breaker")) storage.setSetting("circuit_breaker", "ok");
@@ -1659,7 +1686,22 @@ function ensurePaperDefaults() {
 
 function countTradesToday() {
   const todayKey = getTodayKey();
-  return storage.getTradeLogs(5000).filter((trade) => trade.timestamp.startsWith(todayKey)).length;
+  const todayTrades = storage.getTradeLogs(5000).filter((trade) => trade.timestamp.startsWith(todayKey));
+  // Multi-leg trades (e.g. paired YES/NO arb) share a tradeGroupId and should
+  // count once against the daily cap, not once per leg.
+  const groups = new Set<string>();
+  let count = 0;
+  for (const trade of todayTrades) {
+    if (trade.tradeGroupId) {
+      if (!groups.has(trade.tradeGroupId)) {
+        groups.add(trade.tradeGroupId);
+        count += 1;
+      }
+    } else {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function getOpenExposure() {
@@ -1738,7 +1780,8 @@ async function settleResolvedTrades() {
       const currentBalance = parseFloat(storage.getSetting("paper_balance") || "1000");
       storage.setSetting("paper_balance", String(currentBalance + groupNetPnl));
       maybeTriggerDrawdownCircuitBreaker();
-    } catch {
+    } catch (err) {
+      logEngineError("settle_arb_group", { tradeGroupId, marketId: first.marketId, legCount: legs.length }, err);
       continue;
     }
   }
@@ -1784,16 +1827,25 @@ async function settleResolvedTrades() {
       storage.setSetting("paper_balance", String(newBalance));
 
       maybeTriggerDrawdownCircuitBreaker();
-    } catch {
+    } catch (err) {
+      logEngineError("settle_single_trade", { tradeId: trade.id, marketId: trade.marketId, strategyId: trade.strategyId }, err);
       continue;
     }
   }
 }
 
 function chooseEntryFromSignal(signalSide: "YES" | "NO", snapshot: PriceSnapshot) {
-  return signalSide === "YES"
-    ? { tokenId: snapshot.yesTokenId, price: clampProbability(snapshot.yesMid), outcome: "YES" as const, side: "BUY" as const }
-    : { tokenId: snapshot.noTokenId, price: clampProbability(snapshot.noMid), outcome: "NO" as const, side: "BUY" as const };
+  // Real BUYs hit the ask, not the midpoint. Falling back to mid (still
+  // clamped) only when the book is empty preserves existing behaviour during
+  // brief feed gaps without making paper fills systematically too good.
+  if (signalSide === "YES") {
+    const ask = getBestAsk(snapshot.yesBook);
+    const price = ask ? clampProbability(ask.price) : clampProbability(snapshot.yesMid);
+    return { tokenId: snapshot.yesTokenId, price, outcome: "YES" as const, side: "BUY" as const };
+  }
+  const ask = getBestAsk(snapshot.noBook);
+  const price = ask ? clampProbability(ask.price) : clampProbability(snapshot.noMid);
+  return { tokenId: snapshot.noTokenId, price, outcome: "NO" as const, side: "BUY" as const };
 }
 
 async function evaluateSignal(
@@ -2195,10 +2247,11 @@ async function runEngineOnce() {
         diagnostic.score = Number(signal.score.toFixed(3));
       }
       recommendations.push({ strategy: evaluationStrategy, diagnostic, signal, orderSize, market, snapshot });
-    } catch {
+    } catch (err) {
+      logEngineError("evaluate_btc_strategy", { strategyId: strategy.id, strategyName: strategy.name, conditionId: market?.conditionId }, err);
       if (diagnostic) {
         diagnostic.outcome = "error";
-        diagnostic.detail = "Strategy evaluation failed";
+        diagnostic.detail = `Strategy evaluation failed: ${err instanceof Error ? err.message : String(err)}`;
         diagnostic.score = null;
       }
       continue;
@@ -2301,10 +2354,11 @@ async function runEngineOnce() {
         market: evaluation.market,
         snapshot: evaluation.snapshot,
       });
-    } catch {
+    } catch (err) {
+      logEngineError("evaluate_bond_strategy", { strategyId: strategy.id, strategyName: strategy.name }, err);
       if (diagnostic) {
         diagnostic.outcome = "error";
-        diagnostic.detail = "Bond scanner evaluation failed";
+        diagnostic.detail = `Bond scanner evaluation failed: ${err instanceof Error ? err.message : String(err)}`;
         diagnostic.score = null;
       }
       continue;
@@ -2389,45 +2443,48 @@ async function runEngineOnce() {
           return;
         }
 
-        const yesFee = calculateTakerFee(arb.yesSize, arb.yesPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
-        const noFee = calculateTakerFee(arb.noSize, arb.noPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0.072"));
+        const yesFee = calculateTakerFee(arb.yesSize, arb.yesPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0"));
+        const noFee = calculateTakerFee(arb.noSize, arb.noPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0"));
         const timestamp = new Date().toISOString();
         const marketQuestion = winner.market._eventTitle || winner.market.question || winner.strategy.marketQuestion;
         const tradeGroupId = `arb-${winner.market.conditionId || winner.market.id}-${Date.now()}`;
-        storage.createTradeLog({
-          strategyId: winner.strategy.id,
-          strategyName: winner.strategy.name,
-          marketId: winner.market.id,
-          conditionId: winner.market.conditionId,
-          tokenId: winner.snapshot.yesTokenId,
-          side: "BUY",
-          outcome: "YES",
-          tradeGroupId,
-          price: arb.yesPrice,
-          size: arb.yesSize,
-          status: "open",
-          timestamp,
-          marketQuestion,
-          feePaid: yesFee,
-          errorMessage: `Paired arb YES leg: ${winner.signal.reason}`,
-        });
-        storage.createTradeLog({
-          strategyId: winner.strategy.id,
-          strategyName: winner.strategy.name,
-          marketId: winner.market.id,
-          conditionId: winner.market.conditionId,
-          tokenId: winner.snapshot.noTokenId,
-          side: "BUY",
-          outcome: "NO",
-          tradeGroupId,
-          price: arb.noPrice,
-          size: arb.noSize,
-          status: "open",
-          timestamp,
-          marketQuestion,
-          feePaid: noFee,
-          errorMessage: `Paired arb NO leg: ${winner.signal.reason}`,
-        });
+        // Both legs land atomically; a half-recorded arb is worse than no record.
+        storage.createTradeLogs([
+          {
+            strategyId: winner.strategy.id,
+            strategyName: winner.strategy.name,
+            marketId: winner.market.id,
+            conditionId: winner.market.conditionId,
+            tokenId: winner.snapshot.yesTokenId,
+            side: "BUY",
+            outcome: "YES",
+            tradeGroupId,
+            price: arb.yesPrice,
+            size: arb.yesSize,
+            status: "open",
+            timestamp,
+            marketQuestion,
+            feePaid: yesFee,
+            errorMessage: `Paired arb YES leg: ${winner.signal.reason}`,
+          },
+          {
+            strategyId: winner.strategy.id,
+            strategyName: winner.strategy.name,
+            marketId: winner.market.id,
+            conditionId: winner.market.conditionId,
+            tokenId: winner.snapshot.noTokenId,
+            side: "BUY",
+            outcome: "NO",
+            tradeGroupId,
+            price: arb.noPrice,
+            size: arb.noSize,
+            status: "open",
+            timestamp,
+            marketQuestion,
+            feePaid: noFee,
+            errorMessage: `Paired arb NO leg: ${winner.signal.reason}`,
+          },
+        ]);
 
         storage.markStrategyTriggered(winner.strategy.id);
         tradesToday += 1;
@@ -2498,10 +2555,16 @@ async function runEngineOnce() {
         diagnostic.detail = `Manager entered trade: ${winner.signal.reason}`;
         diagnostic.score = Number(winner.signal.score.toFixed(3));
       }
-    } catch {
+    } catch (err) {
+      logEngineError("manager_entry", {
+        strategyId: winner.strategy.id,
+        strategyName: winner.strategy.name,
+        conditionId: winner.market.conditionId,
+        side: winner.signal.side,
+      }, err);
       if (diagnostic) {
         diagnostic.outcome = "error";
-        diagnostic.detail = "Manager-selected trade failed during entry";
+        diagnostic.detail = `Manager-selected trade failed during entry: ${err instanceof Error ? err.message : String(err)}`;
         diagnostic.score = Number(winner.signal.score.toFixed(3));
       }
       engineState.lastPollOutcome = "manager_entry_failed";
@@ -2767,6 +2830,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const trade = storage.getTradeLog(parseInt(req.params.id, 10));
     if (!trade) {
       res.status(404).json({ error: "Trade not found" });
+      return;
+    }
+    // Without this guard a double-call double-credits balance and strategy P&L.
+    if (trade.status !== "open") {
+      res.status(409).json({ error: `Trade is already ${trade.status}` });
       return;
     }
 
@@ -3073,8 +3141,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     engineTimer = setTimeout(async () => {
       try {
         await runEngineOnce();
-      } catch {
-        // Guard the long-running poll loop.
+      } catch (err) {
+        // Always log; never let the loop die silently.
+        logEngineError("poll_top_level", { intervalSec }, err);
       }
       scheduleEngine();
     }, intervalSec * 1000);

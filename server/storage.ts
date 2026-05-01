@@ -135,6 +135,7 @@ export interface IStorage {
   getOpenTradeByStrategyAndCondition(strategyId: number, conditionId: string): TradeLog | undefined;
   getOpenTrades(): TradeLog[];
   createTradeLog(log: InsertTradeLog): TradeLog;
+  createTradeLogs(logs: InsertTradeLog[]): TradeLog[];
   updateTradeLog(id: number, updates: Partial<TradeLog>): void;
 
   // Watchlist
@@ -236,6 +237,19 @@ export class DatabaseStorage implements IStorage {
 
   createTradeLog(log: InsertTradeLog): TradeLog {
     return db.insert(tradeLogs).values(log).returning().get();
+  }
+
+  // Atomic batch insert: either all rows land or none do. Used for paired arb
+  // legs so the DB cannot record half an arb if the second insert throws.
+  createTradeLogs(logs: InsertTradeLog[]): TradeLog[] {
+    const insertAll = sqlite.transaction((rows: InsertTradeLog[]) => {
+      const inserted: TradeLog[] = [];
+      for (const row of rows) {
+        inserted.push(db.insert(tradeLogs).values(row).returning().get());
+      }
+      return inserted;
+    });
+    return insertAll(logs);
   }
 
   updateTradeLog(id: number, updates: Partial<TradeLog>): void {
