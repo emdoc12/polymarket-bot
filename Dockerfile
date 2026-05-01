@@ -18,6 +18,8 @@ RUN npm ci --omit=dev
 
 # Copy built output
 COPY --from=builder /app/dist ./dist
+# VERSION is read at runtime by the server to expose /api/version.
+COPY --from=builder /app/VERSION ./VERSION
 
 # Data directory for SQLite
 RUN mkdir -p /data

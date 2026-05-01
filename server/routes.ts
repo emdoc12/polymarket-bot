@@ -1,11 +1,23 @@
 import type { Express } from "express";
 import { type Server } from "http";
+import { readFileSync } from "fs";
 import { storage } from "./storage";
 import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeLog } from "@shared/schema";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
 const CLOB_API = "https://clob.polymarket.com";
 const BOND_STRATEGY_NAME = "Bond Market Scanner";
+
+// Read at module load. Resolved relative to cwd, which is the repo root in
+// dev (`tsx server/index.ts`) and /app in prod (Dockerfile WORKDIR). The
+// Dockerfile copies VERSION into /app so this works in both modes.
+const APP_VERSION = (() => {
+  try {
+    return readFileSync("VERSION", "utf8").trim();
+  } catch {
+    return "unknown";
+  }
+})();
 
 const ROLLING_CRYPTO_MARKETS = [
   { symbol: "BTC", slugPrefix: "btc-updown-5m", names: ["bitcoin", "btc"] },
@@ -2577,6 +2589,10 @@ async function runEngineOnce() {
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   storage.upsertStrategies(FIXED_STRATEGIES as any);
   ensurePaperDefaults();
+
+  app.get("/api/version", (_req, res) => {
+    res.json({ version: APP_VERSION });
+  });
 
   app.get("/api/markets", async (req, res) => {
     try {

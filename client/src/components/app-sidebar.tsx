@@ -1,4 +1,5 @@
 import { Link, useLocation } from "wouter";
+import { useQuery } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Search,
@@ -27,6 +28,10 @@ const navItems = [
 export function AppSidebar() {
   const [location] = useLocation();
   const { theme, toggleTheme } = useTheme();
+  const { data: versionData } = useQuery<{ version: string }>({
+    queryKey: ["/api/version"],
+  });
+  const versionLabel = versionData?.version ? `v${versionData.version}` : null;
 
   return (
     <>
@@ -36,8 +41,18 @@ export function AppSidebar() {
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
             <Activity className="w-4 h-4 text-primary-foreground" />
           </div>
-          <div>
-            <h1 className="text-sm font-semibold tracking-tight">PolyBot</h1>
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-1.5">
+              <h1 className="text-sm font-semibold tracking-tight">PolyBot</h1>
+              {versionLabel && (
+                <span
+                  data-testid="sidebar-version"
+                  className="text-[10px] font-mono text-muted-foreground"
+                >
+                  {versionLabel}
+                </span>
+              )}
+            </div>
             <p className="text-[11px] text-muted-foreground leading-none">Trading Automator</p>
           </div>
         </div>
