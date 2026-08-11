@@ -3,6 +3,7 @@ import { type Server } from "http";
 import { readFileSync } from "fs";
 import { storage } from "./storage";
 import { registerKalshiRoutes } from "./kalshi";
+import { registerKalshiTradingRoutes } from "./kalshi-trading";
 import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeLog } from "@shared/schema";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -2609,6 +2610,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   storage.upsertStrategies(FIXED_STRATEGIES as any);
   ensurePaperDefaults();
   registerKalshiRoutes(app);
+  registerKalshiTradingRoutes(app);
 
   app.get("/api/version", (_req, res) => {
     res.json({ version: APP_VERSION });
