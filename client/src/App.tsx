@@ -14,6 +14,7 @@ import Trades from "@/pages/trades";
 import WatchlistPage from "@/pages/watchlist-page";
 import SettingsPage from "@/pages/settings-page";
 import Backtest from "@/pages/backtest";
+import AgentLabPage from "@/pages/agent-lab";
 
 function AppRouter() {
   return (
@@ -25,6 +26,7 @@ function AppRouter() {
       <Route path="/watchlist" component={WatchlistPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route path="/backtest" component={Backtest} />
+      <Route path="/lab" component={AgentLabPage} />
       <Route component={NotFound} />
     </Switch>
   );

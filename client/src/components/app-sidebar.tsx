@@ -11,6 +11,7 @@ import {
   Moon,
   Activity,
   FlaskConical,
+  BrainCircuit,
 } from "lucide-react";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -22,6 +23,7 @@ const navItems = [
   { path: "/trades", label: "Trade Log", icon: History },
   { path: "/watchlist", label: "Watchlist", icon: Star },
   { path: "/backtest", label: "Backtest", icon: FlaskConical },
+  { path: "/lab", label: "Strategy Lab", icon: BrainCircuit },
   { path: "/settings", label: "Settings", icon: Settings },
 ];
 

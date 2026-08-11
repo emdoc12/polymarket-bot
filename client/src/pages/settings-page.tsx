@@ -87,6 +87,23 @@ export default function SettingsPage() {
     },
   });
 
+  const testAnthropicMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/agent-lab/test-key", {});
+      return res.json();
+    },
+    onSuccess: (data: { ok: boolean; model?: string; latencyMs?: number; error?: string }) => {
+      if (data.ok) {
+        toast({ title: "Anthropic connected", description: `${data.model} replied in ${data.latencyMs}ms` });
+      } else {
+        toast({ title: "Anthropic test failed", description: data.error, variant: "destructive" });
+      }
+    },
+    onError: (e: Error) => {
+      toast({ title: "Anthropic test failed", description: e.message, variant: "destructive" });
+    },
+  });
+
   const testKalshiMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/kalshi/auth/self-test", {});
@@ -220,6 +237,14 @@ export default function SettingsPage() {
               disabled={testKalshiMutation.isPending}
             >
               {testKalshiMutation.isPending ? "Testing..." : "Test Kalshi Connection"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => testAnthropicMutation.mutate()}
+              disabled={testAnthropicMutation.isPending}
+            >
+              {testAnthropicMutation.isPending ? "Testing..." : "Test Anthropic Connection"}
             </Button>
           </div>
         </CardContent>

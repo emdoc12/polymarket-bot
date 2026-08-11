@@ -395,6 +395,35 @@ export function registerAgentLabRoutes(app: Express) {
     });
   });
 
+  // Cheap end-to-end key check: one tiny Haiku call. ~fractions of a cent.
+  app.post("/api/agent-lab/test-key", async (_req, res) => {
+    const client = getAnthropicClient();
+    if (!client) {
+      res.status(400).json({ ok: false, error: "No Anthropic API key configured - paste one in Settings first" });
+      return;
+    }
+    try {
+      const started = Date.now();
+      const response = await client.messages.create({
+        model: storage.getSetting("agent_lab_worker_model") || DEFAULT_WORKER_MODEL,
+        max_tokens: 16,
+        messages: [{ role: "user", content: "Reply with the single word: OK" }],
+      });
+      const text = response.content.find((block) => block.type === "text");
+      res.json({
+        ok: true,
+        model: response.model,
+        latencyMs: Date.now() - started,
+        reply: text && text.type === "text" ? text.text.slice(0, 40) : "",
+      });
+    } catch (e: any) {
+      const message = e?.status === 401
+        ? "Anthropic rejected the key (401) - check for typos or a revoked key"
+        : e?.message || String(e);
+      res.status(502).json({ ok: false, error: message });
+    }
+  });
+
   app.post("/api/agent-lab/run", async (_req, res) => {
     try {
       res.json(await runAgentLabCycle("manual"));
