@@ -4,6 +4,8 @@ import {
   type Watchlist, type InsertWatchlist, watchlist,
   type BotSetting, type InsertBotSetting, botSettings,
   type BacktestRun, type InsertBacktestRun, backtestRuns,
+  type CandidateStrategy, type InsertCandidateStrategy, candidateStrategies,
+  type AgentLabRun, type InsertAgentLabRun, agentLabRuns,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
@@ -102,6 +104,41 @@ function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_trade_logs_timestamp ON trade_logs(timestamp);
   `);
 
+  // Agent lab tables
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS candidate_strategies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      spec TEXT NOT NULL,
+      spec_hash TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'testing',
+      created_by TEXT NOT NULL,
+      rationale TEXT,
+      generation INTEGER NOT NULL DEFAULT 1,
+      train_trades INTEGER,
+      train_wins INTEGER,
+      train_net_pnl REAL,
+      holdout_trades INTEGER,
+      holdout_wins INTEGER,
+      holdout_net_pnl REAL,
+      last_tested_at TEXT,
+      pm_notes TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_lab_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ran_at TEXT NOT NULL,
+      trigger TEXT NOT NULL,
+      proposals_count INTEGER NOT NULL DEFAULT 0,
+      tested_count INTEGER NOT NULL DEFAULT 0,
+      promoted_count INTEGER NOT NULL DEFAULT 0,
+      rejected_count INTEGER NOT NULL DEFAULT 0,
+      focus TEXT,
+      pm_commentary TEXT,
+      error TEXT
+    );
+  `);
+
   // Backtest runs table
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -160,6 +197,15 @@ export interface IStorage {
   saveBacktestRun(run: InsertBacktestRun): BacktestRun;
   getBacktestRuns(strategyName?: string): BacktestRun[];
   clearBacktestRuns(): void;
+
+  // Agent lab
+  createCandidateStrategy(candidate: InsertCandidateStrategy): CandidateStrategy;
+  updateCandidateStrategy(id: number, updates: Partial<CandidateStrategy>): void;
+  getCandidateStrategies(status?: string): CandidateStrategy[];
+  getCandidateBySpecHash(specHash: string): CandidateStrategy | undefined;
+  createAgentLabRun(run: InsertAgentLabRun): AgentLabRun;
+  updateAgentLabRun(id: number, updates: Partial<AgentLabRun>): void;
+  getAgentLabRuns(limit?: number): AgentLabRun[];
 }
 
 export class DatabaseStorage implements IStorage {
@@ -311,6 +357,40 @@ export class DatabaseStorage implements IStorage {
 
   clearBacktestRuns(): void {
     db.delete(backtestRuns).run();
+  }
+
+  // Agent lab
+  createCandidateStrategy(candidate: InsertCandidateStrategy): CandidateStrategy {
+    return db.insert(candidateStrategies).values(candidate).returning().get();
+  }
+
+  updateCandidateStrategy(id: number, updates: Partial<CandidateStrategy>): void {
+    db.update(candidateStrategies).set(updates as any).where(eq(candidateStrategies.id, id)).run();
+  }
+
+  getCandidateStrategies(status?: string): CandidateStrategy[] {
+    if (status) {
+      return db.select().from(candidateStrategies)
+        .where(eq(candidateStrategies.status, status))
+        .orderBy(desc(candidateStrategies.id)).all();
+    }
+    return db.select().from(candidateStrategies).orderBy(desc(candidateStrategies.id)).all();
+  }
+
+  getCandidateBySpecHash(specHash: string): CandidateStrategy | undefined {
+    return db.select().from(candidateStrategies).where(eq(candidateStrategies.specHash, specHash)).get();
+  }
+
+  createAgentLabRun(run: InsertAgentLabRun): AgentLabRun {
+    return db.insert(agentLabRuns).values(run).returning().get();
+  }
+
+  updateAgentLabRun(id: number, updates: Partial<AgentLabRun>): void {
+    db.update(agentLabRuns).set(updates as any).where(eq(agentLabRuns.id, id)).run();
+  }
+
+  getAgentLabRuns(limit = 20): AgentLabRun[] {
+    return db.select().from(agentLabRuns).orderBy(desc(agentLabRuns.id)).limit(limit).all();
   }
 }
 

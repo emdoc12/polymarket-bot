@@ -4,6 +4,7 @@ import { readFileSync } from "fs";
 import { storage } from "./storage";
 import { registerKalshiRoutes } from "./kalshi";
 import { registerKalshiTradingRoutes } from "./kalshi-trading";
+import { registerAgentLabRoutes } from "./agent-lab";
 import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeLog } from "@shared/schema";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -2611,6 +2612,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   ensurePaperDefaults();
   registerKalshiRoutes(app);
   registerKalshiTradingRoutes(app);
+  registerAgentLabRoutes(app);
 
   app.get("/api/version", (_req, res) => {
     res.json({ version: APP_VERSION });

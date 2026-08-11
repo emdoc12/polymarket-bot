@@ -43,19 +43,28 @@ export type KalshiCandle = {
   yes_ask?: { open_dollars?: string; close_dollars?: string; high_dollars?: string; low_dollars?: string };
 };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function kalshiFetch(path: string, params?: Record<string, string>) {
   const url = new URL(`${KALSHI_API}${path}`);
   if (params) {
     Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
   }
-  const res = await fetch(url.toString(), {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!res.ok) {
+  // Backtests fire many sequential requests; retry 429/5xx with backoff so a
+  // rate-limit blip doesn't silently shrink the market sample.
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url.toString(), {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) return res.json();
+    if ((res.status === 429 || res.status >= 500) && attempt < 3) {
+      const retryAfterSec = parseFloat(res.headers.get("retry-after") || "0");
+      await sleep(Math.max(retryAfterSec * 1000, 500 * Math.pow(2, attempt)));
+      continue;
+    }
     throw new Error(`Kalshi API error: ${res.status} ${res.statusText} for ${path}`);
   }
-  return res.json();
 }
 
 export function parseDollars(value?: string | null): number | null {
@@ -115,6 +124,192 @@ export async function getKalshiCandlesticks(
     },
   ) as { candlesticks?: KalshiCandle[] };
   return Array.isArray(data.candlesticks) ? data.candlesticks : [];
+}
+
+// ---------------------------------------------------------------------------
+// Parameterized strategy specs — the search space the agent lab explores.
+// Every spec is evaluated against real settled markets with a train/holdout
+// time split so promoted strategies must generalize, not just curve-fit.
+// ---------------------------------------------------------------------------
+
+export type KalshiStrategySpec = {
+  name: string;
+  series: string;
+  sideRule: "momentum" | "fade" | "always_yes" | "always_no" | "trend_follow" | "trend_fade";
+  // How long before market close the entry decision is made.
+  entrySecondsBeforeClose: number;
+  // Only enter when the executable price of the chosen side is inside this band.
+  minEntryPrice: number;
+  maxEntryPrice: number;
+  // For trend rules: how far back to measure the market-price move.
+  trendLookbackMinutes: number;
+  // Minimum signal strength: |price - 0.5| for momentum/fade, |move| for trend rules.
+  minSignal: number;
+  orderSize: number;
+};
+
+export const SPEC_SIDE_RULES = ["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade"] as const;
+export const SPEC_SERIES = ["KXBTC15M", "KXETH15M"] as const;
+
+const clampNum = (value: unknown, min: number, max: number, fallback: number) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+};
+
+// Agents propose specs as JSON; clamp everything into the legal search space
+// rather than rejecting, so a slightly-out-of-range idea still gets tested.
+export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
+  const series = SPEC_SERIES.includes(raw.series as any) ? String(raw.series) : "KXBTC15M";
+  const sideRule = SPEC_SIDE_RULES.includes(raw.sideRule as any)
+    ? raw.sideRule as KalshiStrategySpec["sideRule"]
+    : "momentum";
+  const minEntry = clampNum(raw.minEntryPrice, 0.03, 0.97, 0.03);
+  const maxEntry = clampNum(raw.maxEntryPrice, 0.03, 0.97, 0.97);
+  return {
+    name: String(raw.name || "unnamed").slice(0, 80),
+    series,
+    sideRule,
+    entrySecondsBeforeClose: Math.round(clampNum(raw.entrySecondsBeforeClose, 60, 840, 300)),
+    minEntryPrice: Math.min(minEntry, maxEntry),
+    maxEntryPrice: Math.max(minEntry, maxEntry),
+    trendLookbackMinutes: Math.round(clampNum(raw.trendLookbackMinutes, 1, 10, 3)),
+    minSignal: clampNum(raw.minSignal, 0, 0.45, 0),
+    orderSize: 10, // fixed so results stay comparable across candidates
+  };
+}
+
+// Behavior-defining fields only — name/rationale don't affect results.
+export function specHash(spec: KalshiStrategySpec) {
+  return [
+    spec.series, spec.sideRule, spec.entrySecondsBeforeClose,
+    spec.minEntryPrice.toFixed(3), spec.maxEntryPrice.toFixed(3),
+    spec.trendLookbackMinutes, spec.minSignal.toFixed(3),
+  ].join("|");
+}
+
+export type SettledMarketData = {
+  market: KalshiMarket;
+  candles: KalshiCandle[];
+  closeMs: number;
+};
+
+// Fetch settled markets and their 1-min candles ONCE, then evaluate any number
+// of specs in memory. Candle fetches dominate cycle latency, so reuse matters.
+export async function fetchSettledMarketData(series: string, lookback: number): Promise<SettledMarketData[]> {
+  const settled: KalshiMarket[] = [];
+  let cursor: string | undefined;
+  while (settled.length < lookback) {
+    const page = await getKalshiMarkets({ seriesTicker: series, status: "settled", limit: 100, cursor });
+    settled.push(...page.markets.filter((m) => m.result === "yes" || m.result === "no"));
+    if (!page.cursor || page.markets.length === 0) break;
+    cursor = page.cursor;
+  }
+
+  const data: SettledMarketData[] = [];
+  for (const market of settled.slice(0, lookback)) {
+    try {
+      const closeMs = market.close_time ? new Date(market.close_time).getTime() : NaN;
+      if (!Number.isFinite(closeMs)) continue;
+      const openMs = market.open_time ? new Date(market.open_time).getTime() : closeMs - 3600_000;
+      const candles = await getKalshiCandlesticks(
+        series, market.ticker,
+        Math.floor(openMs / 1000), Math.floor(closeMs / 1000), 1,
+      );
+      if (candles.length > 0) data.push({ market, candles, closeMs });
+      // Pace sequential candle fetches so the whole sweep stays under the
+      // public API rate limit instead of tripping 429s halfway through.
+      await sleep(120);
+    } catch {
+      continue;
+    }
+  }
+  // Oldest first so the train/holdout split is chronological.
+  return data.sort((a, b) => a.closeMs - b.closeMs);
+}
+
+type SpecTrade = { ticker: string; side: "YES" | "NO"; entryPrice: number; fee: number; won: boolean; netPnl: number };
+
+function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData): SpecTrade | null {
+  const entryTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
+  const sorted = [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
+  const entryCandle = [...sorted].reverse().find((c) => c.end_period_ts <= entryTs);
+  if (!entryCandle) return null;
+
+  const yesAsk = parseDollars(entryCandle.yes_ask?.close_dollars);
+  const yesBid = parseDollars(entryCandle.yes_bid?.close_dollars);
+  const marketPrice = parseDollars(entryCandle.price?.close_dollars) ?? yesAsk;
+  if (yesAsk == null || yesBid == null || marketPrice == null) return null;
+
+  let side: "YES" | "NO" | null = null;
+  if (spec.sideRule === "always_yes") side = "YES";
+  else if (spec.sideRule === "always_no") side = "NO";
+  else if (spec.sideRule === "momentum" || spec.sideRule === "fade") {
+    if (Math.abs(marketPrice - 0.5) < spec.minSignal) return null;
+    const favored: "YES" | "NO" = marketPrice >= 0.5 ? "YES" : "NO";
+    side = spec.sideRule === "momentum" ? favored : favored === "YES" ? "NO" : "YES";
+  } else {
+    const lookbackTs = entryTs - spec.trendLookbackMinutes * 60;
+    const pastCandle = [...sorted].reverse().find((c) => c.end_period_ts <= lookbackTs);
+    const pastPrice = pastCandle ? parseDollars(pastCandle.price?.close_dollars) : null;
+    if (pastPrice == null) return null;
+    const move = marketPrice - pastPrice;
+    if (Math.abs(move) < spec.minSignal) return null;
+    const trendSide: "YES" | "NO" = move >= 0 ? "YES" : "NO";
+    side = spec.sideRule === "trend_follow" ? trendSide : trendSide === "YES" ? "NO" : "YES";
+  }
+  if (!side) return null;
+
+  const entryPrice = side === "YES" ? yesAsk : 1 - yesBid;
+  if (entryPrice < spec.minEntryPrice || entryPrice > spec.maxEntryPrice) return null;
+  if (entryPrice <= 0.01 || entryPrice >= 0.99) return null;
+
+  const contracts = spec.orderSize / entryPrice;
+  const fee = kalshiTradingFee(contracts, entryPrice);
+  const won = (side === "YES" && entry.market.result === "yes") || (side === "NO" && entry.market.result === "no");
+  const payout = won ? contracts : 0;
+  return { ticker: entry.market.ticker, side, entryPrice, fee, won, netPnl: payout - spec.orderSize - fee };
+}
+
+export type SpecSampleResult = {
+  trades: number;
+  wins: number;
+  winRate: number;
+  netPnl: number;
+  totalFees: number;
+  avgEdgePct: number; // avg net pnl per trade as % of stake
+};
+
+function summarizeTrades(trades: SpecTrade[], orderSize: number): SpecSampleResult {
+  const wins = trades.filter((t) => t.won).length;
+  const netPnl = trades.reduce((sum, t) => sum + t.netPnl, 0);
+  const totalFees = trades.reduce((sum, t) => sum + t.fee, 0);
+  return {
+    trades: trades.length,
+    wins,
+    winRate: trades.length > 0 ? wins / trades.length : 0,
+    netPnl,
+    totalFees,
+    avgEdgePct: trades.length > 0 ? (netPnl / trades.length / orderSize) * 100 : 0,
+  };
+}
+
+export function evaluateSpecOnData(spec: KalshiStrategySpec, data: SettledMarketData[]) {
+  // Chronological split: older half trains, newer half is the honesty check.
+  const splitIndex = Math.floor(data.length / 2);
+  const trainTrades: SpecTrade[] = [];
+  const holdoutTrades: SpecTrade[] = [];
+  for (let i = 0; i < data.length; i++) {
+    const trade = evaluateSpecOnMarket(spec, data[i]);
+    if (!trade) continue;
+    (i < splitIndex ? trainTrades : holdoutTrades).push(trade);
+  }
+  return {
+    train: summarizeTrades(trainTrades, spec.orderSize),
+    holdout: summarizeTrades(holdoutTrades, spec.orderSize),
+    marketsScanned: data.length,
+    sampleTrades: [...trainTrades, ...holdoutTrades].slice(0, 10),
+  };
 }
 
 type KalshiBacktestTrade = {
@@ -301,6 +496,21 @@ export function registerKalshiRoutes(app: Express) {
       res.json({ candlesticks: await getKalshiCandlesticks(series, ticker, startTs, endTs, interval) });
     } catch (e: any) {
       res.status(502).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/kalshi/spec-backtest", async (req, res) => {
+    try {
+      const spec = clampSpec(req.body ?? {});
+      const lookback = Math.min(150, Math.max(10, Number(req.body?.marketsLookback ?? 60)));
+      const data = await fetchSettledMarketData(spec.series, lookback);
+      if (data.length < 10) {
+        res.status(502).json({ error: `Only ${data.length} settled markets with candles available` });
+        return;
+      }
+      res.json({ spec, specHash: specHash(spec), ...evaluateSpecOnData(spec, data) });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 

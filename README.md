@@ -134,6 +134,26 @@ and save the key id as the `kalshi_api_key_id` setting.
 - `DELETE /api/kalshi/orders/:orderId`
 - `GET /api/kalshi/dry-run-log` — orders that would have been sent
 
+## Strategy Lab — AI agent research team
+
+A PM (Claude Opus 5) directs a team of specialist agents (Claude Haiku 4.5) that
+invent, mutate, and stress-test parameterized strategy specs. Every proposal is
+backtested against real settled Kalshi markets with a chronological
+train/holdout split; the PM promotes only candidates whose edge survives the
+holdout sample. Roles: Explorer (novel specs), Optimizer (mutations of
+leaders), Skeptic (robustness checks + overfitting flags).
+
+Requires `ANTHROPIC_API_KEY` in the container environment. Disabled by default;
+enable with the `agent_lab_enabled` setting. Guardrails: `agent_lab_interval_minutes`
+(default 30), `agent_lab_max_candidates_per_cycle` (8), `agent_lab_max_cycles_per_day` (24).
+Approximate cost per cycle: a few cents (3 Haiku calls + 1 Opus call).
+
+- `GET /api/agent-lab/status` — config, guardrails, candidate counts
+- `POST /api/agent-lab/run` — run one research cycle now
+- `GET /api/agent-lab/candidates?status=testing|promoted|rejected` — leaderboard
+- `GET /api/agent-lab/runs` — cycle history with PM commentary
+- `POST /api/kalshi/spec-backtest` — test any spec by hand against real markets
+
 ## Releases
 
 - Pushes to `master` publish both the `latest` container tag and the current version tag from [`VERSION`](/Users/emdoc12/jedi-poly/VERSION)

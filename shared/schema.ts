@@ -83,6 +83,42 @@ export const backtestRuns = sqliteTable("backtest_runs", {
   meetsTarget: integer("meets_target", { mode: "boolean" }).notNull(), // winRate >= 0.65 && edge >= 0.03
 });
 
+// Candidate strategies - parameterized specs proposed by the agent lab,
+// tested against real settled Kalshi markets before any promotion.
+export const candidateStrategies = sqliteTable("candidate_strategies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  spec: text("spec").notNull(),               // JSON KalshiStrategySpec
+  specHash: text("spec_hash").notNull().unique(),
+  status: text("status").notNull().default("testing"), // testing | promoted | rejected
+  createdBy: text("created_by").notNull(),     // agent role that proposed it
+  rationale: text("rationale"),
+  generation: integer("generation").notNull().default(1),
+  trainTrades: integer("train_trades"),
+  trainWins: integer("train_wins"),
+  trainNetPnl: real("train_net_pnl"),
+  holdoutTrades: integer("holdout_trades"),
+  holdoutWins: integer("holdout_wins"),
+  holdoutNetPnl: real("holdout_net_pnl"),
+  lastTestedAt: text("last_tested_at"),
+  pmNotes: text("pm_notes"),
+  createdAt: text("created_at").notNull(),
+});
+
+// Agent lab runs - one row per research cycle
+export const agentLabRuns = sqliteTable("agent_lab_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ranAt: text("ran_at").notNull(),
+  trigger: text("trigger").notNull(),          // manual | scheduled
+  proposalsCount: integer("proposals_count").notNull().default(0),
+  testedCount: integer("tested_count").notNull().default(0),
+  promotedCount: integer("promoted_count").notNull().default(0),
+  rejectedCount: integer("rejected_count").notNull().default(0),
+  focus: text("focus"),
+  pmCommentary: text("pm_commentary"),
+  error: text("error"),
+});
+
 // Bot settings
 export const botSettings = sqliteTable("bot_settings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -97,7 +133,14 @@ export const insertWatchlistSchema = createInsertSchema(watchlist).omit({ id: tr
 export const insertBotSettingSchema = createInsertSchema(botSettings).omit({ id: true });
 export const insertBacktestRunSchema = createInsertSchema(backtestRuns).omit({ id: true });
 
+export const insertCandidateStrategySchema = createInsertSchema(candidateStrategies).omit({ id: true });
+export const insertAgentLabRunSchema = createInsertSchema(agentLabRuns).omit({ id: true });
+
 // Types
+export type CandidateStrategy = typeof candidateStrategies.$inferSelect;
+export type InsertCandidateStrategy = z.infer<typeof insertCandidateStrategySchema>;
+export type AgentLabRun = typeof agentLabRuns.$inferSelect;
+export type InsertAgentLabRun = z.infer<typeof insertAgentLabRunSchema>;
 export type Strategy = typeof strategies.$inferSelect;
 export type BacktestRun = typeof backtestRuns.$inferSelect;
 export type InsertBacktestRun = z.infer<typeof insertBacktestRunSchema>;
