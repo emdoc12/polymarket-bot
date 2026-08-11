@@ -5,10 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
-import { Shield, AlertTriangle, DollarSign, TrendingDown, Globe, Zap, Layers } from "lucide-react";
+import { Shield, AlertTriangle, DollarSign, TrendingDown, Globe, Zap, Layers, KeyRound } from "lucide-react";
 import type { BotSetting } from "@shared/schema";
 
 export default function SettingsPage() {
@@ -36,6 +37,14 @@ export default function SettingsPage() {
   const [enableMultiAssetMarkets, setEnableMultiAssetMarkets] = useState(false);
   const [enableOrderbookOptimizer, setEnableOrderbookOptimizer] = useState(true);
 
+  // API key inputs stay empty unless the user is typing a NEW value;
+  // stored secrets come back masked as "__secret_set__" and are never shown.
+  const [kalshiKeyId, setKalshiKeyId] = useState("");
+  const [kalshiPem, setKalshiPem] = useState("");
+  const [anthropicKey, setAnthropicKey] = useState("");
+  const kalshiPemConfigured = getVal("kalshi_private_key_pem") === "__secret_set__";
+  const anthropicKeyConfigured = getVal("anthropic_api_key") === "__secret_set__";
+
   useEffect(() => {
     if (settings) {
       setMode(getVal("mode", "paper"));
@@ -52,8 +61,54 @@ export default function SettingsPage() {
       setMultiSourceVerify(getVal("multi_source_verify", "true") === "true");
       setEnableMultiAssetMarkets(getVal("enable_multi_asset_markets", "false") === "true");
       setEnableOrderbookOptimizer(getVal("enable_orderbook_optimizer", "true") === "true");
+      setKalshiKeyId(getVal("kalshi_api_key_id"));
     }
   }, [settings]);
+
+  const saveKeysMutation = useMutation({
+    mutationFn: async () => {
+      const pairs: [string, string][] = [];
+      if (kalshiKeyId.trim()) pairs.push(["kalshi_api_key_id", kalshiKeyId.trim()]);
+      if (kalshiPem.trim()) pairs.push(["kalshi_private_key_pem", kalshiPem.trim()]);
+      if (anthropicKey.trim()) pairs.push(["anthropic_api_key", anthropicKey.trim()]);
+      if (pairs.length === 0) throw new Error("Nothing to save - enter at least one key");
+      for (const [key, value] of pairs) {
+        await apiRequest("POST", "/api/settings", { key, value });
+      }
+    },
+    onSuccess: () => {
+      setKalshiPem("");
+      setAnthropicKey("");
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      toast({ title: "API keys saved" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testKalshiMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/kalshi/auth/self-test", {});
+      return res.json();
+    },
+    onSuccess: (data: { configured: boolean; localSignature: string | null; liveProbe: string | null }) => {
+      if (!data.configured) {
+        toast({ title: "Kalshi not configured", description: "Save your key id and private key first", variant: "destructive" });
+      } else if (data.localSignature === "ok" && data.liveProbe?.startsWith("ok")) {
+        toast({ title: "Kalshi connected", description: data.liveProbe });
+      } else {
+        toast({
+          title: "Kalshi test failed",
+          description: `signature: ${data.localSignature} | live: ${data.liveProbe}`,
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -95,6 +150,80 @@ export default function SettingsPage() {
           Configure bot behavior, fees, and safety limits
         </p>
       </div>
+
+      {/* API Keys */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-primary" />
+            <CardTitle className="text-sm font-medium">API Keys</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Kalshi demo credentials (from demo.kalshi.co → Profile Settings → API Keys) power demo-account
+            trading. The Anthropic key powers the Strategy Lab agent team. Keys are stored in the bot's
+            local database and never shown again after saving.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">Kalshi API Key ID</Label>
+              {kalshiKeyId && <Badge variant="secondary" className="text-[10px]">saved</Badge>}
+            </div>
+            <Input
+              value={kalshiKeyId}
+              onChange={(e) => setKalshiKeyId(e.target.value)}
+              placeholder="e.g. 12345678-abcd-1234-abcd-1234567890ab"
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">Kalshi RSA Private Key (PEM)</Label>
+              {kalshiPemConfigured && <Badge variant="secondary" className="text-[10px]">configured</Badge>}
+            </div>
+            <Textarea
+              value={kalshiPem}
+              onChange={(e) => setKalshiPem(e.target.value)}
+              placeholder={kalshiPemConfigured
+                ? "A key is already saved. Paste here only to replace it."
+                : "-----BEGIN RSA PRIVATE KEY-----\n...paste the whole block Kalshi showed you once...\n-----END RSA PRIVATE KEY-----"}
+              rows={4}
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">Anthropic API Key</Label>
+              {anthropicKeyConfigured && <Badge variant="secondary" className="text-[10px]">configured</Badge>}
+            </div>
+            <Input
+              type="password"
+              value={anthropicKey}
+              onChange={(e) => setAnthropicKey(e.target.value)}
+              placeholder={anthropicKeyConfigured ? "A key is already saved. Paste here only to replace it." : "sk-ant-..."}
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => saveKeysMutation.mutate()}
+              disabled={saveKeysMutation.isPending}
+            >
+              Save Keys
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => testKalshiMutation.mutate()}
+              disabled={testKalshiMutation.isPending}
+            >
+              {testKalshiMutation.isPending ? "Testing..." : "Test Kalshi Connection"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Trading Mode */}
       <Card>

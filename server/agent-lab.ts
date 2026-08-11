@@ -97,10 +97,20 @@ Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable rese
 
 ${SPEC_SPACE_DOC}`;
 
+// Settings-page key wins over the container env var; the cached client is
+// keyed by the value so pasting a new key takes effect without a restart.
 let anthropic: Anthropic | null = null;
+let anthropicClientKey: string | null = null;
+export function getAnthropicApiKey(): string | null {
+  return storage.getSetting("anthropic_api_key") || process.env.ANTHROPIC_API_KEY || null;
+}
 function getAnthropicClient() {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!anthropic) anthropic = new Anthropic();
+  const apiKey = getAnthropicApiKey();
+  if (!apiKey) return null;
+  if (!anthropic || anthropicClientKey !== apiKey) {
+    anthropic = new Anthropic({ apiKey });
+    anthropicClientKey = apiKey;
+  }
   return anthropic;
 }
 
@@ -171,7 +181,7 @@ let cycleInFlight = false;
 export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise<CycleResult> {
   const client = getAnthropicClient();
   if (!client) {
-    throw new Error("ANTHROPIC_API_KEY is not set - add it to the container environment to enable the agent lab");
+    throw new Error("Anthropic API key is not configured - paste it in Settings (API Keys) to enable the agent lab");
   }
   if (cycleInFlight) {
     throw new Error("A research cycle is already running");
@@ -368,7 +378,7 @@ export function registerAgentLabRoutes(app: Express) {
 
   app.get("/api/agent-lab/status", (_req, res) => {
     res.json({
-      apiKeyConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
+      apiKeyConfigured: Boolean(getAnthropicApiKey()),
       enabled: storage.getSetting("agent_lab_enabled") === "true",
       intervalMinutes: parseInt(storage.getSetting("agent_lab_interval_minutes") || "30", 10),
       maxCandidatesPerCycle: parseInt(storage.getSetting("agent_lab_max_candidates_per_cycle") || "8", 10),

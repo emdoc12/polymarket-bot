@@ -2931,9 +2931,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ success: true });
   });
 
+  // Secrets stored via the settings UI are never echoed back to the client;
+  // the UI only needs to know whether one is configured.
+  const SECRET_SETTING_KEYS = new Set(["kalshi_private_key_pem", "anthropic_api_key"]);
+
   app.get("/api/settings", async (_req, res) => {
     ensurePaperDefaults();
-    res.json(storage.getAllSettings());
+    const settings = storage.getAllSettings().map((setting) =>
+      SECRET_SETTING_KEYS.has(setting.key) && setting.value
+        ? { ...setting, value: "__secret_set__" }
+        : setting,
+    );
+    res.json(settings);
   });
 
   app.post("/api/settings", async (req, res) => {

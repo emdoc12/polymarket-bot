@@ -23,9 +23,9 @@ type KalshiCredentials = {
 // Key material resolution order:
 //   1. KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY (PEM inline) env vars
 //   2. KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH env vars
-//   3. kalshi_api_key_id bot setting + $DATA_DIR/kalshi-api-key.pem
-// The Unraid-friendly path is 3: drop the PEM into appdata and paste the key
-// id into Settings — no container rebuild needed.
+//   3. kalshi_api_key_id + kalshi_private_key_pem settings (Settings page UI)
+//   4. kalshi_api_key_id setting + $DATA_DIR/kalshi-api-key.pem file
+// The recommended path is 3: paste both values into the app's Settings page.
 export function getKalshiCredentials(): KalshiCredentials | null {
   const envKeyId = process.env.KALSHI_API_KEY_ID;
   const settingKeyId = storage.getSetting("kalshi_api_key_id");
@@ -34,6 +34,10 @@ export function getKalshiCredentials(): KalshiCredentials | null {
 
   if (process.env.KALSHI_PRIVATE_KEY) {
     return { keyId, privateKeyPem: process.env.KALSHI_PRIVATE_KEY, source: "env:KALSHI_PRIVATE_KEY" };
+  }
+  const settingPem = storage.getSetting("kalshi_private_key_pem");
+  if (settingPem && !process.env.KALSHI_PRIVATE_KEY_PATH) {
+    return { keyId, privateKeyPem: settingPem, source: "settings" };
   }
   const candidatePaths = [
     process.env.KALSHI_PRIVATE_KEY_PATH,
