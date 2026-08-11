@@ -50,6 +50,7 @@ type PolyMarket = {
   image?: string;
   slug?: string;
   liquidity?: string;
+  liquidityNum?: number;
   volume?: string;
   volumeNum?: number;
   _eventTitle?: string;
@@ -151,7 +152,7 @@ type EngineRuntimeState = {
 
 type StrategyRuntimeConfig = Record<string, any>;
 
-const ORDERBOOK_OPTIMIZER_PROFILES = [
+const ORDERBOOK_OPTIMIZER_PROFILES: { name: string; config: Record<string, number> }[] = [
   {
     name: "current",
     config: {},
@@ -1156,7 +1157,7 @@ function analyzePureArbitrage(
   const yesPrice = clampProbability(yesAsk.price);
   const noPrice = clampProbability(noAsk.price);
   const pairCost = yesPrice + noPrice;
-  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const feeRate = getFeeRate();
   const shares = Math.min(orderSize / pairCost, yesAsk.size, noAsk.size);
   if (!Number.isFinite(shares) || shares <= 0) {
     return {
@@ -1327,7 +1328,7 @@ async function evaluateBondMarketStrategy(strategy: Strategy, orderSize: number)
   const minNetReturnPct = Number(config.minNetReturnPct ?? 0.005);
   const minProfitUsdc = Number(config.minProfitUsdc ?? 0.05);
   const minLiquidity = Number(config.minLiquidity ?? 1000);
-  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const feeRate = getFeeRate();
   const candidates = await fetchBondCandidateMarkets(strategy);
   let bestRejected = "No eligible non-BTC markets returned";
 
@@ -1423,6 +1424,13 @@ function calculateTakerFee(stake: number, price: number, feeRate: number) {
   return stake * feeRate * (1 - safePrice);
 }
 
+// Single source of truth for the paper taker fee. ensurePaperDefaults seeds
+// the setting, so the fallback only matters before first boot completes.
+function getFeeRate() {
+  const raw = parseFloat(storage.getSetting("taker_fee_rate") ?? "0");
+  return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+}
+
 function getCurrentMarkedPriceForTrade(trade: TradeLog, snapshot: PriceSnapshot) {
   // For a held BUY, the realisable exit price is the bid on that side. Mid is
   // optimistic — using bid makes paper TP/SL fire on prices we could actually
@@ -1496,7 +1504,7 @@ function manageOpenTradesForCurrentMarket(
   strategies: Strategy[],
 ) {
   const now = Date.now();
-  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const feeRate = getFeeRate();
   const secondsLeft = market.endDate
     ? Math.max(0, Math.floor((new Date(market.endDate).getTime() - now) / 1000))
     : 0;
@@ -1546,24 +1554,36 @@ function manageOpenTradesForCurrentMarket(
   };
 }
 
-function getResolutionPriceForOutcome(market: PolyMarket, outcome: "YES" | "NO") {
-  const outcomePrices = getOutcomePrices(market);
-  if (outcomePrices.length < 2) return null;
-  const resolutionPrice = outcome === "YES" ? outcomePrices[0] : outcomePrices[1];
-  if (!Number.isFinite(resolutionPrice)) return null;
-  if (resolutionPrice < 0 || resolutionPrice > 1) return null;
-  return resolutionPrice;
-}
-
-function isResolvedMarket(market: PolyMarket) {
+// Returns settlement prices for a market, or null if it isn't settleable yet.
+// Snaps near-discrete prices (0.999 → 1) so Gamma rounding noise can't leave
+// trades open forever, and force-settles lopsided books once a closed market
+// is more than two hours past its end date — without this, a market that
+// never reports exactly 0/1 permanently locks paper balance in open trades.
+function resolveOutcomePrices(market: PolyMarket): { yes: number; no: number } | null {
   const prices = getOutcomePrices(market);
-  if (prices.length < 2) return false;
-  const [yesPrice, noPrice] = prices;
-  const sumLooksResolved = Math.abs((yesPrice + noPrice) - 1) < 0.01;
-  const discrete =
-    [0, 0.5, 1].includes(Number(yesPrice.toFixed(3))) &&
-    [0, 0.5, 1].includes(Number(noPrice.toFixed(3)));
-  return sumLooksResolved && discrete && (market.closed === true || market.active === false);
+  if (prices.length < 2) return null;
+  const flagsResolved = market.closed === true || market.active === false;
+  if (!flagsResolved) return null;
+
+  const snap = (value: number) => {
+    for (const target of [0, 0.5, 1]) {
+      if (Math.abs(value - target) <= 0.02) return target;
+    }
+    return null;
+  };
+  const yes = snap(prices[0]);
+  const no = snap(prices[1]);
+  if (yes != null && no != null && Math.abs(yes + no - 1) < 0.01) {
+    return { yes, no };
+  }
+
+  const endMs = market.endDate ? new Date(market.endDate).getTime() : NaN;
+  const staleMs = 2 * 60 * 60 * 1000;
+  if (Number.isFinite(endMs) && Date.now() - endMs > staleMs) {
+    if (prices[0] >= 0.9 && prices[1] <= 0.1) return { yes: 1, no: 0 };
+    if (prices[0] <= 0.1 && prices[1] >= 0.9) return { yes: 0, no: 1 };
+  }
+  return null;
 }
 
 function getTodayKey() {
@@ -1732,7 +1752,7 @@ function maybeRollDayStartBalance() {
 }
 
 async function settleResolvedTrades() {
-  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const feeRate = getFeeRate();
   const openTrades = storage.getOpenTrades();
   const processedTradeIds = new Set<number>();
   const arbGroups = new Map<string, TradeLog[]>();
@@ -1750,18 +1770,15 @@ async function settleResolvedTrades() {
 
     try {
       const market = await fetchMarketById(first.marketId);
-      if (!isResolvedMarket(market)) continue;
+      const resolution = resolveOutcomePrices(market);
+      if (!resolution) continue;
 
       let groupNetPnl = 0;
       let groupSize = 0;
       const closedAt = new Date().toISOString();
 
       for (const leg of legs) {
-        const resolutionPrice = getResolutionPriceForOutcome(
-          market,
-          leg.outcome === "YES" ? "YES" : "NO",
-        );
-        if (resolutionPrice == null) continue;
+        const resolutionPrice = leg.outcome === "YES" ? resolution.yes : resolution.no;
 
         const entryPrice = clampProbability(leg.price);
         const shares = leg.size / entryPrice;
@@ -1805,13 +1822,9 @@ async function settleResolvedTrades() {
 
     try {
       const market = await fetchMarketById(trade.marketId);
-      if (!isResolvedMarket(market)) continue;
-
-      const resolutionPrice = getResolutionPriceForOutcome(
-        market,
-        trade.outcome === "YES" ? "YES" : "NO",
-      );
-      if (resolutionPrice == null) continue;
+      const resolution = resolveOutcomePrices(market);
+      if (!resolution) continue;
+      const resolutionPrice = trade.outcome === "YES" ? resolution.yes : resolution.no;
 
       const entryPrice = clampProbability(trade.price);
       const shares = trade.size / entryPrice;
@@ -1847,16 +1860,21 @@ async function settleResolvedTrades() {
 }
 
 function chooseEntryFromSignal(signalSide: "YES" | "NO", snapshot: PriceSnapshot) {
-  // Real BUYs hit the ask, not the midpoint. Falling back to mid (still
-  // clamped) only when the book is empty preserves existing behaviour during
-  // brief feed gaps without making paper fills systematically too good.
+  // Real BUYs hit the ask, not the midpoint. Fall back to mid only when the
+  // book is empty; if the mid is missing too there is no real price, so
+  // return NaN and let the caller's Number.isFinite guard skip the entry —
+  // clampProbability(null) would otherwise fabricate a 50c fill.
   if (signalSide === "YES") {
     const ask = getBestAsk(snapshot.yesBook);
-    const price = ask ? clampProbability(ask.price) : clampProbability(snapshot.yesMid);
+    const price = ask
+      ? clampProbability(ask.price)
+      : snapshot.yesMid != null ? clampProbability(snapshot.yesMid) : Number.NaN;
     return { tokenId: snapshot.yesTokenId, price, outcome: "YES" as const, side: "BUY" as const };
   }
   const ask = getBestAsk(snapshot.noBook);
-  const price = ask ? clampProbability(ask.price) : clampProbability(snapshot.noMid);
+  const price = ask
+    ? clampProbability(ask.price)
+    : snapshot.noMid != null ? clampProbability(snapshot.noMid) : Number.NaN;
   return { tokenId: snapshot.noTokenId, price, outcome: "NO" as const, side: "BUY" as const };
 }
 
@@ -2032,7 +2050,7 @@ function evaluateAgentOpinion(
     : Number(config.maxAgentEntryPrice ?? config.maxEntryPrice ?? 0.68);
   if (entryPrice > maxAgentEntryPrice) return null;
 
-  const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+  const feeRate = getFeeRate();
   const expectedGrossEdge = directionalConfidence - entryPrice;
   const estimatedEntryFeeDrag = feeRate * (1 - entryPrice);
   const estimatedExitPrice = clampProbability(directionalConfidence);
@@ -2455,8 +2473,8 @@ async function runEngineOnce() {
           return;
         }
 
-        const yesFee = calculateTakerFee(arb.yesSize, arb.yesPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0"));
-        const noFee = calculateTakerFee(arb.noSize, arb.noPrice, parseFloat(storage.getSetting("taker_fee_rate") || "0"));
+        const yesFee = calculateTakerFee(arb.yesSize, arb.yesPrice, getFeeRate());
+        const noFee = calculateTakerFee(arb.noSize, arb.noPrice, getFeeRate());
         const timestamp = new Date().toISOString();
         const marketQuestion = winner.market._eventTitle || winner.market.question || winner.strategy.marketQuestion;
         const tradeGroupId = `arb-${winner.market.conditionId || winner.market.id}-${Date.now()}`;
@@ -2529,7 +2547,7 @@ async function runEngineOnce() {
         return;
       }
 
-      const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+      const feeRate = getFeeRate();
       const entrySize = winner.signal.entrySize ?? winner.orderSize;
       const entryFee = calculateTakerFee(entrySize, entry.price, feeRate);
       if (winner.strategy.name === "Orderbook Arbitrage & Imbalance" && storage.getSetting("enable_orderbook_optimizer") !== "false") {
@@ -2860,7 +2878,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return;
     }
 
-    const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+    const feeRate = getFeeRate();
     const entryPrice = clampProbability(trade.price);
     const shares = trade.size / entryPrice;
     const proceeds = shares * exitPrice;
@@ -2990,21 +3008,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       latencyMs = null;
     }
 
-    let lagScore: number | null = null;
+    // convictionScore is how far the market has committed away from 50/50
+    // (0 = coin flip, 1 = fully decided). spotPrice is CryptoCompare spot,
+    // not a Chainlink oracle read — the old field names implied a lag
+    // measurement this endpoint never actually computed.
+    let convictionScore: number | null = null;
     let polyPrice: number | null = null;
-    let chainlinkPrice: number | null = null;
+    let spotPrice: number | null = null;
     try {
       const market = await fetchCurrentBtcCandleMarket();
       if (market) {
         const snapshot = await getPriceSnapshot(market);
         polyPrice = snapshot.yesMid;
       }
-      chainlinkPrice = await fetchSpotPrice();
       if (polyPrice != null) {
-        lagScore = Math.abs(polyPrice - 0.5) * 2;
+        convictionScore = Math.abs(polyPrice - 0.5) * 2;
       }
+      spotPrice = await fetchSpotPrice();
     } catch {
-      lagScore = null;
+      // Keep whatever was computed before the failure; a spot-price outage
+      // shouldn't blank the conviction reading.
     }
 
     res.json({
@@ -3014,9 +3037,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       circuitBreakerAt,
       drawdownCircuitBreakerEnabled,
       latencyMs,
-      lagScore,
+      convictionScore,
       polyPrice,
-      chainlinkPrice,
+      spotPrice,
       openTrades: storage.getOpenTrades().length,
     });
   });
@@ -3033,7 +3056,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/backtest", async (req, res) => {
     try {
       const { strategyName, periodDays = 7, orderSize = 10 } = req.body;
-      const feeRate = parseFloat(storage.getSetting("taker_fee_rate") || "0.072");
+      const feeRate = getFeeRate();
       const lookbackMinutes = Math.min(Math.max(60, Number(periodDays) * 24 * 60), 2000);
 
       const response = await fetch(

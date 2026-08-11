@@ -161,7 +161,7 @@ export default function Dashboard() {
     drawdownPct: number; drawdownLimit: number; circuitBreaker: string;
     circuitBreakerAt: string | null; latencyMs: number | null;
     drawdownCircuitBreakerEnabled: boolean;
-    lagScore: number | null; polyPrice: number | null; chainlinkPrice: number | null;
+    convictionScore: number | null; polyPrice: number | null; spotPrice: number | null;
   }>({
     queryKey: ["/api/safeguards"],
     refetchInterval: 30000,
@@ -584,16 +584,16 @@ export default function Dashboard() {
             </div>
             {/* Lag Score */}
             <div>
-              <p className="text-xs text-muted-foreground flex items-center gap-1"><Zap className="w-3 h-3" /> Lag Score</p>
+              <p className="text-xs text-muted-foreground flex items-center gap-1"><Zap className="w-3 h-3" /> Conviction</p>
               <p className={cn(
                 "text-lg font-semibold font-mono mt-0.5",
-                safeguards?.lagScore == null ? "text-muted-foreground"
-                  : safeguards.lagScore > 0.6 ? "text-profit"
-                  : safeguards.lagScore > 0.3 ? "text-yellow-400" : "text-muted-foreground"
+                safeguards?.convictionScore == null ? "text-muted-foreground"
+                  : safeguards.convictionScore > 0.6 ? "text-profit"
+                  : safeguards.convictionScore > 0.3 ? "text-yellow-400" : "text-muted-foreground"
               )}>
-                {safeguards?.lagScore != null ? safeguards.lagScore.toFixed(2) : "—"}
+                {safeguards?.convictionScore != null ? safeguards.convictionScore.toFixed(2) : "—"}
               </p>
-              <p className="text-[11px] text-muted-foreground">0=neutral · 1=strong signal</p>
+              <p className="text-[11px] text-muted-foreground">0=coin flip · 1=decided</p>
             </div>
             {/* BTC spot vs Poly */}
             <div>
@@ -602,7 +602,7 @@ export default function Dashboard() {
                 <p className="text-xs font-mono">
                   <span className="text-muted-foreground">Spot: </span>
                   <span className="font-medium">
-                    {safeguards?.chainlinkPrice ? `$${safeguards.chainlinkPrice.toLocaleString()}` : "—"}
+                    {safeguards?.spotPrice ? `$${safeguards.spotPrice.toLocaleString()}` : "—"}
                   </span>
                 </p>
                 <p className="text-xs font-mono">

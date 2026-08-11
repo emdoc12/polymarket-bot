@@ -94,6 +94,14 @@ function runMigrations() {
   if (!logColNames.has("fee_paid")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN fee_paid REAL;");
   if (!logColNames.has("net_pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN net_pnl REAL;");
 
+  // The engine polls every few seconds and filters trade_logs by status,
+  // strategy, and day; without indexes these scans grow with total history.
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_trade_logs_status ON trade_logs(status);
+    CREATE INDEX IF NOT EXISTS idx_trade_logs_strategy ON trade_logs(strategy_id);
+    CREATE INDEX IF NOT EXISTS idx_trade_logs_timestamp ON trade_logs(timestamp);
+  `);
+
   // Backtest runs table
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -232,7 +240,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   getOpenTrades(): TradeLog[] {
-    return db.select().from(tradeLogs).orderBy(desc(tradeLogs.id)).all().filter((trade) => trade.status === "open");
+    return db.select().from(tradeLogs).where(eq(tradeLogs.status, "open")).orderBy(desc(tradeLogs.id)).all();
   }
 
   createTradeLog(log: InsertTradeLog): TradeLog {
