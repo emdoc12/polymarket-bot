@@ -93,6 +93,23 @@ docker run -d \
 - Positions stay attached to the market they entered and settle when that candle resolves
 - Active strategies can automatically roll into the next BTC 5-minute market
 
+## Kalshi (Phase 1 — market data + real backtests)
+
+The app is migrating toward live trading on [Kalshi](https://kalshi.com) (KXBTC15M
+15-minute BTC up/down and hourly series). Phase 1 adds public market-data
+endpoints — no API key needed:
+
+- `GET /api/kalshi/series` — supported crypto series
+- `GET /api/kalshi/markets?series=KXBTC15M&status=open` — live markets
+- `GET /api/kalshi/orderbook/:ticker` — order book
+- `GET /api/kalshi/candles?series=KXBTC15M&ticker=...` — 1-min history (price + yes bid/ask)
+- `POST /api/kalshi/backtest` — replay real settled markets with actual quoted
+  entries, real settlement results, and Kalshi's quadratic fee
+  (`{"series":"KXBTC15M","marketsLookback":40,"entrySecondsBeforeClose":300,"strategy":"momentum","orderSize":10}`)
+
+Phase 2 (demo-environment order placement) requires an RSA API key from a
+[demo.kalshi.co](https://demo.kalshi.co) account.
+
 ## Releases
 
 - Pushes to `master` publish both the `latest` container tag and the current version tag from [`VERSION`](/Users/emdoc12/jedi-poly/VERSION)
