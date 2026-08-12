@@ -207,133 +207,6 @@ const ORDERBOOK_OPTIMIZER_PROFILES: { name: string; config: Record<string, numbe
   },
 ];
 
-const FIXED_STRATEGIES = [
-  {
-    name: BOND_STRATEGY_NAME,
-    marketQuestion: "Non-BTC high-confidence markets (scanner)",
-    side: "YES" as const,
-    triggerType: "price_above",
-    triggerPrice: 0.95,
-    orderSize: 10,
-    orderType: "MARKET",
-    cooldownMinutes: 2,
-    isActive: false,
-    autoRoll: false,
-    config: JSON.stringify({
-      minEntryPrice: 0.95,
-      maxEntryPrice: 0.99,
-      minNetReturnPct: 0.005,
-      minProfitUsdc: 0.05,
-      minLiquidity: 1000,
-      scanLimit: 100,
-      excludeCryptoUpDown: true,
-      enableParlay: false,
-      parlayLegs: 3,
-      maxParlayStakePct: 0.01,
-      description: "Paper-buy non-BTC outcomes priced like bonds when the remaining payout still clears fees and risk filters.",
-    }),
-  },
-  {
-    name: "Pure YES/NO Arbitrage",
-    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
-    side: "YES" as const,
-    triggerType: "price_below",
-    triggerPrice: 0.99,
-    orderSize: 10,
-    orderType: "MARKET",
-    cooldownMinutes: 1,
-    isActive: false,
-    autoRoll: true,
-    config: JSON.stringify({
-      maxPairCost: 0.985,
-      minNetEdgePct: 0.005,
-      minProfitUsdc: 0.25,
-      minSecondsLeft: 20,
-      description: "Paper-buy matched YES and NO shares when executable asks lock a guaranteed net profit after fees.",
-    }),
-  },
-  {
-    name: "Last-Second Momentum Snipe",
-    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
-    side: "YES" as const,
-    triggerType: "price_below",
-    triggerPrice: 0.48,
-    orderSize: 10,
-    orderType: "MARKET",
-    cooldownMinutes: 1,
-    isActive: false,
-    autoRoll: true,
-    config: JSON.stringify({
-      triggerPrice: 0.48,
-      momentumThreshold: 0.65,
-      minSecondsLeft: 45,
-      description: "Buy YES when the BTC candle is still underpriced during late positive momentum.",
-    }),
-  },
-  {
-    name: "Orderbook Arbitrage & Imbalance",
-    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
-    side: "YES" as const,
-    triggerType: "price_above",
-    triggerPrice: 0,
-    orderSize: 10,
-    orderType: "MARKET",
-    cooldownMinutes: 1,
-    isActive: false,
-    autoRoll: true,
-    config: JSON.stringify({
-      minImbalanceThreshold: 0.12,
-      imbalanceThreshold: 0.18,
-      maxEntryPrice: 0.56,
-      hardMaxEntryPrice: 0.72,
-      minSecondsLeft: 40,
-      minAgentScore: 0.015,
-      takeProfitPct: 0.012,
-      stopLossPct: 0.01,
-      forceExitSecondsLeft: 18,
-      minHoldSeconds: 8,
-      description: "Trade when the BTC 5-minute YES/NO books diverge from fair value and one side is still cheap.",
-    }),
-  },
-  {
-    name: "Spot Correlation Reversion Scalp",
-    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
-    side: "YES" as const,
-    triggerType: "price_below",
-    triggerPrice: 0.45,
-    orderSize: 10,
-    orderType: "MARKET",
-    cooldownMinutes: 1,
-    isActive: false,
-    autoRoll: true,
-    config: JSON.stringify({
-      triggerPrice: 0.46,
-      reboundThreshold: 0.0025,
-      windowBars: 8,
-      minSecondsLeft: 60,
-      description: "Buy YES after a BTC rebound when the Polymarket YES price still lags spot.",
-    }),
-  },
-  {
-    name: "Oracle Lead Arbitrage",
-    marketQuestion: "Bitcoin Up or Down - 5 Minutes (auto-roll)",
-    side: "YES" as const,
-    triggerType: "price_above",
-    triggerPrice: 0,
-    orderSize: 10,
-    orderType: "MARKET",
-    cooldownMinutes: 1,
-    isActive: false,
-    autoRoll: true,
-    config: JSON.stringify({
-      spotMoveThreshold: 0.002,
-      maxEntryPrice: 0.6,
-      minSecondsLeft: 75,
-      description: "Follow BTC spot when the 5-minute market is still lagging the latest move.",
-    }),
-  },
-];
-
 const engineState: EngineRuntimeState = {
   running: true,
   lastPollAt: null,
@@ -2609,7 +2482,6 @@ async function runEngineOnce() {
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
-  storage.upsertStrategies(FIXED_STRATEGIES as any);
   ensurePaperDefaults();
   registerKalshiRoutes(app);
   registerKalshiTradingRoutes(app);
@@ -2618,6 +2490,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/version", (_req, res) => {
     res.json({ version: APP_VERSION });
+  });
+
+  // Danger-zone cleanup: wipes legacy Polymarket paper strategies, trades,
+  // and backtests; resets the paper balance. Lab/executor data untouched.
+  app.post("/api/admin/clear-polymarket-data", (_req, res) => {
+    storage.clearPolymarketData();
+    res.json({ ok: true });
   });
 
   app.get("/api/markets", async (req, res) => {

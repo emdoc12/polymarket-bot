@@ -465,6 +465,19 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(executorTrades).all()
       .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
   }
+
+  // One-shot cleanup of the Polymarket paper-trading era: legacy strategies,
+  // their trade log, and the synthetic backtest history. Strategy Lab and
+  // executor data are untouched.
+  clearPolymarketData(): void {
+    db.delete(tradeLogs).run();
+    db.delete(strategies).run();
+    db.delete(backtestRuns).run();
+    this.setSetting("paper_balance", "1000");
+    this.setSetting("day_start_balance", "1000");
+    this.setSetting("circuit_breaker", "ok");
+    this.setSetting("circuit_breaker_at", "");
+  }
 }
 
 export const storage = new DatabaseStorage();

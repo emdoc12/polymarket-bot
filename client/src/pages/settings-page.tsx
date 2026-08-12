@@ -104,6 +104,19 @@ export default function SettingsPage() {
     },
   });
 
+  const clearPolymarketMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", "/api/admin/clear-polymarket-data", {});
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries();
+      toast({ title: "Old Polymarket data cleared", description: "Trades, strategies, backtests, and P&L reset. Strategy Lab data untouched." });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
   const testKalshiMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/kalshi/auth/self-test", {});
@@ -534,6 +547,35 @@ export default function SettingsPage() {
           Save Settings
         </Button>
       </div>
+
+      {/* Danger zone */}
+      <Card className="border-destructive/30">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-destructive" />
+            <CardTitle className="text-sm font-medium">Danger Zone</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Permanently delete the Polymarket-era paper data: legacy strategies, their trade log,
+            synthetic backtests, and P&L history. Resets the paper balance to $1,000. Strategy Lab
+            candidates, cycles, and Kalshi demo trades are NOT affected.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={clearPolymarketMutation.isPending}
+            onClick={() => {
+              if (window.confirm("Delete all old Polymarket trades, strategies, and P&L history? This cannot be undone.")) {
+                clearPolymarketMutation.mutate();
+              }
+            }}
+          >
+            {clearPolymarketMutation.isPending ? "Clearing..." : "Clear Old Polymarket Data"}
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* Paper trading info */}
       <Card className="border-primary/20 bg-primary/5">

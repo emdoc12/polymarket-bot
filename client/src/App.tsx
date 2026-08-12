@@ -9,7 +9,6 @@ import { AppSidebar } from "@/components/app-sidebar";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import Markets from "@/pages/markets";
-import Strategies from "@/pages/strategies";
 import Trades from "@/pages/trades";
 import WatchlistPage from "@/pages/watchlist-page";
 import SettingsPage from "@/pages/settings-page";
@@ -21,7 +20,6 @@ function AppRouter() {
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/markets" component={Markets} />
-      <Route path="/strategies" component={Strategies} />
       <Route path="/trades" component={Trades} />
       <Route path="/watchlist" component={WatchlistPage} />
       <Route path="/settings" component={SettingsPage} />
