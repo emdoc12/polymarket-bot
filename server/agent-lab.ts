@@ -140,6 +140,7 @@ function describeCandidate(candidate: CandidateStrategy) {
     train: { trades: candidate.trainTrades, wins: candidate.trainWins, netPnl: candidate.trainNetPnl },
     holdout: { trades: candidate.holdoutTrades, wins: candidate.holdoutWins, netPnl: candidate.holdoutNetPnl },
     live: { trades: candidate.liveTrades, wins: candidate.liveWins, netPnl: candidate.liveNetPnl },
+    demo: { trades: candidate.demoTrades, wins: candidate.demoWins, netPnl: candidate.demoNetPnl },
     rationale: candidate.rationale,
     pmNotes: candidate.pmNotes,
   };

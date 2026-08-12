@@ -104,6 +104,11 @@ export async function getKalshiMarkets(params: {
   };
 }
 
+export async function getKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
+  const data = await kalshiFetch(`/markets/${encodeURIComponent(ticker)}`) as { market?: KalshiMarket };
+  return data.market ?? null;
+}
+
 export async function getKalshiOrderbook(ticker: string, depth = 10) {
   return kalshiFetch(`/markets/${encodeURIComponent(ticker)}/orderbook`, { depth: String(depth) });
 }

@@ -107,7 +107,34 @@ export const candidateStrategies = sqliteTable("candidate_strategies", {
   lastEvalCloseMs: integer("last_eval_close_ms"),
   lastTestedAt: text("last_tested_at"),
   pmNotes: text("pm_notes"),
+  // Demo-account execution record, fed back by the executor.
+  demoTrades: integer("demo_trades"),
+  demoWins: integer("demo_wins"),
+  demoNetPnl: real("demo_net_pnl"),
   createdAt: text("created_at").notNull(),
+});
+
+// Executor trades - orders placed (or dry-run recorded) on the Kalshi demo
+// account by promoted strategies.
+export const executorTrades = sqliteTable("executor_trades", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  candidateId: integer("candidate_id").references(() => candidateStrategies.id),
+  candidateName: text("candidate_name").notNull(),
+  ticker: text("ticker").notNull(),
+  series: text("series").notNull(),
+  side: text("side").notNull(),              // yes | no
+  entryPrice: real("entry_price").notNull(), // dollars per contract
+  contracts: integer("contracts").notNull(),
+  cost: real("cost").notNull(),
+  fee: real("fee").notNull(),
+  status: text("status").notNull(),          // dry_run | open | settled_won | settled_lost | failed
+  orderId: text("order_id"),
+  error: text("error"),
+  result: text("result"),                    // yes | no once settled
+  netPnl: real("net_pnl"),
+  placedAt: text("placed_at").notNull(),
+  marketCloseAt: text("market_close_at").notNull(),
+  settledAt: text("settled_at"),
 });
 
 // Agent lab runs - one row per research cycle
@@ -140,12 +167,15 @@ export const insertBacktestRunSchema = createInsertSchema(backtestRuns).omit({ i
 
 export const insertCandidateStrategySchema = createInsertSchema(candidateStrategies).omit({ id: true });
 export const insertAgentLabRunSchema = createInsertSchema(agentLabRuns).omit({ id: true });
+export const insertExecutorTradeSchema = createInsertSchema(executorTrades).omit({ id: true });
 
 // Types
 export type CandidateStrategy = typeof candidateStrategies.$inferSelect;
 export type InsertCandidateStrategy = z.infer<typeof insertCandidateStrategySchema>;
 export type AgentLabRun = typeof agentLabRuns.$inferSelect;
 export type InsertAgentLabRun = z.infer<typeof insertAgentLabRunSchema>;
+export type ExecutorTrade = typeof executorTrades.$inferSelect;
+export type InsertExecutorTrade = z.infer<typeof insertExecutorTradeSchema>;
 export type Strategy = typeof strategies.$inferSelect;
 export type BacktestRun = typeof backtestRuns.$inferSelect;
 export type InsertBacktestRun = z.infer<typeof insertBacktestRunSchema>;

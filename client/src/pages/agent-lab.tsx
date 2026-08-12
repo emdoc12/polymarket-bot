@@ -40,8 +40,34 @@ type Candidate = {
   train: { trades: number | null; wins: number | null; netPnl: number | null };
   holdout: { trades: number | null; wins: number | null; netPnl: number | null };
   live: { trades: number | null; wins: number | null; netPnl: number | null };
+  demo: { trades: number | null; wins: number | null; netPnl: number | null };
   rationale: string | null;
   pmNotes: string | null;
+};
+
+type ExecutorStatus = {
+  enabled: boolean;
+  dryRun: boolean;
+  kalshiConfigured: boolean;
+  promotedStrategies: number;
+  openTrades: number;
+  tradesToday: number;
+  maxTradesPerDay: number;
+  totalSettled: number;
+  totalNetPnl: number;
+};
+
+type ExecutorTradeRow = {
+  id: number;
+  candidateName: string;
+  ticker: string;
+  side: string;
+  entryPrice: number;
+  contracts: number;
+  status: string;
+  netPnl: number | null;
+  placedAt: string;
+  error: string | null;
 };
 
 type LabRun = {
@@ -111,6 +137,24 @@ export default function AgentLabPage() {
   const { data: runsData } = useQuery<{ runs: LabRun[] }>({
     queryKey: ["/api/agent-lab/runs"],
     refetchInterval: 15000,
+  });
+  const { data: executor } = useQuery<ExecutorStatus>({
+    queryKey: ["/api/executor/status"],
+    refetchInterval: 10000,
+  });
+  const { data: executorTradesData } = useQuery<{ trades: ExecutorTradeRow[] }>({
+    queryKey: ["/api/executor/trades"],
+    refetchInterval: 15000,
+  });
+
+  const toggleExecutorMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("POST", "/api/settings", { key: "kalshi_executor_enabled", value: String(enabled) });
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/executor/status"] }),
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
   });
 
   const refreshAll = () => {
@@ -227,10 +271,46 @@ export default function AgentLabPage() {
         </Card>
       </div>
 
+      {/* Demo execution */}
+      <Card>
+        <CardContent className="py-3 px-4">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={executor?.enabled ?? false}
+                onCheckedChange={(checked) => toggleExecutorMutation.mutate(checked)}
+                disabled={!executor?.kalshiConfigured}
+              />
+              <Label className="text-xs font-medium">Demo execution</Label>
+            </div>
+            {executor?.dryRun
+              ? <Badge variant="secondary" className="text-[10px]">dry run — orders logged, not sent</Badge>
+              : <Badge className="bg-profit/15 text-profit border-profit/20 text-[10px]">LIVE on demo account</Badge>}
+            <span className="text-xs text-muted-foreground">
+              {executor
+                ? `${executor.promotedStrategies} strategies armed · ${executor.openTrades} open · ${executor.tradesToday}/${executor.maxTradesPerDay} today`
+                : "—"}
+            </span>
+            {executor && executor.totalSettled > 0 && (
+              <span className="text-xs">
+                settled P&L: <PnlText value={executor.totalNetPnl} />
+                <span className="text-muted-foreground"> over {executor.totalSettled}</span>
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-2">
+            Promoted strategies place $10 limit orders on the live market window at their specified entry time.
+            Flip the <span className="font-mono">kalshi_dry_run</span> setting to <span className="font-mono">false</span> to
+            send real demo-account orders.
+          </p>
+        </CardContent>
+      </Card>
+
       <Tabs defaultValue="leaderboard">
         <TabsList>
           <TabsTrigger value="leaderboard" className="text-xs">Leaderboard</TabsTrigger>
           <TabsTrigger value="runs" className="text-xs">Cycle History</TabsTrigger>
+          <TabsTrigger value="demo" className="text-xs">Demo Trades</TabsTrigger>
         </TabsList>
 
         <TabsContent value="leaderboard" className="mt-3">
@@ -278,6 +358,11 @@ export default function AgentLabPage() {
                             {(candidate.live.trades ?? 0) > 0
                               ? <SampleCell sample={candidate.live} />
                               : <span className="text-xs text-muted-foreground">accruing</span>}
+                            {(candidate.demo.trades ?? 0) > 0 && (
+                              <div className="text-[10px] text-muted-foreground mt-0.5">
+                                demo: <PnlText value={candidate.demo.netPnl} /> ({candidate.demo.trades}t)
+                              </div>
+                            )}
                           </td>
                           <td className="px-3 py-2.5 hidden lg:table-cell">
                             <p className="text-[11px] text-muted-foreground max-w-xs">
@@ -320,6 +405,57 @@ export default function AgentLabPage() {
               </Card>
             ))
           )}
+        </TabsContent>
+
+        <TabsContent value="demo" className="mt-3">
+          <Card>
+            <CardContent className="px-0 py-0">
+              {(executorTradesData?.trades ?? []).length === 0 ? (
+                <p className="text-xs text-muted-foreground px-5 py-4">
+                  No demo trades yet — they appear when a promoted strategy's entry conditions fire on a live
+                  market window while demo execution is enabled.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-[11px] text-muted-foreground border-b border-border">
+                        <th className="text-left font-medium px-5 py-2">Time</th>
+                        <th className="text-left font-medium px-3 py-2">Market</th>
+                        <th className="text-left font-medium px-3 py-2">Strategy</th>
+                        <th className="text-left font-medium px-3 py-2">Entry</th>
+                        <th className="text-left font-medium px-3 py-2">Status</th>
+                        <th className="text-right font-medium px-5 py-2">P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(executorTradesData?.trades ?? []).map((trade) => (
+                        <tr key={trade.id} className="border-b border-border/50">
+                          <td className="px-5 py-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
+                            {new Date(trade.placedAt).toLocaleTimeString()}
+                          </td>
+                          <td className="px-3 py-2 text-[11px] font-mono">{trade.ticker.replace("KXBTC15M-", "").replace("KXETH15M-", "")}</td>
+                          <td className="px-3 py-2 text-xs">{trade.candidateName}</td>
+                          <td className="px-3 py-2 text-xs font-mono">
+                            {trade.side.toUpperCase()} {trade.contracts} @ {(trade.entryPrice * 100).toFixed(0)}¢
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge
+                              variant={trade.status === "settled_won" ? "default" : trade.status === "failed" ? "destructive" : "secondary"}
+                              className="text-[10px]"
+                            >
+                              {trade.status.replace("_", " ")}
+                            </Badge>
+                          </td>
+                          <td className="px-5 py-2 text-right text-xs"><PnlText value={trade.netPnl} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
     </div>

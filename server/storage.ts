@@ -6,6 +6,7 @@ import {
   type BacktestRun, type InsertBacktestRun, backtestRuns,
   type CandidateStrategy, type InsertCandidateStrategy, candidateStrategies,
   type AgentLabRun, type InsertAgentLabRun, agentLabRuns,
+  type ExecutorTrade, type InsertExecutorTrade, executorTrades,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
@@ -96,14 +97,6 @@ function runMigrations() {
   if (!logColNames.has("fee_paid")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN fee_paid REAL;");
   if (!logColNames.has("net_pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN net_pnl REAL;");
 
-  // Walk-forward columns added after candidate_strategies first shipped.
-  const candidateCols = sqlite.pragma("table_info(candidate_strategies)") as { name: string }[];
-  const candidateColNames = new Set(candidateCols.map((c) => c.name));
-  if (!candidateColNames.has("live_trades")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_trades INTEGER;");
-  if (!candidateColNames.has("live_wins")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_wins INTEGER;");
-  if (!candidateColNames.has("live_net_pnl")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_net_pnl REAL;");
-  if (!candidateColNames.has("last_eval_close_ms")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN last_eval_close_ms INTEGER;");
-
   // The engine polls every few seconds and filters trade_logs by status,
   // strategy, and day; without indexes these scans grow with total history.
   sqlite.exec(`
@@ -149,6 +142,44 @@ function runMigrations() {
       pm_commentary TEXT,
       error TEXT
     );
+  `);
+
+  // Walk-forward + demo columns added after candidate_strategies first shipped.
+  // Must run after the agent-lab CREATE TABLE block above.
+  const candidateCols = sqlite.pragma("table_info(candidate_strategies)") as { name: string }[];
+  const candidateColNames = new Set(candidateCols.map((c) => c.name));
+  if (!candidateColNames.has("live_trades")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_trades INTEGER;");
+  if (!candidateColNames.has("live_wins")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_wins INTEGER;");
+  if (!candidateColNames.has("live_net_pnl")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_net_pnl REAL;");
+  if (!candidateColNames.has("last_eval_close_ms")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN last_eval_close_ms INTEGER;");
+  if (!candidateColNames.has("demo_trades")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN demo_trades INTEGER;");
+  if (!candidateColNames.has("demo_wins")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN demo_wins INTEGER;");
+  if (!candidateColNames.has("demo_net_pnl")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN demo_net_pnl REAL;");
+
+  // Executor trades table (references candidate_strategies).
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS executor_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER REFERENCES candidate_strategies(id),
+      candidate_name TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      series TEXT NOT NULL,
+      side TEXT NOT NULL,
+      entry_price REAL NOT NULL,
+      contracts INTEGER NOT NULL,
+      cost REAL NOT NULL,
+      fee REAL NOT NULL,
+      status TEXT NOT NULL,
+      order_id TEXT,
+      error TEXT,
+      result TEXT,
+      net_pnl REAL,
+      placed_at TEXT NOT NULL,
+      market_close_at TEXT NOT NULL,
+      settled_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_executor_trades_status ON executor_trades(status);
+    CREATE INDEX IF NOT EXISTS idx_executor_trades_candidate ON executor_trades(candidate_id, ticker);
   `);
 
   // Backtest runs table
@@ -218,6 +249,13 @@ export interface IStorage {
   createAgentLabRun(run: InsertAgentLabRun): AgentLabRun;
   updateAgentLabRun(id: number, updates: Partial<AgentLabRun>): void;
   getAgentLabRuns(limit?: number): AgentLabRun[];
+
+  // Executor
+  createExecutorTrade(trade: InsertExecutorTrade): ExecutorTrade;
+  updateExecutorTrade(id: number, updates: Partial<ExecutorTrade>): void;
+  getExecutorTrades(limit?: number): ExecutorTrade[];
+  getUnsettledExecutorTrades(): ExecutorTrade[];
+  hasExecutorTradeFor(candidateId: number, ticker: string): boolean;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -403,6 +441,29 @@ export class DatabaseStorage implements IStorage {
 
   getAgentLabRuns(limit = 20): AgentLabRun[] {
     return db.select().from(agentLabRuns).orderBy(desc(agentLabRuns.id)).limit(limit).all();
+  }
+
+  // Executor
+  createExecutorTrade(trade: InsertExecutorTrade): ExecutorTrade {
+    return db.insert(executorTrades).values(trade).returning().get();
+  }
+
+  updateExecutorTrade(id: number, updates: Partial<ExecutorTrade>): void {
+    db.update(executorTrades).set(updates as any).where(eq(executorTrades.id, id)).run();
+  }
+
+  getExecutorTrades(limit = 50): ExecutorTrade[] {
+    return db.select().from(executorTrades).orderBy(desc(executorTrades.id)).limit(limit).all();
+  }
+
+  getUnsettledExecutorTrades(): ExecutorTrade[] {
+    return db.select().from(executorTrades).orderBy(desc(executorTrades.id)).all()
+      .filter((trade) => trade.status === "dry_run" || trade.status === "open");
+  }
+
+  hasExecutorTradeFor(candidateId: number, ticker: string): boolean {
+    return db.select().from(executorTrades).all()
+      .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
   }
 }
 
