@@ -100,6 +100,11 @@ export const candidateStrategies = sqliteTable("candidate_strategies", {
   holdoutTrades: integer("holdout_trades"),
   holdoutWins: integer("holdout_wins"),
   holdoutNetPnl: real("holdout_net_pnl"),
+  // Walk-forward record: cumulative results on markets settled AFTER proposal.
+  liveTrades: integer("live_trades"),
+  liveWins: integer("live_wins"),
+  liveNetPnl: real("live_net_pnl"),
+  lastEvalCloseMs: integer("last_eval_close_ms"),
   lastTestedAt: text("last_tested_at"),
   pmNotes: text("pm_notes"),
   createdAt: text("created_at").notNull(),

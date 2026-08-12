@@ -39,6 +39,7 @@ type Candidate = {
   };
   train: { trades: number | null; wins: number | null; netPnl: number | null };
   holdout: { trades: number | null; wins: number | null; netPnl: number | null };
+  live: { trades: number | null; wins: number | null; netPnl: number | null };
   rationale: string | null;
   pmNotes: string | null;
 };
@@ -147,9 +148,13 @@ export default function AgentLabPage() {
   });
 
   const candidates = candidatesData?.candidates ?? [];
+  // Rank by accumulated walk-forward P&L once it exists; fall back to holdout
+  // for candidates too new to have live evidence.
+  const rankScore = (c: Candidate) =>
+    (c.live.trades ?? 0) > 0 ? (c.live.netPnl ?? -Infinity) : (c.holdout.netPnl ?? -Infinity);
   const leaderboard = [...candidates]
     .filter((c) => c.holdout.netPnl != null)
-    .sort((a, b) => (b.holdout.netPnl ?? -Infinity) - (a.holdout.netPnl ?? -Infinity));
+    .sort((a, b) => rankScore(b) - rankScore(a));
   const runs = runsData?.runs ?? [];
   const running = status?.cycleInFlight || runCycleMutation.isPending;
 
@@ -232,11 +237,12 @@ export default function AgentLabPage() {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <FlaskConical className="w-4 h-4 text-primary" /> Candidates by holdout P&L
+                <FlaskConical className="w-4 h-4 text-primary" /> Candidates by walk-forward P&L
               </CardTitle>
               <CardDescription className="text-xs">
-                $10 stakes on real settled markets. Train = older half, Holdout = newer half — an edge is only
-                real if it survives the holdout sample.
+                $10 stakes on real settled markets. Train/Holdout = the discovery backtest. Live = walk-forward
+                results that accumulate every cycle on markets settled after the strategy was proposed — the
+                evidence promotions rest on.
               </CardDescription>
             </CardHeader>
             <CardContent className="px-0 pb-0">
@@ -253,6 +259,7 @@ export default function AgentLabPage() {
                         <th className="text-left font-medium px-3 py-2">Status</th>
                         <th className="text-left font-medium px-3 py-2">Train</th>
                         <th className="text-left font-medium px-3 py-2">Holdout</th>
+                        <th className="text-left font-medium px-3 py-2">Live</th>
                         <th className="text-left font-medium px-3 py-2 hidden lg:table-cell">PM notes</th>
                       </tr>
                     </thead>
@@ -267,6 +274,11 @@ export default function AgentLabPage() {
                           <td className="px-3 py-2.5">{statusBadge(candidate.status)}</td>
                           <td className="px-3 py-2.5"><SampleCell sample={candidate.train} /></td>
                           <td className="px-3 py-2.5"><SampleCell sample={candidate.holdout} /></td>
+                          <td className="px-3 py-2.5">
+                            {(candidate.live.trades ?? 0) > 0
+                              ? <SampleCell sample={candidate.live} />
+                              : <span className="text-xs text-muted-foreground">accruing</span>}
+                          </td>
                           <td className="px-3 py-2.5 hidden lg:table-cell">
                             <p className="text-[11px] text-muted-foreground max-w-xs">
                               {candidate.pmNotes ?? candidate.rationale ?? ""}

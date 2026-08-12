@@ -294,6 +294,18 @@ function summarizeTrades(trades: SpecTrade[], orderSize: number): SpecSampleResu
   };
 }
 
+// Flat evaluation over a market subset — used for walk-forward testing, where
+// each cycle scores surviving candidates only on markets that settled since
+// their last evaluation, so live evidence accumulates instead of resetting.
+export function evaluateSpecSample(spec: KalshiStrategySpec, data: SettledMarketData[]): SpecSampleResult {
+  const trades: SpecTrade[] = [];
+  for (const entry of data) {
+    const trade = evaluateSpecOnMarket(spec, entry);
+    if (trade) trades.push(trade);
+  }
+  return summarizeTrades(trades, spec.orderSize);
+}
+
 export function evaluateSpecOnData(spec: KalshiStrategySpec, data: SettledMarketData[]) {
   // Chronological split: older half trains, newer half is the honesty check.
   const splitIndex = Math.floor(data.length / 2);

@@ -8,6 +8,7 @@ import { storage } from "./storage";
 import {
   clampSpec,
   evaluateSpecOnData,
+  evaluateSpecSample,
   fetchSettledMarketData,
   specHash,
   type KalshiStrategySpec,
@@ -87,12 +88,12 @@ const WORKER_ROLES: WorkerRole[] = [
   },
 ];
 
-const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk hunting for a real, fee-surviving edge on Kalshi crypto prediction markets. Your team of specialist agents proposes strategy specs; each is backtested on real settled markets with a chronological train/holdout split.
+const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk hunting for a real, fee-surviving edge on Kalshi crypto prediction markets. Your team of specialist agents proposes strategy specs; each gets a discovery backtest (train/holdout split at proposal time) and then accumulates WALK-FORWARD results: every cycle, surviving candidates are re-scored on markets that settled after they were proposed. Walk-forward ("live") evidence is the truth - it cannot be overfit.
 
 Decision rules:
-- promote: only when the holdout sample shows positive net P&L on a meaningful sample (>= 15 holdout trades) AND the train/holdout results are consistent. Be stingy - promotion means this spec is a candidate for live demo trading.
-- reject: clearly unprofitable on both samples with a decent sample size, or a duplicate-in-spirit of a rejected idea.
-- keep_testing: promising but under-sampled, or inconsistent between train and holdout.
+- promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading.
+- reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample, or a duplicate-in-spirit of a rejected idea. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest so evidence concentrates on the contenders.
+- keep_testing: genuinely promising but still under-sampled on live evidence.
 Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
 
 ${SPEC_SPACE_DOC}`;
@@ -134,6 +135,7 @@ function describeCandidate(candidate: CandidateStrategy) {
     spec: JSON.parse(candidate.spec),
     train: { trades: candidate.trainTrades, wins: candidate.trainWins, netPnl: candidate.trainNetPnl },
     holdout: { trades: candidate.holdoutTrades, wins: candidate.holdoutWins, netPnl: candidate.holdoutNetPnl },
+    live: { trades: candidate.liveTrades, wins: candidate.liveWins, netPnl: candidate.liveNetPnl },
     rationale: candidate.rationale,
     pmNotes: candidate.pmNotes,
   };
@@ -251,10 +253,35 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     }
 
     // 3. Backtest: fetch market data once per series, evaluate all specs in memory.
-    const seriesNeeded = [...new Set(fresh.map((f) => f.spec.series))];
+    // Series set covers fresh proposals AND surviving candidates (walk-forward).
+    const survivors = storage.getCandidateStrategies("testing").filter((c) => c.lastTestedAt != null);
+    const seriesNeeded = [...new Set([
+      ...fresh.map((f) => f.spec.series),
+      ...survivors.map((c) => (JSON.parse(c.spec) as KalshiStrategySpec).series),
+    ])];
     const dataBySeries = new Map<string, SettledMarketData[]>();
     for (const series of seriesNeeded) {
       dataBySeries.set(series, await fetchSettledMarketData(series, lookback));
+    }
+
+    // 3a. Walk-forward: score each survivor on markets settled since its last
+    // evaluation. Evidence accumulates cycle over cycle - this is the sample
+    // that promotion decisions rest on, and it cannot be curve-fit.
+    let walkForwardUpdates = 0;
+    for (const candidate of survivors) {
+      const spec = clampSpec(JSON.parse(candidate.spec));
+      const data = dataBySeries.get(spec.series) ?? [];
+      const sinceMs = candidate.lastEvalCloseMs ?? Date.parse(candidate.createdAt);
+      const newMarkets = data.filter((entry) => entry.closeMs > sinceMs);
+      if (newMarkets.length === 0) continue;
+      const sample = evaluateSpecSample(spec, newMarkets);
+      storage.updateCandidateStrategy(candidate.id, {
+        liveTrades: (candidate.liveTrades ?? 0) + sample.trades,
+        liveWins: (candidate.liveWins ?? 0) + sample.wins,
+        liveNetPnl: (candidate.liveNetPnl ?? 0) + sample.netPnl,
+        lastEvalCloseMs: Math.max(...newMarkets.map((entry) => entry.closeMs)),
+      });
+      walkForwardUpdates += 1;
     }
     const testedResults: { candidate: CandidateStrategy; result: ReturnType<typeof evaluateSpecOnData> }[] = [];
     for (const { candidate, spec } of fresh) {
@@ -273,10 +300,12 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       testedResults.push({ candidate, result });
     }
 
-    // 4. PM reviews everything under test (new + carried-over) and decides.
+    // 4. PM reviews everything under test, strongest live evidence first so the
+    // contenders are always inside the review window.
     const underReview = storage.getCandidateStrategies("testing")
       .filter((c) => c.lastTestedAt != null)
-      .slice(0, 30);
+      .sort((a, b) => (b.liveNetPnl ?? -Infinity) - (a.liveNetPnl ?? -Infinity))
+      .slice(0, 40);
     let promoted = 0;
     let rejected = 0;
     let focus: string | null = null;
@@ -317,6 +346,19 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         }
       } else {
         commentary = "PM response was unusable this cycle; candidates keep testing.";
+      }
+    }
+
+    // 5. Deterministic hygiene, independent of the PM: a candidate that has
+    // proven itself a loser on accumulated walk-forward evidence is culled
+    // even if it never made it into the PM's review window.
+    for (const candidate of storage.getCandidateStrategies("testing")) {
+      if ((candidate.liveTrades ?? 0) >= 25 && (candidate.liveNetPnl ?? 0) < 0) {
+        storage.updateCandidateStrategy(candidate.id, {
+          status: "rejected",
+          pmNotes: `auto-rejected: ${candidate.liveNetPnl?.toFixed(2)} net over ${candidate.liveTrades} walk-forward trades`,
+        });
+        rejected += 1;
       }
     }
 

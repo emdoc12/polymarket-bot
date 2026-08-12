@@ -96,6 +96,14 @@ function runMigrations() {
   if (!logColNames.has("fee_paid")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN fee_paid REAL;");
   if (!logColNames.has("net_pnl")) sqlite.exec("ALTER TABLE trade_logs ADD COLUMN net_pnl REAL;");
 
+  // Walk-forward columns added after candidate_strategies first shipped.
+  const candidateCols = sqlite.pragma("table_info(candidate_strategies)") as { name: string }[];
+  const candidateColNames = new Set(candidateCols.map((c) => c.name));
+  if (!candidateColNames.has("live_trades")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_trades INTEGER;");
+  if (!candidateColNames.has("live_wins")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_wins INTEGER;");
+  if (!candidateColNames.has("live_net_pnl")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN live_net_pnl REAL;");
+  if (!candidateColNames.has("last_eval_close_ms")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN last_eval_close_ms INTEGER;");
+
   // The engine polls every few seconds and filters trade_logs by status,
   // strategy, and day; without indexes these scans grow with total history.
   sqlite.exec(`
@@ -121,6 +129,10 @@ function runMigrations() {
       holdout_trades INTEGER,
       holdout_wins INTEGER,
       holdout_net_pnl REAL,
+      live_trades INTEGER,
+      live_wins INTEGER,
+      live_net_pnl REAL,
+      last_eval_close_ms INTEGER,
       last_tested_at TEXT,
       pm_notes TEXT,
       created_at TEXT NOT NULL
