@@ -157,6 +157,24 @@ export default function AgentLabPage() {
     },
   });
 
+  const toggleDryRunMutation = useMutation({
+    mutationFn: async (live: boolean) => {
+      await apiRequest("POST", "/api/settings", { key: "kalshi_dry_run", value: live ? "false" : "true" });
+    },
+    onSuccess: (_, live) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/executor/status"] });
+      toast({
+        title: live ? "LIVE on demo account" : "Dry run enabled",
+        description: live
+          ? "Promoted strategies now place real orders with demo money."
+          : "Orders are logged but not sent.",
+      });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
   const refreshAll = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/agent-lab/status"] });
     queryClient.invalidateQueries({ queryKey: ["/api/agent-lab/candidates"] });
@@ -283,9 +301,19 @@ export default function AgentLabPage() {
               />
               <Label className="text-xs font-medium">Demo execution</Label>
             </div>
-            {executor?.dryRun
-              ? <Badge variant="secondary" className="text-[10px]">dry run — orders logged, not sent</Badge>
-              : <Badge className="bg-profit/15 text-profit border-profit/20 text-[10px]">LIVE on demo account</Badge>}
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={executor ? !executor.dryRun : false}
+                disabled={!executor?.kalshiConfigured}
+                onCheckedChange={(live) => {
+                  if (live && !window.confirm("Send real orders to your Kalshi demo account? (Demo money only — this build cannot touch production.)")) return;
+                  toggleDryRunMutation.mutate(live);
+                }}
+              />
+              {executor?.dryRun
+                ? <Badge variant="secondary" className="text-[10px]">dry run — orders logged, not sent</Badge>
+                : <Badge className="bg-profit/15 text-profit border-profit/20 text-[10px]">LIVE on demo account</Badge>}
+            </div>
             <span className="text-xs text-muted-foreground">
               {executor
                 ? `${executor.promotedStrategies} strategies armed · ${executor.openTrades} open · ${executor.tradesToday}/${executor.maxTradesPerDay} today`
@@ -300,8 +328,7 @@ export default function AgentLabPage() {
           </div>
           <p className="text-[11px] text-muted-foreground mt-2">
             Promoted strategies place $10 limit orders on the live market window at their specified entry time.
-            Flip the <span className="font-mono">kalshi_dry_run</span> setting to <span className="font-mono">false</span> to
-            send real demo-account orders.
+            Left switch arms the executor; right switch goes from dry-run rehearsal to real demo-account orders.
           </p>
         </CardContent>
       </Card>
