@@ -62,7 +62,9 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - minEntryPrice / maxEntryPrice: 0.03-0.97 (only enter if the executable price of the chosen side is inside this band)
 - trendLookbackMinutes: 1-10 (trend rules only)
 - minSignal: 0-0.45 (minimum |price-0.5| for momentum/fade; minimum |price move| for trend rules; 0 = no filter)
-Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, and signal thresholds.`;
+Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, and signal thresholds.
+
+Output discipline: keep every rationale, note, and reason to one or two sentences. Structured output that exceeds the token limit is truncated and the whole response is lost - compact and complete always beats detailed and cut off.`;
 
 type WorkerRole = {
   key: string;
@@ -95,6 +97,8 @@ Decision rules:
 - reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample, or a duplicate-in-spirit of a rejected idea. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest so evidence concentrates on the contenders.
 - keep_testing: genuinely promising but still under-sampled on live evidence.
 Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
+
+Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 
 ${SPEC_SPACE_DOC}`;
 
@@ -211,19 +215,27 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
 
     const { contextText } = buildResearchContext();
 
-    // 1. Specialist agents propose in parallel (structured outputs -> validated JSON).
+    // 1. Specialist agents propose in parallel (structured outputs -> validated
+    // JSON). Each worker is individually fault-isolated: a truncated or failed
+    // response costs that worker's proposals, never the whole cycle.
     const workerResults = await Promise.all(WORKER_ROLES.map(async (role) => {
-      const response = await client.messages.parse({
-        model: workerModel,
-        max_tokens: 2000,
-        system: role.system,
-        messages: [{ role: "user", content: role.buildTask(contextText) }],
-        output_config: { format: zodOutputFormat(WorkerOutputSchema) },
-      });
-      if (response.stop_reason === "refusal" || !response.parsed_output) {
-        return { role: role.key, proposals: [], notes: `(${role.key} returned no usable output)` };
+      try {
+        const response = await client.messages.parse({
+          model: workerModel,
+          max_tokens: 6000,
+          system: role.system,
+          messages: [{ role: "user", content: role.buildTask(contextText) }],
+          output_config: { format: zodOutputFormat(WorkerOutputSchema) },
+        });
+        if (response.stop_reason === "refusal" || !response.parsed_output) {
+          return { role: role.key, proposals: [], notes: `(${role.key} returned no usable output)` };
+        }
+        return { role: role.key, proposals: response.parsed_output.proposals, notes: response.parsed_output.notes };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`${new Date().toISOString()} [error] [agent-lab] worker ${role.key} failed: ${message}`);
+        return { role: role.key, proposals: [], notes: `(${role.key} call failed: ${message.slice(0, 120)})` };
       }
-      return { role: role.key, proposals: response.parsed_output.proposals, notes: response.parsed_output.notes };
     }));
 
     // 2. Clamp, dedupe against everything ever tested, cap per cycle.
@@ -312,40 +324,49 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     let commentary: string | null = null;
 
     if (underReview.length > 0) {
-      const pmResponse = await client.messages.parse({
-        model: pmModel,
-        max_tokens: 4000,
-        system: PM_SYSTEM,
-        messages: [{
-          role: "user",
-          content: [
-            contextText,
-            `\nSpecialist notes from this cycle:\n${skepticNotes}`,
-            `\nCandidates currently under review (decide each by candidateId):`,
-            JSON.stringify(underReview.map(describeCandidate), null, 1),
-          ].join("\n"),
-        }],
-        output_config: { format: zodOutputFormat(PmOutputSchema) },
-      });
+      // Fault-isolated like the workers: a failed PM call (truncation, API
+      // error) leaves candidates in testing — walk-forward results from step
+      // 3a are already saved either way.
+      try {
+        const pmResponse = await client.messages.parse({
+          model: pmModel,
+          max_tokens: 12000,
+          system: PM_SYSTEM,
+          messages: [{
+            role: "user",
+            content: [
+              contextText,
+              `\nSpecialist notes from this cycle:\n${skepticNotes}`,
+              `\nCandidates currently under review (decide each by candidateId):`,
+              JSON.stringify(underReview.map(describeCandidate), null, 1),
+            ].join("\n"),
+          }],
+          output_config: { format: zodOutputFormat(PmOutputSchema) },
+        });
 
-      if (pmResponse.stop_reason !== "refusal" && pmResponse.parsed_output) {
-        focus = pmResponse.parsed_output.focus;
-        commentary = pmResponse.parsed_output.commentary;
-        const validIds = new Set(underReview.map((c) => c.id));
-        for (const decision of pmResponse.parsed_output.decisions) {
-          if (!validIds.has(decision.candidateId)) continue;
-          if (decision.action === "promote") {
-            storage.updateCandidateStrategy(decision.candidateId, { status: "promoted", pmNotes: decision.reason });
-            promoted += 1;
-          } else if (decision.action === "reject") {
-            storage.updateCandidateStrategy(decision.candidateId, { status: "rejected", pmNotes: decision.reason });
-            rejected += 1;
-          } else {
-            storage.updateCandidateStrategy(decision.candidateId, { pmNotes: decision.reason });
+        if (pmResponse.stop_reason !== "refusal" && pmResponse.parsed_output) {
+          focus = pmResponse.parsed_output.focus;
+          commentary = pmResponse.parsed_output.commentary;
+          const validIds = new Set(underReview.map((c) => c.id));
+          for (const decision of pmResponse.parsed_output.decisions) {
+            if (!validIds.has(decision.candidateId)) continue;
+            if (decision.action === "promote") {
+              storage.updateCandidateStrategy(decision.candidateId, { status: "promoted", pmNotes: decision.reason });
+              promoted += 1;
+            } else if (decision.action === "reject") {
+              storage.updateCandidateStrategy(decision.candidateId, { status: "rejected", pmNotes: decision.reason });
+              rejected += 1;
+            } else {
+              storage.updateCandidateStrategy(decision.candidateId, { pmNotes: decision.reason });
+            }
           }
+        } else {
+          commentary = "PM response was unusable this cycle; candidates keep testing.";
         }
-      } else {
-        commentary = "PM response was unusable this cycle; candidates keep testing.";
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`${new Date().toISOString()} [error] [agent-lab] PM call failed: ${message}`);
+        commentary = `PM call failed this cycle (${message.slice(0, 120)}); candidates keep testing.`;
       }
     }
 
