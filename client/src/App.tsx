@@ -7,7 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/lib/theme";
 import { AppSidebar } from "@/components/app-sidebar";
 import NotFound from "@/pages/not-found";
-import Dashboard from "@/pages/dashboard";
+import KalshiDashboard from "@/pages/kalshi-dashboard";
 import Markets from "@/pages/markets";
 import Trades from "@/pages/trades";
 import WatchlistPage from "@/pages/watchlist-page";
@@ -18,7 +18,7 @@ import AgentLabPage from "@/pages/agent-lab";
 function AppRouter() {
   return (
     <Switch>
-      <Route path="/" component={Dashboard} />
+      <Route path="/" component={KalshiDashboard} />
       <Route path="/markets" component={Markets} />
       <Route path="/trades" component={Trades} />
       <Route path="/watchlist" component={WatchlistPage} />
