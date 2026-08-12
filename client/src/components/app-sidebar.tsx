@@ -3,14 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Search,
-  Bot,
   History,
   Star,
   Settings,
   Sun,
   Moon,
   Activity,
-  FlaskConical,
   BrainCircuit,
 } from "lucide-react";
 import { useTheme } from "@/lib/theme";
@@ -21,7 +19,6 @@ const navItems = [
   { path: "/markets", label: "Markets", icon: Search },
   { path: "/trades", label: "Trade Log", icon: History },
   { path: "/watchlist", label: "Watchlist", icon: Star },
-  { path: "/backtest", label: "Backtest", icon: FlaskConical },
   { path: "/lab", label: "Strategy Lab", icon: BrainCircuit },
   { path: "/settings", label: "Settings", icon: Settings },
 ];
