@@ -266,7 +266,13 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
 
     // 3. Backtest: fetch market data once per series, evaluate all specs in memory.
     // Series set covers fresh proposals AND surviving candidates (walk-forward).
-    const survivors = storage.getCandidateStrategies("testing").filter((c) => c.lastTestedAt != null);
+    // Promoted candidates keep accumulating live evidence too — they're the ones
+    // whose ongoing performance matters most, and a lucky promotion needs to be
+    // caught by continued out-of-sample scoring, not enshrined.
+    const survivors = [
+      ...storage.getCandidateStrategies("testing"),
+      ...storage.getCandidateStrategies("promoted"),
+    ].filter((c) => c.lastTestedAt != null);
     const seriesNeeded = [...new Set([
       ...fresh.map((f) => f.spec.series),
       ...survivors.map((c) => (JSON.parse(c.spec) as KalshiStrategySpec).series),
@@ -380,6 +386,18 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
           pmNotes: `auto-rejected: ${candidate.liveNetPnl?.toFixed(2)} net over ${candidate.liveTrades} walk-forward trades`,
         });
         rejected += 1;
+      }
+    }
+
+    // Promotion is revocable: if a promoted strategy's cumulative walk-forward
+    // record turns negative, it drops back into the testing pool where the PM
+    // re-judges it (and the auto-cull above ends it if it keeps losing).
+    for (const candidate of storage.getCandidateStrategies("promoted")) {
+      if ((candidate.liveTrades ?? 0) >= 25 && (candidate.liveNetPnl ?? 0) < 0) {
+        storage.updateCandidateStrategy(candidate.id, {
+          status: "testing",
+          pmNotes: `demoted: walk-forward record turned negative (${candidate.liveNetPnl?.toFixed(2)} over ${candidate.liveTrades} trades)`,
+        });
       }
     }
 
