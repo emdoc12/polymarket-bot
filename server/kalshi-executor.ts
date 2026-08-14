@@ -111,9 +111,10 @@ async function tryEnterForCandidate(
   const decision = await decideLiveEntry(spec, market, nowMs);
   if (!decision.ok) return;
 
-  const contracts = Math.max(1, Math.floor(spec.orderSize / decision.entryPrice));
-  const cost = contracts * decision.entryPrice;
-  const fee = kalshiTradingFee(contracts, decision.entryPrice);
+  let contracts = Math.max(1, Math.floor(spec.orderSize / decision.entryPrice));
+  let entryPrice = decision.entryPrice;
+  let cost = contracts * entryPrice;
+  let fee = kalshiTradingFee(contracts, entryPrice);
   const priceCents = Math.min(99, Math.max(1, Math.round(decision.entryPrice * 100)));
 
   let status = "failed";
@@ -131,9 +132,29 @@ async function tryEnterForCandidate(
     });
     if (placed.dryRun) {
       status = "dry_run";
+    } else if (placed.fillCount <= 0) {
+      // IOC came back empty - the quoted liquidity wasn't really there.
+      // Recorded so the fill-rate itself becomes measurable data.
+      status = "unfilled";
+      orderId = placed.orderId;
+      contracts = 0;
+      cost = 0;
+      fee = 0;
     } else {
+      // Real fill: record actuals from the exchange, not our assumptions.
+      // average_fill_price is YES-leg; convert back for NO entries.
       status = "open";
-      orderId = (placed as any).order?.order_id ?? null;
+      orderId = placed.orderId;
+      contracts = placed.fillCount;
+      if (placed.averageFillPriceYesLeg != null) {
+        entryPrice = decision.side === "yes"
+          ? placed.averageFillPriceYesLeg
+          : 1 - placed.averageFillPriceYesLeg;
+      }
+      cost = contracts * entryPrice;
+      fee = placed.averageFeePaid != null
+        ? placed.averageFeePaid * contracts
+        : kalshiTradingFee(contracts, entryPrice);
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
@@ -145,7 +166,7 @@ async function tryEnterForCandidate(
     ticker: market.ticker,
     series: spec.series,
     side: decision.side,
-    entryPrice: decision.entryPrice,
+    entryPrice,
     contracts,
     cost,
     fee,

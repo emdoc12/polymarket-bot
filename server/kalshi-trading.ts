@@ -147,34 +147,37 @@ export type KalshiOrderRequest = {
   buyMaxCostCents?: number;
 };
 
+// CreateOrder V2 (POST /portfolio/events/orders): single YES-leg order book
+// with fixed-point dollar prices. Direction mapping per Kalshi's order-
+// direction guide: bid = long YES, ask = long NO, and price is ALWAYS quoted
+// on the YES scale - buying NO at 30c is an ask at 0.7000. The legacy
+// /portfolio/orders endpoint now returns 410 on demo (retired 2026-08).
 function buildOrderPayload(order: KalshiOrderRequest) {
   if (!order.ticker || typeof order.ticker !== "string") throw new Error("ticker required");
   if (order.side !== "yes" && order.side !== "no") throw new Error("side must be yes|no");
-  if (order.action !== "buy" && order.action !== "sell") throw new Error("action must be buy|sell");
-  if (order.type !== "limit" && order.type !== "market") throw new Error("type must be limit|market");
+  if (order.action !== "buy") throw new Error("only buy orders are supported");
+  if (order.type !== "limit") throw new Error("only limit orders are supported on the V2 path");
   const count = Math.floor(order.count);
   if (!Number.isFinite(count) || count <= 0) throw new Error("count must be a positive integer");
 
-  const payload: Record<string, unknown> = {
+  const cents = order.side === "yes" ? order.yesPriceCents : order.noPriceCents;
+  if (cents == null || !Number.isInteger(cents) || cents < 1 || cents > 99) {
+    throw new Error(`${order.side}PriceCents (1-99) required for limit orders`);
+  }
+  const yesLegPrice = order.side === "yes" ? cents / 100 : (100 - cents) / 100;
+
+  return {
     ticker: order.ticker,
-    side: order.side,
-    action: order.action,
-    count,
-    type: order.type,
     client_order_id: crypto.randomUUID(),
+    side: order.side === "yes" ? "bid" : "ask",
+    count: count.toFixed(2),
+    price: yesLegPrice.toFixed(4),
+    // IOC at our limit: fill whatever is available at or better than the
+    // price right now, cancel the rest - matches the executor's fill-at-entry
+    // semantics and never leaves resting orders behind.
+    time_in_force: "immediate_or_cancel",
+    self_trade_prevention_type: "taker_at_cross",
   };
-  if (order.type === "limit") {
-    const cents = order.side === "yes" ? order.yesPriceCents : order.noPriceCents;
-    if (cents == null || !Number.isInteger(cents) || cents < 1 || cents > 99) {
-      throw new Error(`${order.side}PriceCents (1-99) required for limit orders`);
-    }
-    if (order.side === "yes") payload.yes_price = cents;
-    else payload.no_price = cents;
-  }
-  if (order.type === "market" && order.action === "buy" && order.buyMaxCostCents != null) {
-    payload.buy_max_cost = Math.floor(order.buyMaxCostCents);
-  }
-  return payload;
 }
 
 // Ring buffer of intended orders while in dry-run mode, so strategy behavior
@@ -182,15 +185,38 @@ function buildOrderPayload(order: KalshiOrderRequest) {
 const dryRunLog: { at: string; payload: Record<string, unknown> }[] = [];
 const DRY_RUN_LOG_MAX = 200;
 
-export async function placeKalshiOrder(order: KalshiOrderRequest) {
+export type KalshiOrderResult =
+  | { dryRun: true; wouldSend: Record<string, unknown>; env: string }
+  | {
+      dryRun: false;
+      env: string;
+      orderId: string | null;
+      // Fixed-point strings from the V2 response, parsed for the caller.
+      fillCount: number;
+      averageFillPriceYesLeg: number | null;
+      averageFeePaid: number | null;
+    };
+
+export async function placeKalshiOrder(order: KalshiOrderRequest): Promise<KalshiOrderResult> {
   const payload = buildOrderPayload(order);
   if (isKalshiDryRun()) {
     dryRunLog.unshift({ at: new Date().toISOString(), payload });
     if (dryRunLog.length > DRY_RUN_LOG_MAX) dryRunLog.length = DRY_RUN_LOG_MAX;
     return { dryRun: true, wouldSend: payload, env: "demo" };
   }
-  const response = await kalshiPrivateFetch("POST", "/portfolio/orders", payload);
-  return { dryRun: false, order: response?.order ?? response, env: "demo" };
+  const response = await kalshiPrivateFetch("POST", "/portfolio/events/orders", payload);
+  const parseFp = (value: unknown) => {
+    const parsed = parseFloat(String(value ?? ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    dryRun: false,
+    env: "demo",
+    orderId: typeof response?.order_id === "string" ? response.order_id : null,
+    fillCount: parseFp(response?.fill_count) ?? 0,
+    averageFillPriceYesLeg: parseFp(response?.average_fill_price),
+    averageFeePaid: parseFp(response?.average_fee_paid),
+  };
 }
 
 export async function cancelKalshiOrder(orderId: string) {
