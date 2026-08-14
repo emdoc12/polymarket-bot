@@ -11,7 +11,10 @@ import { storage } from "./storage";
 // is a Phase 3 decision the user makes explicitly, with real money on the
 // line. Public market data (server/kalshi.ts) already reads from production
 // because prices there are the real ones worth validating against.
-const KALSHI_DEMO_API = "https://external-api.demo.kalshi.co";
+// 2026-08-14: Kalshi retired external-api.demo.kalshi.co (410 "switch to V2
+// endpoints", then 503s); demo-api.kalshi.co is the serving demo host. Same
+// /trade-api/v2 prefix and signing scheme. Overridable without a rebuild.
+const KALSHI_DEMO_API = process.env.KALSHI_DEMO_API_BASE || "https://demo-api.kalshi.co";
 const API_PREFIX = "/trade-api/v2";
 
 type KalshiCredentials = {
