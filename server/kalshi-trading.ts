@@ -197,6 +197,25 @@ export type KalshiOrderResult =
       averageFeePaid: number | null;
     };
 
+// The demo exchange mirrors production tickers but hosts them on its own
+// exchange shards (e.g. crypto 15-min markets on exchange_index 2, while
+// production uses 0). Orders defaulting to index 0 get "market not found" -
+// so resolve the market's demo-side index right before placing.
+async function getDemoMarketExchangeIndex(ticker: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${KALSHI_DEMO_API}${API_PREFIX}/markets/${encodeURIComponent(ticker)}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { market?: { exchange_index?: number } };
+    const index = data.market?.exchange_index;
+    return Number.isInteger(index) ? (index as number) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function placeKalshiOrder(order: KalshiOrderRequest): Promise<KalshiOrderResult> {
   const payload = buildOrderPayload(order);
   if (isKalshiDryRun()) {
@@ -204,6 +223,11 @@ export async function placeKalshiOrder(order: KalshiOrderRequest): Promise<Kalsh
     if (dryRunLog.length > DRY_RUN_LOG_MAX) dryRunLog.length = DRY_RUN_LOG_MAX;
     return { dryRun: true, wouldSend: payload, env: "demo" };
   }
+  const exchangeIndex = await getDemoMarketExchangeIndex(order.ticker);
+  if (exchangeIndex == null) {
+    throw new Error(`market ${order.ticker} is not listed on the demo exchange`);
+  }
+  (payload as Record<string, unknown>).exchange_index = exchangeIndex;
   const response = await kalshiPrivateFetch("POST", "/portfolio/events/orders", payload);
   const parseFp = (value: unknown) => {
     const parsed = parseFloat(String(value ?? ""));
