@@ -41,7 +41,10 @@ function ensureExecutorDefaults() {
 
 function executorTradesToday() {
   const today = new Date().toISOString().slice(0, 10);
-  return storage.getExecutorTrades(500).filter((trade) => trade.placedAt.startsWith(today)).length;
+  // Failed attempts (e.g. a Kalshi outage) must not consume the daily budget,
+  // or an outage morning blocks real trading for the rest of the day.
+  return storage.getExecutorTrades(500)
+    .filter((trade) => trade.placedAt.startsWith(today) && trade.status !== "failed").length;
 }
 
 type LiveEntryDecision =
