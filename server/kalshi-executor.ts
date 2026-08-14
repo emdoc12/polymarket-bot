@@ -34,6 +34,9 @@ function ensureExecutorDefaults() {
   if (!storage.getSetting("executor_poll_seconds")) storage.setSetting("executor_poll_seconds", "15");
   if (!storage.getSetting("executor_max_open_trades")) storage.setSetting("executor_max_open_trades", "6");
   if (!storage.getSetting("executor_max_trades_per_day")) storage.setSetting("executor_max_trades_per_day", "120");
+  // Correlated strategy variants (e.g. one family of fade specs) tend to fire
+  // on the same window and side - this caps how much can stack on one outcome.
+  if (!storage.getSetting("executor_max_trades_per_window")) storage.setSetting("executor_max_trades_per_window", "2");
 }
 
 function executorTradesToday() {
@@ -226,12 +229,14 @@ async function runExecutorTick() {
     if (!active) continue;
 
     const secondsToClose = (active.closeMs - nowMs) / 1000;
+    const maxPerWindow = Math.max(1, parseInt(storage.getSetting("executor_max_trades_per_window") || "2", 10));
     for (const { candidate, spec } of specs) {
       if (spec.series !== series) continue;
       // Fire once, inside the tolerance window around the spec's entry moment.
       if (secondsToClose > spec.entrySecondsBeforeClose) continue;
       if (secondsToClose < spec.entrySecondsBeforeClose - ENTRY_TOLERANCE_SEC) continue;
       if (storage.hasExecutorTradeFor(candidate.id, active.market.ticker)) continue;
+      if (storage.countExecutorTradesForTicker(active.market.ticker) >= maxPerWindow) break;
       if (storage.getUnsettledExecutorTrades().length >= maxOpen) break;
       try {
         await tryEnterForCandidate(candidate.id, candidate.name, spec, active.market, nowMs);
@@ -260,8 +265,7 @@ export function registerExecutorRoutes(app: Express) {
   if (!executorTimer) scheduleExecutor();
 
   app.get("/api/executor/status", (_req, res) => {
-    const trades = storage.getExecutorTrades(200);
-    const settled = trades.filter((t) => t.netPnl != null);
+    const settled = storage.getExecutorSettledAggregate();
     res.json({
       enabled: executorEnabled(),
       dryRun: isKalshiDryRun(),
@@ -271,8 +275,9 @@ export function registerExecutorRoutes(app: Express) {
       tradesToday: executorTradesToday(),
       maxOpenTrades: parseInt(storage.getSetting("executor_max_open_trades") || "6", 10),
       maxTradesPerDay: parseInt(storage.getSetting("executor_max_trades_per_day") || "120", 10),
-      totalSettled: settled.length,
-      totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),
+      maxTradesPerWindow: parseInt(storage.getSetting("executor_max_trades_per_window") || "2", 10),
+      totalSettled: settled.count,
+      totalNetPnl: settled.netPnl,
     });
   });
 

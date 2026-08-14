@@ -466,6 +466,21 @@ export class DatabaseStorage implements IStorage {
       .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
   }
 
+  countExecutorTradesForTicker(ticker: string): number {
+    return db.select().from(executorTrades).all()
+      .filter((trade) => trade.ticker === ticker && trade.status !== "failed").length;
+  }
+
+  // Full-history settled aggregate (the status endpoint previously summed the
+  // last 200 rows, silently capping the counter).
+  getExecutorSettledAggregate(): { count: number; netPnl: number } {
+    const settled = db.select().from(executorTrades).all().filter((trade) => trade.netPnl != null);
+    return {
+      count: settled.length,
+      netPnl: settled.reduce((sum, trade) => sum + (trade.netPnl ?? 0), 0),
+    };
+  }
+
   // One-shot cleanup of the Polymarket paper-trading era: legacy strategies,
   // their trade log, and the synthetic backtest history. Strategy Lab and
   // executor data are untouched.
