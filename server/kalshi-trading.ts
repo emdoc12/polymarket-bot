@@ -145,7 +145,55 @@ export type KalshiOrderRequest = {
   yesPriceCents?: number;
   noPriceCents?: number;
   buyMaxCostCents?: number;
+  // Pre-resolved demo exchange shard; looked up per-ticker when omitted.
+  exchangeIndex?: number;
 };
+
+// Per Kalshi's exchange-sharding rollout (Aug 2026), collateral must be
+// preallocated on a market's shard before orders are accepted there - a
+// fresh shard even reports "user not found" until first funding. Returns the
+// per-shard balances in dollars.
+export async function getShardBalances(): Promise<Map<number, number>> {
+  const response = await kalshiPrivateFetch("GET", "/portfolio/balance");
+  const balances = new Map<number, number>();
+  for (const entry of response?.balance_breakdown ?? []) {
+    const index = Number(entry?.exchange_index);
+    const dollars = parseFloat(String(entry?.balance ?? ""));
+    if (Number.isInteger(index) && Number.isFinite(dollars)) balances.set(index, dollars);
+  }
+  return balances;
+}
+
+// Ensure at least minDollars is available on the target shard, topping up
+// from shard 0 when needed. Transfers are asynchronous on Kalshi's side, so
+// after initiating one we poll briefly; if it hasn't landed by then, this
+// window's order fails cleanly and the next window finds the funds waiting.
+export async function ensureShardFunds(exchangeIndex: number, minDollars: number): Promise<void> {
+  if (exchangeIndex === 0) return;
+  const balances = await getShardBalances();
+  if ((balances.get(exchangeIndex) ?? 0) >= minDollars) return;
+
+  const available = balances.get(0) ?? 0;
+  // Move a chunk, not a trickle, so transfers stay rare.
+  const amount = Math.min(Math.max(available - 1, 0), Math.max(100, minDollars * 5));
+  if (amount < minDollars) {
+    throw new Error(`insufficient shard-0 balance ($${available.toFixed(2)}) to fund shard ${exchangeIndex}`);
+  }
+  await kalshiPrivateFetch("POST", "/portfolio/intra_exchange_instance_transfer", {
+    source: "event_contract",
+    destination: "event_contract",
+    amount: Math.round(amount * 10000), // centicents
+    source_exchange_shard: 0,
+    destination_exchange_shard: exchangeIndex,
+  });
+  console.log(`${new Date().toISOString()} [info] [kalshi] transferring $${amount.toFixed(2)} shard 0 -> ${exchangeIndex}`);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const refreshed = await getShardBalances();
+    if ((refreshed.get(exchangeIndex) ?? 0) >= minDollars) return;
+  }
+  throw new Error(`shard ${exchangeIndex} funding still settling - will retry next window`);
+}
 
 // CreateOrder V2 (POST /portfolio/events/orders): single YES-leg order book
 // with fixed-point dollar prices. Direction mapping per Kalshi's order-
@@ -201,7 +249,7 @@ export type KalshiOrderResult =
 // exchange shards (e.g. crypto 15-min markets on exchange_index 2, while
 // production uses 0). Orders defaulting to index 0 get "market not found" -
 // so resolve the market's demo-side index right before placing.
-async function getDemoMarketExchangeIndex(ticker: string): Promise<number | null> {
+export async function getDemoMarketExchangeIndex(ticker: string): Promise<number | null> {
   try {
     const res = await fetch(`${KALSHI_DEMO_API}${API_PREFIX}/markets/${encodeURIComponent(ticker)}`, {
       headers: { Accept: "application/json" },
@@ -223,7 +271,7 @@ export async function placeKalshiOrder(order: KalshiOrderRequest): Promise<Kalsh
     if (dryRunLog.length > DRY_RUN_LOG_MAX) dryRunLog.length = DRY_RUN_LOG_MAX;
     return { dryRun: true, wouldSend: payload, env: "demo" };
   }
-  const exchangeIndex = await getDemoMarketExchangeIndex(order.ticker);
+  const exchangeIndex = order.exchangeIndex ?? await getDemoMarketExchangeIndex(order.ticker);
   if (exchangeIndex == null) {
     throw new Error(`market ${order.ticker} is not listed on the demo exchange`);
   }

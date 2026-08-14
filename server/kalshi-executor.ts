@@ -10,7 +10,13 @@ import {
   type KalshiMarket,
   type KalshiStrategySpec,
 } from "./kalshi";
-import { getKalshiAuthStatus, isKalshiDryRun, placeKalshiOrder } from "./kalshi-trading";
+import {
+  ensureShardFunds,
+  getDemoMarketExchangeIndex,
+  getKalshiAuthStatus,
+  isKalshiDryRun,
+  placeKalshiOrder,
+} from "./kalshi-trading";
 
 // The demo executor closes the research loop: promoted Strategy Lab candidates
 // watch live markets and place real orders on the Kalshi DEMO account (or
@@ -121,6 +127,15 @@ async function tryEnterForCandidate(
   let orderId: string | null = null;
   let error: string | null = null;
   try {
+    let exchangeIndex: number | undefined;
+    if (!isKalshiDryRun()) {
+      // Sharded demo exchange: resolve the market's shard and make sure
+      // collateral is preallocated there before the order goes out.
+      const resolved = await getDemoMarketExchangeIndex(market.ticker);
+      if (resolved == null) throw new Error(`market ${market.ticker} is not listed on the demo exchange`);
+      exchangeIndex = resolved;
+      await ensureShardFunds(exchangeIndex, cost + 1);
+    }
     const placed = await placeKalshiOrder({
       ticker: market.ticker,
       side: decision.side,
@@ -129,6 +144,7 @@ async function tryEnterForCandidate(
       type: "limit",
       yesPriceCents: decision.side === "yes" ? priceCents : undefined,
       noPriceCents: decision.side === "no" ? priceCents : undefined,
+      exchangeIndex,
     });
     if (placed.dryRun) {
       status = "dry_run";
