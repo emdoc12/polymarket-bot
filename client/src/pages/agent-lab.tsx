@@ -26,16 +26,26 @@ type LabStatus = {
 type Candidate = {
   id: number;
   name: string;
+  kind: string;
   status: string;
   createdBy: string;
   spec: {
-    series: string;
-    sideRule: string;
-    entrySecondsBeforeClose: number;
-    minEntryPrice: number;
-    maxEntryPrice: number;
-    trendLookbackMinutes: number;
-    minSignal: number;
+    // binary
+    series?: string;
+    sideRule?: string;
+    entrySecondsBeforeClose?: number;
+    minEntryPrice?: number;
+    maxEntryPrice?: number;
+    trendLookbackMinutes?: number;
+    minSignal?: number;
+    // perp
+    market?: string;
+    direction?: string;
+    lookbackMinutes?: number;
+    entryThresholdPct?: number;
+    takeProfitPct?: number;
+    stopLossPct?: number;
+    maxHoldMinutes?: number;
   };
   train: { trades: number | null; wins: number | null; netPnl: number | null };
   holdout: { trades: number | null; wins: number | null; netPnl: number | null };
@@ -111,15 +121,26 @@ function statusBadge(status: string) {
   return <Badge variant="secondary" className="text-[10px]">testing</Badge>;
 }
 
-function describeSpec(spec: Candidate["spec"]) {
+function describeSpec(candidate: Candidate) {
+  const spec = candidate.spec;
+  if (candidate.kind === "perp") {
+    return [
+      (spec.market ?? "").replace("KX", "").replace("PERP1", " perp"),
+      (spec.direction ?? "").replace("_", " "),
+      `${spec.lookbackMinutes ?? "?"}m lookback`,
+      `entry ≥ ${spec.entryThresholdPct ?? "?"}%`,
+      `TP ${spec.takeProfitPct ?? "?"}% / SL ${spec.stopLossPct ?? "?"}%`,
+      `max ${spec.maxHoldMinutes ?? "?"}m`,
+    ].join(" · ");
+  }
   const pieces = [
-    spec.series.replace("KX", "").replace("15M", " 15m"),
-    spec.sideRule.replace("_", " "),
-    `T-${spec.entrySecondsBeforeClose}s`,
-    `band ${(spec.minEntryPrice * 100).toFixed(0)}-${(spec.maxEntryPrice * 100).toFixed(0)}¢`,
+    (spec.series ?? "").replace("KX", "").replace("15M", " 15m"),
+    (spec.sideRule ?? "").replace("_", " "),
+    `T-${spec.entrySecondsBeforeClose ?? "?"}s`,
+    `band ${((spec.minEntryPrice ?? 0) * 100).toFixed(0)}-${((spec.maxEntryPrice ?? 1) * 100).toFixed(0)}¢`,
   ];
-  if (spec.minSignal > 0) pieces.push(`signal ≥ ${(spec.minSignal * 100).toFixed(1)}%`);
-  if (spec.sideRule.startsWith("trend")) pieces.push(`${spec.trendLookbackMinutes}m lookback`);
+  if ((spec.minSignal ?? 0) > 0) pieces.push(`signal ≥ ${((spec.minSignal ?? 0) * 100).toFixed(1)}%`);
+  if ((spec.sideRule ?? "").startsWith("trend")) pieces.push(`${spec.trendLookbackMinutes}m lookback`);
   return pieces.join(" · ");
 }
 
@@ -145,6 +166,32 @@ export default function AgentLabPage() {
   const { data: executorTradesData } = useQuery<{ trades: ExecutorTradeRow[] }>({
     queryKey: ["/api/executor/trades"],
     refetchInterval: 15000,
+  });
+  const { data: perpExecutor } = useQuery<{
+    enabled: boolean; dryRun: boolean; kalshiConfigured: boolean;
+    promotedPerpStrategies: number; openPositions: number; tradesToday: number;
+    maxTradesPerDay: number; totalClosed: number; totalNetPnl: number;
+  }>({
+    queryKey: ["/api/perps/executor/status"],
+    refetchInterval: 10000,
+  });
+  const { data: perpTradesData } = useQuery<{ trades: {
+    id: number; candidateName: string; market: string; side: string;
+    entryPrice: number | null; exitPrice: number | null; contracts: number | null;
+    status: string; exitReason: string | null; netPnl: number | null; openedAt: string;
+  }[] }>({
+    queryKey: ["/api/perps/trades"],
+    refetchInterval: 15000,
+  });
+
+  const togglePerpExecutorMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("POST", "/api/settings", { key: "perp_executor_enabled", value: String(enabled) });
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/perps/executor/status"] }),
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
   });
 
   const toggleExecutorMutation = useMutation({
@@ -330,6 +377,34 @@ export default function AgentLabPage() {
             Promoted strategies place $10 limit orders on the live market window at their specified entry time.
             Left switch arms the executor; right switch goes from dry-run rehearsal to real demo-account orders.
           </p>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-3 pt-3 border-t border-border/60">
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={perpExecutor?.enabled ?? false}
+                onCheckedChange={(checked) => togglePerpExecutorMutation.mutate(checked)}
+                disabled={!perpExecutor?.kalshiConfigured}
+              />
+              <Label className="text-xs font-medium">Perps desk</Label>
+            </div>
+            {perpExecutor?.dryRun
+              ? <Badge variant="secondary" className="text-[10px]">dry run</Badge>
+              : <Badge className="bg-profit/15 text-profit border-profit/20 text-[10px]">LIVE — demo perps have real liquidity</Badge>}
+            <span className="text-xs text-muted-foreground">
+              {perpExecutor
+                ? `${perpExecutor.promotedPerpStrategies} armed · ${perpExecutor.openPositions} open · ${perpExecutor.tradesToday}/${perpExecutor.maxTradesPerDay} today`
+                : "—"}
+            </span>
+            {perpExecutor && perpExecutor.totalClosed > 0 && (
+              <span className="text-xs">
+                perp P&L: <PnlText value={perpExecutor.totalNetPnl} />
+                <span className="text-muted-foreground"> over {perpExecutor.totalClosed}</span>
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-2">
+            Promoted perp strategies take $50 long/short positions with TP/SL/time-stop management.
+            Exits are reduce-only — they can flatten a position, never flip or grow it.
+          </p>
         </CardContent>
       </Card>
 
@@ -374,8 +449,13 @@ export default function AgentLabPage() {
                       {leaderboard.map((candidate) => (
                         <tr key={candidate.id} className="border-b border-border/50 align-top">
                           <td className="px-5 py-2.5">
-                            <p className="text-xs font-medium">{candidate.name}</p>
-                            <p className="text-[11px] text-muted-foreground">{describeSpec(candidate.spec)}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-xs font-medium">{candidate.name}</p>
+                              {candidate.kind === "perp" && (
+                                <Badge variant="outline" className="text-[9px] px-1 py-0">perp</Badge>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">{describeSpec(candidate)}</p>
                             <p className="text-[11px] text-muted-foreground/70">by {candidate.createdBy}</p>
                           </td>
                           <td className="px-3 py-2.5">{statusBadge(candidate.status)}</td>
@@ -434,7 +514,54 @@ export default function AgentLabPage() {
           )}
         </TabsContent>
 
-        <TabsContent value="demo" className="mt-3">
+        <TabsContent value="demo" className="mt-3 space-y-3">
+          {(perpTradesData?.trades ?? []).length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium">Perp positions</CardTitle>
+              </CardHeader>
+              <CardContent className="px-0 pb-0">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-[11px] text-muted-foreground border-b border-border">
+                        <th className="text-left font-medium px-5 py-2">Time</th>
+                        <th className="text-left font-medium px-3 py-2">Market</th>
+                        <th className="text-left font-medium px-3 py-2">Strategy</th>
+                        <th className="text-left font-medium px-3 py-2">Position</th>
+                        <th className="text-left font-medium px-3 py-2">Status</th>
+                        <th className="text-right font-medium px-5 py-2">P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(perpTradesData?.trades ?? []).map((trade) => (
+                        <tr key={trade.id} className="border-b border-border/50">
+                          <td className="px-5 py-2 text-[11px] font-mono text-muted-foreground whitespace-nowrap">
+                            {new Date(trade.openedAt).toLocaleTimeString()}
+                          </td>
+                          <td className="px-3 py-2 text-[11px] font-mono">{trade.market.replace("KX", "").replace("PERP1", "")}</td>
+                          <td className="px-3 py-2 text-xs">{trade.candidateName}</td>
+                          <td className="px-3 py-2 text-xs font-mono">
+                            {trade.side.toUpperCase()} {trade.contracts ?? "—"} @ {trade.entryPrice?.toFixed(4) ?? "—"}
+                            {trade.exitPrice != null && ` → ${trade.exitPrice.toFixed(4)}`}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Badge
+                              variant={trade.status === "closed" && (trade.netPnl ?? 0) > 0 ? "default" : trade.status === "failed" ? "destructive" : "secondary"}
+                              className="text-[10px]"
+                            >
+                              {trade.status === "closed" ? (trade.exitReason ?? "closed").replace("_", " ") : trade.status.replace("_", " ")}
+                            </Badge>
+                          </td>
+                          <td className="px-5 py-2 text-right text-xs"><PnlText value={trade.netPnl} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           <Card>
             <CardContent className="px-0 py-0">
               {(executorTradesData?.trades ?? []).length === 0 ? (

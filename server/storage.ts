@@ -7,6 +7,7 @@ import {
   type CandidateStrategy, type InsertCandidateStrategy, candidateStrategies,
   type AgentLabRun, type InsertAgentLabRun, agentLabRuns,
   type ExecutorTrade, type InsertExecutorTrade, executorTrades,
+  type PerpTrade, type InsertPerpTrade, perpTrades,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
@@ -155,6 +156,33 @@ function runMigrations() {
   if (!candidateColNames.has("demo_trades")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN demo_trades INTEGER;");
   if (!candidateColNames.has("demo_wins")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN demo_wins INTEGER;");
   if (!candidateColNames.has("demo_net_pnl")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN demo_net_pnl REAL;");
+  if (!candidateColNames.has("kind")) sqlite.exec("ALTER TABLE candidate_strategies ADD COLUMN kind TEXT NOT NULL DEFAULT 'binary';");
+
+  // Perp trades table (perps desk executor)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS perp_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER REFERENCES candidate_strategies(id),
+      candidate_name TEXT NOT NULL,
+      market TEXT NOT NULL,
+      side TEXT NOT NULL,
+      entry_price REAL,
+      exit_price REAL,
+      contracts REAL,
+      notional REAL,
+      entry_fee REAL,
+      exit_fee REAL,
+      status TEXT NOT NULL,
+      exit_reason TEXT,
+      entry_order_id TEXT,
+      exit_order_id TEXT,
+      error TEXT,
+      net_pnl REAL,
+      opened_at TEXT NOT NULL,
+      closed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_perp_trades_status ON perp_trades(status);
+  `);
 
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
@@ -256,6 +284,12 @@ export interface IStorage {
   getExecutorTrades(limit?: number): ExecutorTrade[];
   getUnsettledExecutorTrades(): ExecutorTrade[];
   hasExecutorTradeFor(candidateId: number, ticker: string): boolean;
+
+  // Perps desk
+  createPerpTrade(trade: InsertPerpTrade): PerpTrade;
+  updatePerpTrade(id: number, updates: Partial<PerpTrade>): void;
+  getPerpTrades(limit?: number): PerpTrade[];
+  getOpenPerpTrades(): PerpTrade[];
 }
 
 export class DatabaseStorage implements IStorage {
@@ -479,6 +513,24 @@ export class DatabaseStorage implements IStorage {
       count: settled.length,
       netPnl: settled.reduce((sum, trade) => sum + (trade.netPnl ?? 0), 0),
     };
+  }
+
+  // Perps desk
+  createPerpTrade(trade: InsertPerpTrade): PerpTrade {
+    return db.insert(perpTrades).values(trade).returning().get();
+  }
+
+  updatePerpTrade(id: number, updates: Partial<PerpTrade>): void {
+    db.update(perpTrades).set(updates as any).where(eq(perpTrades.id, id)).run();
+  }
+
+  getPerpTrades(limit = 50): PerpTrade[] {
+    return db.select().from(perpTrades).orderBy(desc(perpTrades.id)).limit(limit).all();
+  }
+
+  getOpenPerpTrades(): PerpTrade[] {
+    return db.select().from(perpTrades).orderBy(desc(perpTrades.id)).all()
+      .filter((trade) => trade.status === "open" || trade.status === "dry_run");
   }
 
   // One-shot cleanup of the Polymarket paper-trading era: legacy strategies,

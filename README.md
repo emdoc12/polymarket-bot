@@ -154,6 +154,19 @@ Approximate cost per cycle: a few cents (3 Haiku calls + 1 Opus call).
 - `GET /api/agent-lab/runs` — cycle history with PM commentary
 - `POST /api/kalshi/spec-backtest` — test any spec by hand against real markets
 
+### Perps desk
+
+The lab also researches strategies for Kalshi's perpetual futures (the one
+crypto venue where the demo exchange has real seeded liquidity, so demo fills
+are genuine). Perp specs are long/short with TP/SL/time-stop exits, $50
+notional, backtested and walk-forwarded on real 1-minute candles. The perp
+executor manages positions with reduce-only exits and strict caps (2 open,
+40/day). Toggle: `perp_executor_enabled` (Lab page switch).
+
+- `GET /api/perps/markets` — mark price, funding rate, open interest
+- `POST /api/perps/spec-backtest` — test a perp spec on real candle history
+- `GET /api/perps/executor/status` · `GET /api/perps/trades`
+
 ## Releases
 
 - Pushes to `master` publish both the `latest` container tag and the current version tag from [`VERSION`](/Users/emdoc12/jedi-poly/VERSION)

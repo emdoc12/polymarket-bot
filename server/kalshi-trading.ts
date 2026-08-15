@@ -81,7 +81,7 @@ export function isKalshiDryRun() {
   return storage.getSetting("kalshi_dry_run") !== "false" || !getKalshiCredentials();
 }
 
-async function kalshiPrivateFetch(
+export async function kalshiPrivateFetch(
   method: "GET" | "POST" | "DELETE",
   endpointPath: string,
   body?: unknown,

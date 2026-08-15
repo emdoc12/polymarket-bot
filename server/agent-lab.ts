@@ -14,6 +14,15 @@ import {
   type KalshiStrategySpec,
   type SettledMarketData,
 } from "./kalshi";
+import {
+  clampPerpSpec,
+  evaluatePerpSpecOnCandles,
+  evaluatePerpSpecSample,
+  fetchPerpCandleHistory,
+  perpSpecHash,
+  type PerpCandle,
+  type PerpStrategySpec,
+} from "./kalshi-perps";
 import type { CandidateStrategy } from "@shared/schema";
 
 // The Strategy Lab: a PM (Opus) directing a team of specialist agents (Haiku)
@@ -42,6 +51,23 @@ const SpecProposalSchema = z.object({
 
 const WorkerOutputSchema = z.object({
   proposals: z.array(SpecProposalSchema),
+  notes: z.string(),
+});
+
+const PerpSpecProposalSchema = z.object({
+  name: z.string(),
+  market: z.enum(["KXBTCPERP1", "KXETHPERP1"]),
+  direction: z.enum(["trend_follow", "trend_fade"]),
+  lookbackMinutes: z.number(),
+  entryThresholdPct: z.number(),
+  takeProfitPct: z.number(),
+  stopLossPct: z.number(),
+  maxHoldMinutes: z.number(),
+  rationale: z.string(),
+});
+
+const PerpWorkerOutputSchema = z.object({
+  proposals: z.array(PerpSpecProposalSchema),
   notes: z.string(),
 });
 
@@ -90,12 +116,40 @@ const WORKER_ROLES: WorkerRole[] = [
   },
 ];
 
+const PERP_SPEC_DOC = `Perp strategy spec fields (Kalshi perpetual futures, $50 notional per trade, taker fee ~0.12% of notional each side, long/short via continuous 1-min candles; funding is NOT modeled so holds are capped at 3h):
+- market: "KXBTCPERP1" (BTC perp, ~BTC/10000 price scale) or "KXETHPERP1" (ETH perp)
+- direction: "trend_follow" (enter with the move) or "trend_fade" (against it)
+- lookbackMinutes: 3-120 (window for measuring the move)
+- entryThresholdPct: 0.02-2 (minimum |%| move over the lookback to trigger an entry)
+- takeProfitPct / stopLossPct: 0.05-3 (% from entry; longs enter at the ask, exit at the bid - the spread is a real cost your TP must clear)
+- maxHoldMinutes: 5-180 (time stop)
+Both round-trip fees (~0.24% total) and the bid/ask spread come out of every trade - edges below ~0.3%/trade are noise.
+
+Output discipline: keep every rationale, note, and reason to one or two sentences.`;
+
+const PERP_WORKER_ROLES: { key: string; system: string; buildTask: (context: string) => string }[] = [
+  {
+    key: "perp_explorer",
+    system: `You are the Perps Explorer on a quant research desk. Propose NOVEL perpetual-futures specs in unexplored regions: vary market, direction, lookback horizons and threshold/exit geometry. Diversity beats depth.\n\n${PERP_SPEC_DOC}`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 novel perp specs with distinct hypotheses. One-sentence rationale each.`,
+  },
+  {
+    key: "perp_optimizer",
+    system: `You are the Perps Optimizer on a quant research desk. Mutate the most promising existing perp candidates: adjust one or two parameters to sharpen the edge, guided by train/holdout gaps. If nothing is profitable yet, probe the opposite direction or different exit geometry of near-misses.\n\n${PERP_SPEC_DOC}`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 mutations of the strongest perp candidates (or best near-misses), naming the parent and the change.`,
+  },
+];
+
 const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk hunting for a real, fee-surviving edge on Kalshi crypto prediction markets. Your team of specialist agents proposes strategy specs; each gets a discovery backtest (train/holdout split at proposal time) and then accumulates WALK-FORWARD results: every cycle, surviving candidates are re-scored on markets that settled after they were proposed. Walk-forward ("live") evidence is the truth - it cannot be overfit.
 
 Decision rules:
 - promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading.
 - reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample, or a duplicate-in-spirit of a rejected idea. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest so evidence concentrates on the contenders.
 - keep_testing: genuinely promising but still under-sampled on live evidence.
+The desk runs TWO strategy kinds, reviewed together:
+- kind "binary": event-contract specs on 15-min up/down markets (see the binary spec doc below).
+- kind "perp": perpetual-futures long/short specs. ${PERP_SPEC_DOC.split("\n")[0]} Same promotion discipline applies: >= 15 profitable live (walk-forward) trades with discovery agreement.
+
 Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
@@ -121,6 +175,8 @@ function getAnthropicClient() {
 
 function ensureAgentLabDefaults() {
   if (!storage.getSetting("agent_lab_enabled")) storage.setSetting("agent_lab_enabled", "false");
+  if (!storage.getSetting("agent_lab_perps_enabled")) storage.setSetting("agent_lab_perps_enabled", "true");
+  if (!storage.getSetting("perp_lab_hours")) storage.setSetting("perp_lab_hours", "72");
   if (!storage.getSetting("agent_lab_interval_minutes")) storage.setSetting("agent_lab_interval_minutes", "30");
   if (!storage.getSetting("agent_lab_max_candidates_per_cycle")) storage.setSetting("agent_lab_max_candidates_per_cycle", "8");
   if (!storage.getSetting("agent_lab_max_cycles_per_day")) storage.setSetting("agent_lab_max_cycles_per_day", "24");
@@ -133,6 +189,7 @@ function describeCandidate(candidate: CandidateStrategy) {
   return {
     id: candidate.id,
     name: candidate.name,
+    kind: candidate.kind,
     status: candidate.status,
     createdBy: candidate.createdBy,
     generation: candidate.generation,
@@ -239,8 +296,30 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       }
     }));
 
+    // 1b. Perps desk specialists (same fault isolation, perp grammar).
+    const perpsEnabled = storage.getSetting("agent_lab_perps_enabled") !== "false";
+    const perpWorkerResults = !perpsEnabled ? [] : await Promise.all(PERP_WORKER_ROLES.map(async (role) => {
+      try {
+        const response = await client.messages.parse({
+          model: workerModel,
+          max_tokens: 6000,
+          system: role.system,
+          messages: [{ role: "user", content: role.buildTask(contextText) }],
+          output_config: { format: zodOutputFormat(PerpWorkerOutputSchema) },
+        });
+        if (response.stop_reason === "refusal" || !response.parsed_output) {
+          return { role: role.key, proposals: [], notes: `(${role.key} returned no usable output)` };
+        }
+        return { role: role.key, proposals: response.parsed_output.proposals, notes: response.parsed_output.notes };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`${new Date().toISOString()} [error] [agent-lab] worker ${role.key} failed: ${message}`);
+        return { role: role.key, proposals: [], notes: `(${role.key} call failed: ${message.slice(0, 120)})` };
+      }
+    }));
+
     // 2. Clamp, dedupe against everything ever tested, cap per cycle.
-    const skepticNotes = workerResults.map((w) => `${w.role}: ${w.notes}`).join("\n");
+    const skepticNotes = [...workerResults, ...perpWorkerResults].map((w) => `${w.role}: ${w.notes}`).join("\n");
     const generation = storage.getAgentLabRuns(1)[0]?.id ?? 1;
     const fresh: { candidate: CandidateStrategy; spec: KalshiStrategySpec }[] = [];
     let proposalCount = 0;
@@ -265,15 +344,40 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       }
     }
 
+    const freshPerp: { candidate: CandidateStrategy; spec: PerpStrategySpec }[] = [];
+    for (const worker of perpWorkerResults) {
+      for (const proposal of worker.proposals) {
+        proposalCount += 1;
+        if (freshPerp.length >= maxCandidates) continue;
+        const spec = clampPerpSpec(proposal);
+        const hash = perpSpecHash(spec);
+        if (storage.getCandidateBySpecHash(hash)) continue;
+        const candidate = storage.createCandidateStrategy({
+          name: spec.name,
+          kind: "perp",
+          spec: JSON.stringify(spec),
+          specHash: hash,
+          status: "testing",
+          createdBy: worker.role,
+          rationale: proposal.rationale,
+          generation,
+          createdAt: new Date().toISOString(),
+        });
+        freshPerp.push({ candidate, spec });
+      }
+    }
+
     // 3. Backtest: fetch market data once per series, evaluate all specs in memory.
     // Series set covers fresh proposals AND surviving candidates (walk-forward).
     // Promoted candidates keep accumulating live evidence too — they're the ones
     // whose ongoing performance matters most, and a lucky promotion needs to be
     // caught by continued out-of-sample scoring, not enshrined.
-    const survivors = [
+    const survivorsAll = [
       ...storage.getCandidateStrategies("testing"),
       ...storage.getCandidateStrategies("promoted"),
     ].filter((c) => c.lastTestedAt != null);
+    const survivors = survivorsAll.filter((c) => c.kind !== "perp");
+    const perpSurvivors = survivorsAll.filter((c) => c.kind === "perp");
     const seriesNeeded = [...new Set([
       ...fresh.map((f) => f.spec.series),
       ...survivors.map((c) => (JSON.parse(c.spec) as KalshiStrategySpec).series),
@@ -317,6 +421,57 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         lastTestedAt: new Date().toISOString(),
       });
       testedResults.push({ candidate, result });
+    }
+
+    // 3b. Perps desk: candle history fetched once per market, then discovery
+    // for fresh perp specs and walk-forward accumulation for survivors.
+    const perpHours = Math.min(168, Math.max(24, parseInt(storage.getSetting("perp_lab_hours") || "72", 10)));
+    const perpMarketsNeeded = [...new Set([
+      ...freshPerp.map((f) => f.spec.market),
+      ...perpSurvivors.map((c) => clampPerpSpec(JSON.parse(c.spec)).market),
+    ])];
+    const candlesByMarket = new Map<string, PerpCandle[]>();
+    for (const market of perpMarketsNeeded) {
+      try {
+        candlesByMarket.set(market, await fetchPerpCandleHistory(market, perpHours));
+      } catch (err) {
+        console.error(`${new Date().toISOString()} [error] [agent-lab] perp candle fetch failed for ${market}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    for (const candidate of perpSurvivors) {
+      const spec = clampPerpSpec(JSON.parse(candidate.spec));
+      const candles = candlesByMarket.get(spec.market) ?? [];
+      if (candles.length === 0) continue;
+      const sinceSec = Math.floor((candidate.lastEvalCloseMs ?? Date.parse(candidate.createdAt)) / 1000);
+      const lastTs = candles[candles.length - 1]?.end_period_ts ?? 0;
+      if (lastTs <= sinceSec) continue;
+      const sample = evaluatePerpSpecSample(spec, candles, sinceSec);
+      storage.updateCandidateStrategy(candidate.id, {
+        liveTrades: (candidate.liveTrades ?? 0) + sample.trades,
+        liveWins: (candidate.liveWins ?? 0) + sample.wins,
+        liveNetPnl: (candidate.liveNetPnl ?? 0) + sample.netPnl,
+        lastEvalCloseMs: lastTs * 1000,
+      });
+      walkForwardUpdates += 1;
+    }
+
+    for (const { candidate, spec } of freshPerp) {
+      const candles = candlesByMarket.get(spec.market) ?? [];
+      if (candles.length < 120) continue;
+      const result = evaluatePerpSpecOnCandles(spec, candles);
+      storage.updateCandidateStrategy(candidate.id, {
+        trainTrades: result.train.trades,
+        trainWins: result.train.wins,
+        trainNetPnl: result.train.netPnl,
+        holdoutTrades: result.holdout.trades,
+        holdoutWins: result.holdout.wins,
+        holdoutNetPnl: result.holdout.netPnl,
+        lastTestedAt: new Date().toISOString(),
+        // Walk-forward starts where the discovery window ended.
+        lastEvalCloseMs: (candles[candles.length - 1]?.end_period_ts ?? 0) * 1000,
+      });
+      testedResults.push({ candidate, result: result as any });
     }
 
     // 4. PM reviews everything under test, strongest live evidence first so the

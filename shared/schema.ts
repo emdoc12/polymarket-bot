@@ -88,7 +88,8 @@ export const backtestRuns = sqliteTable("backtest_runs", {
 export const candidateStrategies = sqliteTable("candidate_strategies", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
-  spec: text("spec").notNull(),               // JSON KalshiStrategySpec
+  kind: text("kind").notNull().default("binary"), // binary (event contracts) | perp
+  spec: text("spec").notNull(),               // JSON KalshiStrategySpec or PerpStrategySpec
   specHash: text("spec_hash").notNull().unique(),
   status: text("status").notNull().default("testing"), // testing | promoted | rejected
   createdBy: text("created_by").notNull(),     // agent role that proposed it
@@ -151,6 +152,29 @@ export const agentLabRuns = sqliteTable("agent_lab_runs", {
   error: text("error"),
 });
 
+// Perp trades - long/short positions taken by the perps desk executor
+export const perpTrades = sqliteTable("perp_trades", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  candidateId: integer("candidate_id").references(() => candidateStrategies.id),
+  candidateName: text("candidate_name").notNull(),
+  market: text("market").notNull(),
+  side: text("side").notNull(),              // long | short
+  entryPrice: real("entry_price"),
+  exitPrice: real("exit_price"),
+  contracts: real("contracts"),
+  notional: real("notional"),
+  entryFee: real("entry_fee"),
+  exitFee: real("exit_fee"),
+  status: text("status").notNull(),          // dry_run | open | closed | unfilled | failed
+  exitReason: text("exit_reason"),           // take_profit | stop_loss | time_stop
+  entryOrderId: text("entry_order_id"),
+  exitOrderId: text("exit_order_id"),
+  error: text("error"),
+  netPnl: real("net_pnl"),
+  openedAt: text("opened_at").notNull(),
+  closedAt: text("closed_at"),
+});
+
 // Bot settings
 export const botSettings = sqliteTable("bot_settings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -168,6 +192,7 @@ export const insertBacktestRunSchema = createInsertSchema(backtestRuns).omit({ i
 export const insertCandidateStrategySchema = createInsertSchema(candidateStrategies).omit({ id: true });
 export const insertAgentLabRunSchema = createInsertSchema(agentLabRuns).omit({ id: true });
 export const insertExecutorTradeSchema = createInsertSchema(executorTrades).omit({ id: true });
+export const insertPerpTradeSchema = createInsertSchema(perpTrades).omit({ id: true });
 
 // Types
 export type CandidateStrategy = typeof candidateStrategies.$inferSelect;
@@ -176,6 +201,8 @@ export type AgentLabRun = typeof agentLabRuns.$inferSelect;
 export type InsertAgentLabRun = z.infer<typeof insertAgentLabRunSchema>;
 export type ExecutorTrade = typeof executorTrades.$inferSelect;
 export type InsertExecutorTrade = z.infer<typeof insertExecutorTradeSchema>;
+export type PerpTrade = typeof perpTrades.$inferSelect;
+export type InsertPerpTrade = z.infer<typeof insertPerpTradeSchema>;
 export type Strategy = typeof strategies.$inferSelect;
 export type BacktestRun = typeof backtestRuns.$inferSelect;
 export type InsertBacktestRun = z.infer<typeof insertBacktestRunSchema>;
