@@ -43,6 +43,10 @@ function ensureExecutorDefaults() {
   // Correlated strategy variants (e.g. one family of fade specs) tend to fire
   // on the same window and side - this caps how much can stack on one outcome.
   if (!storage.getSetting("executor_max_trades_per_window")) storage.setSetting("executor_max_trades_per_window", "2");
+  // Live fill data: deep-underdog quotes on the demo crypto shard almost never
+  // fill (0/177 below ~30c vs steady fills at 40-50c). Skip entries below this
+  // executable price so the daily budget goes to trades that can happen.
+  if (!storage.getSetting("executor_min_fillable_price")) storage.setSetting("executor_min_fillable_price", "0.30");
 }
 
 function executorTradesToday() {
@@ -116,6 +120,11 @@ async function tryEnterForCandidate(
 ) {
   const decision = await decideLiveEntry(spec, market, nowMs);
   if (!decision.ok) return;
+
+  // Fillability floor (live mode only - dry-run keeps scoring the full spec so
+  // the walk-forward comparison stays apples to apples).
+  const minFillable = parseFloat(storage.getSetting("executor_min_fillable_price") || "0.30");
+  if (!isKalshiDryRun() && Number.isFinite(minFillable) && decision.entryPrice < minFillable) return;
 
   let contracts = Math.max(1, Math.floor(spec.orderSize / decision.entryPrice));
   let entryPrice = decision.entryPrice;

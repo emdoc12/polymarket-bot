@@ -284,6 +284,7 @@ export interface IStorage {
   getExecutorTrades(limit?: number): ExecutorTrade[];
   getUnsettledExecutorTrades(): ExecutorTrade[];
   hasExecutorTradeFor(candidateId: number, ticker: string): boolean;
+  getExecutorFillStats(): Map<number, { attempts: number; filled: number; unfilled: number; failed: number }>;
 
   // Perps desk
   createPerpTrade(trade: InsertPerpTrade): PerpTrade;
@@ -507,6 +508,23 @@ export class DatabaseStorage implements IStorage {
 
   // Full-history settled aggregate (the status endpoint previously summed the
   // last 200 rows, silently capping the counter).
+  // Per-candidate execution reality: how many live attempts actually filled.
+  // A walk-forward-profitable spec that never fills is worthless live, so the
+  // PM sees this alongside the replay scoreboards.
+  getExecutorFillStats(): Map<number, { attempts: number; filled: number; unfilled: number; failed: number }> {
+    const stats = new Map<number, { attempts: number; filled: number; unfilled: number; failed: number }>();
+    for (const trade of db.select().from(executorTrades).all()) {
+      if (trade.candidateId == null || trade.status === "dry_run") continue;
+      const entry = stats.get(trade.candidateId) ?? { attempts: 0, filled: 0, unfilled: 0, failed: 0 };
+      entry.attempts += 1;
+      if (trade.status === "unfilled") entry.unfilled += 1;
+      else if (trade.status === "failed") entry.failed += 1;
+      else entry.filled += 1;
+      stats.set(trade.candidateId, entry);
+    }
+    return stats;
+  }
+
   getExecutorSettledAggregate(): { count: number; netPnl: number } {
     const settled = db.select().from(executorTrades).all().filter((trade) => trade.netPnl != null);
     return {

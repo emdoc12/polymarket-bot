@@ -143,9 +143,9 @@ const PERP_WORKER_ROLES: { key: string; system: string; buildTask: (context: str
 const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk hunting for a real, fee-surviving edge on Kalshi crypto prediction markets. Your team of specialist agents proposes strategy specs; each gets a discovery backtest (train/holdout split at proposal time) and then accumulates WALK-FORWARD results: every cycle, surviving candidates are re-scored on markets that settled after they were proposed. Walk-forward ("live") evidence is the truth - it cannot be overfit.
 
 Decision rules:
-- promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading.
-- reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample, or a duplicate-in-spirit of a rejected idea. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest so evidence concentrates on the contenders.
-- keep_testing: genuinely promising but still under-sampled on live evidence.
+- promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading. For binary specs, weigh the 'execution' fill rate heavily: a spec whose entries rarely fill on the live exchange earns nothing no matter how good its replays look, so prefer specs in price bands that actually fill.
+- reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample (>= 10 combined train+holdout trades), or a duplicate-in-spirit of a rejected idea. Do NOT reject on tiny samples (fewer than 10 total trades) - that is noise, not evidence; keep_testing instead. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest ADEQUATELY-SAMPLED ones so evidence concentrates on the contenders.
+- keep_testing: genuinely promising but still under-sampled on live evidence, or any candidate with fewer than 10 total trades.
 The desk runs TWO strategy kinds, reviewed together:
 - kind "binary": event-contract specs on 15-min up/down markets (see the binary spec doc below).
 - kind "perp": perpetual-futures long/short specs. ${PERP_SPEC_DOC.split("\n")[0]} Same promotion discipline applies: >= 15 profitable live (walk-forward) trades with discovery agreement.
@@ -185,7 +185,10 @@ function ensureAgentLabDefaults() {
   if (!storage.getSetting("agent_lab_worker_model")) storage.setSetting("agent_lab_worker_model", DEFAULT_WORKER_MODEL);
 }
 
-function describeCandidate(candidate: CandidateStrategy) {
+type FillStats = Map<number, { attempts: number; filled: number; unfilled: number; failed: number }>;
+
+function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats) {
+  const fills = fillStats?.get(candidate.id);
   return {
     id: candidate.id,
     name: candidate.name,
@@ -198,17 +201,38 @@ function describeCandidate(candidate: CandidateStrategy) {
     holdout: { trades: candidate.holdoutTrades, wins: candidate.holdoutWins, netPnl: candidate.holdoutNetPnl },
     live: { trades: candidate.liveTrades, wins: candidate.liveWins, netPnl: candidate.liveNetPnl },
     demo: { trades: candidate.demoTrades, wins: candidate.demoWins, netPnl: candidate.demoNetPnl },
+    // Execution reality from real demo order attempts (binary desk).
+    execution: fills
+      ? { attempts: fills.attempts, filled: fills.filled, unfilled: fills.unfilled, fillRate: fills.attempts > 0 ? Number((fills.filled / fills.attempts).toFixed(2)) : null }
+      : null,
     rationale: candidate.rationale,
     pmNotes: candidate.pmNotes,
   };
 }
 
-function buildResearchContext() {
+function buildResearchContext(fillStats: FillStats) {
   const all = storage.getCandidateStrategies();
   const leaderboard = [...all]
     .filter((c) => c.holdoutNetPnl != null)
     .sort((a, b) => (b.holdoutNetPnl ?? -Infinity) - (a.holdoutNetPnl ?? -Infinity))
     .slice(0, 12);
+
+  // Execution-reality digest for the binary desk: which price bands actually
+  // fill on the live exchange. Learned from every real order attempt so far.
+  const bandBuckets = new Map<string, { attempts: number; filled: number }>();
+  for (const trade of storage.getExecutorTrades(2000)) {
+    if (trade.status === "dry_run") continue;
+    const cents = Math.round(trade.entryPrice * 100);
+    const band = cents < 20 ? "<20c" : cents < 30 ? "20-29c" : cents < 40 ? "30-39c" : cents < 55 ? "40-54c" : cents < 70 ? "55-69c" : "70c+";
+    const bucket = bandBuckets.get(band) ?? { attempts: 0, filled: 0 };
+    bucket.attempts += 1;
+    if (trade.status !== "unfilled" && trade.status !== "failed") bucket.filled += 1;
+    bandBuckets.set(band, bucket);
+  }
+  const fillDigest = [...bandBuckets.entries()]
+    .sort()
+    .map(([band, b]) => `${band}: ${b.filled}/${b.attempts} filled (${b.attempts > 0 ? Math.round((b.filled / b.attempts) * 100) : 0}%)`)
+    .join(" | ");
   const recentRuns = storage.getAgentLabRuns(3).map((run) => ({
     ranAt: run.ranAt,
     focus: run.focus,
@@ -221,8 +245,11 @@ function buildResearchContext() {
     contextText: [
       `Current research focus from PM: ${lastFocus}`,
       `Total candidates ever tested: ${all.length} (promoted: ${all.filter((c) => c.status === "promoted").length}, rejected: ${all.filter((c) => c.status === "rejected").length})`,
-      `Leaderboard (top by holdout net P&L, $10 stakes):`,
-      JSON.stringify(leaderboard.map(describeCandidate), null, 1),
+      fillDigest
+        ? `LIVE EXECUTION REALITY (binary desk, real demo order attempts by entry price band): ${fillDigest}. Entries that don't fill earn nothing regardless of backtest edge - favor bands that actually fill.`
+        : "",
+      `Leaderboard (top by holdout net P&L, $10 stakes; 'execution' shows real fill rates where available):`,
+      JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats)), null, 1),
       `Recent cycles:`,
       JSON.stringify(recentRuns, null, 1),
     ].join("\n"),
@@ -271,7 +298,8 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     const maxCandidates = Math.min(16, Math.max(1, parseInt(storage.getSetting("agent_lab_max_candidates_per_cycle") || "8", 10)));
     const lookback = Math.min(150, Math.max(20, parseInt(storage.getSetting("agent_lab_markets_lookback") || "80", 10)));
 
-    const { contextText } = buildResearchContext();
+    const fillStats = storage.getExecutorFillStats();
+    const { contextText } = buildResearchContext(fillStats);
 
     // 1. Specialist agents propose in parallel (structured outputs -> validated
     // JSON). Each worker is individually fault-isolated: a truncated or failed
@@ -500,7 +528,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
               contextText,
               `\nSpecialist notes from this cycle:\n${skepticNotes}`,
               `\nCandidates currently under review (decide each by candidateId):`,
-              JSON.stringify(underReview.map(describeCandidate), null, 1),
+              JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats)), null, 1),
             ].join("\n"),
           }],
           output_config: { format: zodOutputFormat(PmOutputSchema) },
@@ -509,13 +537,19 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         if (pmResponse.stop_reason !== "refusal" && pmResponse.parsed_output) {
           focus = pmResponse.parsed_output.focus;
           commentary = pmResponse.parsed_output.commentary;
-          const validIds = new Set(underReview.map((c) => c.id));
+          const byId = new Map(underReview.map((c) => [c.id, c]));
           for (const decision of pmResponse.parsed_output.decisions) {
-            if (!validIds.has(decision.candidateId)) continue;
-            if (decision.action === "promote") {
+            const target = byId.get(decision.candidateId);
+            if (!target) continue;
+            // Code-enforced small-sample guard: rejecting on a handful of
+            // trades is noise, and it was starving the perps desk of a fair
+            // trial. Convert those rejections into keep_testing.
+            const totalEvidence = (target.trainTrades ?? 0) + (target.holdoutTrades ?? 0) + (target.liveTrades ?? 0);
+            const effectiveAction = decision.action === "reject" && totalEvidence < 10 ? "keep_testing" : decision.action;
+            if (effectiveAction === "promote") {
               storage.updateCandidateStrategy(decision.candidateId, { status: "promoted", pmNotes: decision.reason });
               promoted += 1;
-            } else if (decision.action === "reject") {
+            } else if (effectiveAction === "reject") {
               storage.updateCandidateStrategy(decision.candidateId, { status: "rejected", pmNotes: decision.reason });
               rejected += 1;
             } else {
@@ -576,7 +610,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       commentary,
       candidates: testedResults.map((t) => {
         const updated = storage.getCandidateStrategies().find((c) => c.id === t.candidate.id);
-        return describeCandidate(updated ?? t.candidate);
+        return describeCandidate(updated ?? t.candidate, fillStats);
       }),
     };
   } catch (err) {
@@ -671,7 +705,8 @@ export function registerAgentLabRoutes(app: Express) {
 
   app.get("/api/agent-lab/candidates", (req, res) => {
     const status = req.query.status as string | undefined;
-    const candidates = storage.getCandidateStrategies(status).map(describeCandidate);
+    const fillStats = storage.getExecutorFillStats();
+    const candidates = storage.getCandidateStrategies(status).map((c) => describeCandidate(c, fillStats));
     res.json({ candidates });
   });
 
