@@ -330,6 +330,17 @@ export function registerExecutorRoutes(app: Express) {
     });
   });
 
+  // Full settled history for dashboard charts. The paginated trades route
+  // caps at 200 rows, which turned the P&L charts into a keyhole view once
+  // volume grew - charts need the whole story, slimmed down.
+  app.get("/api/executor/pnl-series", (_req, res) => {
+    const series = storage.getExecutorTrades(20000)
+      .filter((t) => t.netPnl != null && t.settledAt != null)
+      .sort((a, b) => new Date(a.settledAt!).getTime() - new Date(b.settledAt!).getTime())
+      .map((t) => ({ t: t.settledAt, pnl: t.netPnl, name: t.candidateName, real: t.orderId != null }));
+    res.json({ series });
+  });
+
   app.get("/api/executor/trades", (req, res) => {
     const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || "50", 10)));
     res.json({ trades: storage.getExecutorTrades(limit) });

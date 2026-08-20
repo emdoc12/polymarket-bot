@@ -114,9 +114,9 @@ export default function KalshiDashboard() {
     queryKey: ["/api/executor/status"],
     refetchInterval: 10000,
   });
-  const { data: tradesData } = useQuery<{ trades: ExecutorTradeRow[] }>({
-    queryKey: ["/api/executor/trades?limit=200"],
-    refetchInterval: 15000,
+  const { data: seriesData } = useQuery<{ series: { t: string; pnl: number; name: string; real: boolean }[] }>({
+    queryKey: ["/api/executor/pnl-series"],
+    refetchInterval: 30000,
   });
   const { data: candidatesData } = useQuery<{ candidates: Candidate[] }>({
     queryKey: ["/api/agent-lab/candidates"],
@@ -139,51 +139,50 @@ export default function KalshiDashboard() {
   const candidates = candidatesData?.candidates ?? [];
   const promoted = candidates.filter((c) => c.status === "promoted");
 
-  // Settled trades in time order drive both cumulative charts.
-  const settled = (tradesData?.trades ?? [])
-    .filter((t) => t.netPnl != null && t.settledAt != null)
-    .sort((a, b) => new Date(a.settledAt!).getTime() - new Date(b.settledAt!).getTime());
+  // Full settled history in time order drives both cumulative charts, split
+  // into real exchange fills vs dry-run rehearsal so the two are never mixed.
+  const settled = seriesData?.series ?? [];
 
-  let running = 0;
+  let cumReal = 0;
+  let cumRehearsal = 0;
   const overallSeries = settled.map((t) => {
-    running += t.netPnl ?? 0;
+    if (t.real) cumReal += t.pnl;
+    else cumRehearsal += t.pnl;
     return {
-      time: new Date(t.settledAt!).getTime(),
-      pnl: Number(running.toFixed(2)),
+      time: new Date(t.t).getTime(),
+      real: Number(cumReal.toFixed(2)),
+      rehearsal: Number(cumRehearsal.toFixed(2)),
     };
   });
+  const realStats = settled.filter((t) => t.real);
+  const realPnl = realStats.reduce((s, t) => s + t.pnl, 0);
+  const rehearsalPnl = cumRehearsal;
 
   // Top strategies by settled demo P&L; colors assigned once, in rank order at
   // first paint, then follow the strategy name.
-  const byStrategy = new Map<string, ExecutorTradeRow[]>();
+  const byStrategy = new Map<string, number>();
   for (const t of settled) {
-    const list = byStrategy.get(t.candidateName) ?? [];
-    list.push(t);
-    byStrategy.set(t.candidateName, list);
+    byStrategy.set(t.name, (byStrategy.get(t.name) ?? 0) + t.pnl);
   }
   const topStrategies = [...byStrategy.entries()]
-    .map(([name, trades]) => ({ name, total: trades.reduce((s, t) => s + (t.netPnl ?? 0), 0) }))
+    .map(([name, total]) => ({ name, total }))
     .sort((a, b) => b.total - a.total)
     .slice(0, 4)
     .map((entry, i) => ({ ...entry, color: SERIES_COLORS[i] }));
 
-  const strategySeries = settled
-    .filter((t) => topStrategies.some((s) => s.name === t.candidateName))
-    .map((t) => {
-      const totals: Record<string, number | null> = {};
-      return { time: new Date(t.settledAt!).getTime(), name: t.candidateName, pnl: t.netPnl ?? 0, ...totals };
-    });
   // Build cumulative per-strategy points keyed by time.
   const cumByStrategy = new Map<string, number>();
-  const perStrategyPoints = strategySeries.map((point) => {
-    const next = (cumByStrategy.get(point.name) ?? 0) + point.pnl;
-    cumByStrategy.set(point.name, next);
-    const row: Record<string, number | string | null> = { time: point.time };
-    for (const s of topStrategies) {
-      row[s.name] = s.name === point.name ? Number(next.toFixed(2)) : (cumByStrategy.get(s.name) ?? null);
-    }
-    return row;
-  });
+  const perStrategyPoints = settled
+    .filter((t) => topStrategies.some((s) => s.name === t.name))
+    .map((point) => {
+      const next = (cumByStrategy.get(point.name) ?? 0) + point.pnl;
+      cumByStrategy.set(point.name, next);
+      const row: Record<string, number | string | null> = { time: new Date(point.t).getTime() };
+      for (const s of topStrategies) {
+        row[s.name] = s.name === point.name ? Number(next.toFixed(2)) : (cumByStrategy.get(s.name) ?? null);
+      }
+      return row;
+    });
 
   const timeFmt = (ms: number) =>
     new Date(ms).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -215,9 +214,11 @@ export default function KalshiDashboard() {
         </Card>
         <Card>
           <CardContent className="py-3 px-4">
-            <p className="text-xs text-muted-foreground flex items-center gap-1"><Activity className="w-3 h-3" /> Demo P&L (settled)</p>
-            <p className="text-lg font-semibold mt-0.5"><PnlText value={executor?.totalNetPnl ?? null} /></p>
-            <p className="text-[11px] text-muted-foreground">{executor?.totalSettled ?? 0} settled trades</p>
+            <p className="text-xs text-muted-foreground flex items-center gap-1"><Activity className="w-3 h-3" /> Real P&L (exchange fills)</p>
+            <p className="text-lg font-semibold mt-0.5"><PnlText value={settled.length > 0 ? realPnl : null} /></p>
+            <p className="text-[11px] text-muted-foreground">
+              {realStats.length}/300 real fills toward graduation · rehearsal {money(rehearsalPnl, true)}
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -247,15 +248,16 @@ export default function KalshiDashboard() {
       {/* Cumulative P&L */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium">Cumulative demo P&L</CardTitle>
+          <CardTitle className="text-sm font-medium">Cumulative demo P&L — real vs rehearsal</CardTitle>
           <CardDescription className="text-xs">
-            Every settled demo trade across all promoted strategies, after fees.
+            Full settled history, after fees. Real = actual exchange fills; rehearsal = dry-run scoring at
+            quoted prices. The gap between the curves is execution reality.
           </CardDescription>
         </CardHeader>
         <CardContent>
           {overallSeries.length < 2 ? (
             <p className="text-xs text-muted-foreground py-6 text-center">
-              Not enough settled demo trades yet — the curve appears once promoted strategies start settling.
+              Not enough settled demo trades yet — the curves appear once promoted strategies start settling.
             </p>
           ) : (
             <div className="h-56">
@@ -273,11 +275,16 @@ export default function KalshiDashboard() {
                   <Tooltip
                     contentStyle={chartTooltipStyle()}
                     labelFormatter={(v) => timeFmt(Number(v))}
-                    formatter={(value) => [money(Number(value), true), "cumulative P&L"]}
+                    formatter={(value, name) => [money(Number(value), true), String(name)]}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Line
+                    type="monotone" dataKey="real" stroke={SERIES_COLORS[0]} strokeWidth={2}
+                    dot={false} activeDot={{ r: 4 }} name="Real fills"
                   />
                   <Line
-                    type="monotone" dataKey="pnl" stroke={SERIES_COLORS[0]} strokeWidth={2}
-                    dot={false} activeDot={{ r: 4 }} name="Cumulative P&L"
+                    type="monotone" dataKey="rehearsal" stroke={SERIES_COLORS[1]} strokeWidth={2}
+                    dot={false} activeDot={{ r: 4 }} name="Rehearsal (dry-run)"
                   />
                 </LineChart>
               </ResponsiveContainer>
