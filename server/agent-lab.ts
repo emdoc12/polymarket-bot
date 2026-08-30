@@ -301,10 +301,18 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     const fillStats = storage.getExecutorFillStats();
     const { contextText } = buildResearchContext(fillStats);
 
+    // Self-regulating research intensity: when the testing pool is saturated,
+    // stop proposing and let walk-forward + culls drain it; resume when there
+    // is room to give new ideas a fair trial.
+    const testingBinaryCount = storage.getCandidateStrategies("testing").filter((c) => c.kind !== "perp").length;
+    const testingPerpCount = storage.getCandidateStrategies("testing").filter((c) => c.kind === "perp").length;
+    const binaryPoolOpen = testingBinaryCount < 300;
+    const perpPoolOpen = testingPerpCount < 150;
+
     // 1. Specialist agents propose in parallel (structured outputs -> validated
     // JSON). Each worker is individually fault-isolated: a truncated or failed
     // response costs that worker's proposals, never the whole cycle.
-    const workerResults = await Promise.all(WORKER_ROLES.map(async (role) => {
+    const workerResults = !binaryPoolOpen ? [] : await Promise.all(WORKER_ROLES.map(async (role) => {
       try {
         const response = await client.messages.parse({
           model: workerModel,
@@ -326,7 +334,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
 
     // 1b. Perps desk specialists (same fault isolation, perp grammar).
     const perpsEnabled = storage.getSetting("agent_lab_perps_enabled") !== "false";
-    const perpWorkerResults = !perpsEnabled ? [] : await Promise.all(PERP_WORKER_ROLES.map(async (role) => {
+    const perpWorkerResults = (!perpsEnabled || !perpPoolOpen) ? [] : await Promise.all(PERP_WORKER_ROLES.map(async (role) => {
       try {
         const response = await client.messages.parse({
           model: workerModel,
@@ -570,10 +578,16 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     // proven itself a loser on accumulated walk-forward evidence is culled
     // even if it never made it into the PM's review window.
     for (const candidate of storage.getCandidateStrategies("testing")) {
-      if ((candidate.liveTrades ?? 0) >= 25 && (candidate.liveNetPnl ?? 0) < 0) {
+      // Symmetric with the promotion bar: 15 profitable live trades promote,
+      // 15 losing live trades cull. A losing holdout on a real sample plus
+      // losing live evidence culls too - keeps the testing pool drainable.
+      const liveLosing = (candidate.liveTrades ?? 0) >= 15 && (candidate.liveNetPnl ?? 0) < 0;
+      const holdoutLosing = (candidate.holdoutTrades ?? 0) >= 30 && (candidate.holdoutNetPnl ?? 0) < 0
+        && (candidate.liveTrades ?? 0) >= 5 && (candidate.liveNetPnl ?? 0) <= 0;
+      if (liveLosing || holdoutLosing) {
         storage.updateCandidateStrategy(candidate.id, {
           status: "rejected",
-          pmNotes: `auto-rejected: ${candidate.liveNetPnl?.toFixed(2)} net over ${candidate.liveTrades} walk-forward trades`,
+          pmNotes: `auto-rejected: live ${candidate.liveNetPnl?.toFixed(2)} over ${candidate.liveTrades ?? 0} wf trades, holdout ${candidate.holdoutNetPnl?.toFixed(2)} over ${candidate.holdoutTrades ?? 0}`,
         });
         rejected += 1;
       }
