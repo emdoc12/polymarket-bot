@@ -175,6 +175,28 @@ export const perpTrades = sqliteTable("perp_trades", {
   closedAt: text("closed_at"),
 });
 
+// Live (real-money production) trades - fully separate ledger from demo.
+export const liveTrades = sqliteTable("live_trades", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  candidateId: integer("candidate_id").references(() => candidateStrategies.id),
+  candidateName: text("candidate_name").notNull(),
+  ticker: text("ticker").notNull(),
+  series: text("series").notNull(),
+  side: text("side").notNull(),
+  entryPrice: real("entry_price").notNull(),
+  contracts: integer("contracts").notNull(),
+  cost: real("cost").notNull(),
+  fee: real("fee").notNull(),
+  status: text("status").notNull(),          // open | settled_won | settled_lost | unfilled | failed
+  orderId: text("order_id"),
+  error: text("error"),
+  result: text("result"),
+  netPnl: real("net_pnl"),
+  placedAt: text("placed_at").notNull(),
+  marketCloseAt: text("market_close_at").notNull(),
+  settledAt: text("settled_at"),
+});
+
 // Bot settings
 export const botSettings = sqliteTable("bot_settings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -193,6 +215,7 @@ export const insertCandidateStrategySchema = createInsertSchema(candidateStrateg
 export const insertAgentLabRunSchema = createInsertSchema(agentLabRuns).omit({ id: true });
 export const insertExecutorTradeSchema = createInsertSchema(executorTrades).omit({ id: true });
 export const insertPerpTradeSchema = createInsertSchema(perpTrades).omit({ id: true });
+export const insertLiveTradeSchema = createInsertSchema(liveTrades).omit({ id: true });
 
 // Types
 export type CandidateStrategy = typeof candidateStrategies.$inferSelect;
@@ -203,6 +226,8 @@ export type ExecutorTrade = typeof executorTrades.$inferSelect;
 export type InsertExecutorTrade = z.infer<typeof insertExecutorTradeSchema>;
 export type PerpTrade = typeof perpTrades.$inferSelect;
 export type InsertPerpTrade = z.infer<typeof insertPerpTradeSchema>;
+export type LiveTrade = typeof liveTrades.$inferSelect;
+export type InsertLiveTrade = z.infer<typeof insertLiveTradeSchema>;
 export type Strategy = typeof strategies.$inferSelect;
 export type BacktestRun = typeof backtestRuns.$inferSelect;
 export type InsertBacktestRun = z.infer<typeof insertBacktestRunSchema>;

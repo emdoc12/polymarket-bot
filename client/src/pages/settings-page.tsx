@@ -45,6 +45,24 @@ export default function SettingsPage() {
   const kalshiPemConfigured = getVal("kalshi_private_key_pem") === "__secret_set__";
   const anthropicKeyConfigured = getVal("anthropic_api_key") === "__secret_set__";
 
+  // Live (real-money) production credentials - fully separate from demo.
+  const [prodKeyId, setProdKeyId] = useState("");
+  const [prodPem, setProdPem] = useState("");
+  const [armPhrase, setArmPhrase] = useState("");
+  const prodKeyIdConfigured = getVal("kalshi_prod_api_key_id") === "__secret_set__";
+  const prodPemConfigured = getVal("kalshi_prod_private_key_pem") === "__secret_set__";
+
+  const { data: liveStatus } = useQuery<{
+    enabled: boolean;
+    killSwitch: string;
+    killSwitchReason: string | null;
+    prodConfigured: boolean;
+    armedStrategies: { id: number; name: string; demoTrades: number | null; demoNetPnl: number | null }[];
+  }>({
+    queryKey: ["/api/live/status"],
+    refetchInterval: 30000,
+  });
+
   useEffect(() => {
     if (settings) {
       setMode(getVal("mode", "paper"));
@@ -101,6 +119,94 @@ export default function SettingsPage() {
     },
     onError: (e: Error) => {
       toast({ title: "Anthropic test failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const saveProdKeysMutation = useMutation({
+    mutationFn: async () => {
+      const pairs: [string, string][] = [];
+      if (prodKeyId.trim()) pairs.push(["kalshi_prod_api_key_id", prodKeyId.trim()]);
+      if (prodPem.trim()) pairs.push(["kalshi_prod_private_key_pem", prodPem.trim()]);
+      if (pairs.length === 0) throw new Error("Nothing to save - enter at least one production key");
+      for (const [key, value] of pairs) {
+        await apiRequest("POST", "/api/settings", { key, value });
+      }
+    },
+    onSuccess: () => {
+      setProdKeyId("");
+      setProdPem("");
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/live/status"] });
+      toast({ title: "Production keys saved" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testProdMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/live/self-test", {});
+      return res.json();
+    },
+    onSuccess: (data: { configured: boolean; localSignature: string | null; liveProbe: string | null }) => {
+      if (!data.configured) {
+        toast({ title: "Live account not configured", description: "Save your production key id and private key first", variant: "destructive" });
+      } else if (data.localSignature === "ok" && data.liveProbe?.startsWith("ok")) {
+        toast({ title: "Live account connected", description: data.liveProbe });
+      } else {
+        toast({
+          title: "Live connection test failed",
+          description: `signature: ${data.localSignature} | live: ${data.liveProbe}`,
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const armMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/live/arm", { confirm: armPhrase });
+      return res.json();
+    },
+    onSuccess: () => {
+      setArmPhrase("");
+      queryClient.invalidateQueries({ queryKey: ["/api/live/status"] });
+      toast({ title: "LIVE TRADING ARMED", description: "The live executor is now placing real-money orders." });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Arm failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const disarmMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/live/disarm", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/live/status"] });
+      toast({ title: "Live trading disarmed" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const resetKillSwitchMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/live/reset-kill-switch", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/live/status"] });
+      toast({ title: "Kill switch cleared", description: "Live trading stays disarmed until you arm it again." });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
     },
   });
 
@@ -259,6 +365,109 @@ export default function SettingsPage() {
             >
               {testAnthropicMutation.isPending ? "Testing..." : "Test Anthropic Connection"}
             </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Live (real-money) trading */}
+      <Card className={liveStatus?.enabled ? "border-destructive/50" : "border-amber-500/30"}>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className={`w-4 h-4 ${liveStatus?.enabled ? "text-destructive" : "text-amber-500"}`} />
+            <CardTitle className="text-sm font-medium">Live Trading — Real Money</CardTitle>
+            {liveStatus?.enabled ? (
+              <Badge variant="destructive" className="text-[10px]">ARMED</Badge>
+            ) : (
+              <Badge variant="secondary" className="text-[10px]">disarmed</Badge>
+            )}
+            {liveStatus?.killSwitch === "tripped" && (
+              <Badge variant="destructive" className="text-[10px]">KILL SWITCH TRIPPED</Badge>
+            )}
+          </div>
+          <CardDescription className="text-xs">
+            Production Kalshi credentials (from kalshi.com — not the demo site). Completely separate
+            from the demo pipeline, which keeps running either way. Live orders are tiny by design
+            ($2 stakes, 2 open max, 20/day max) and only the top demo-proven strategies qualify. A
+            cumulative loss past the limit trips the kill switch and disarms automatically.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">Production API Key ID</Label>
+              {prodKeyIdConfigured && <Badge variant="secondary" className="text-[10px]">configured</Badge>}
+            </div>
+            <Input
+              value={prodKeyId}
+              onChange={(e) => setProdKeyId(e.target.value)}
+              placeholder={prodKeyIdConfigured ? "A key id is already saved. Paste here only to replace it." : "e.g. 12345678-abcd-1234-abcd-1234567890ab"}
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">Production RSA Private Key (PEM)</Label>
+              {prodPemConfigured && <Badge variant="secondary" className="text-[10px]">configured</Badge>}
+            </div>
+            <Textarea
+              value={prodPem}
+              onChange={(e) => setProdPem(e.target.value)}
+              placeholder={prodPemConfigured
+                ? "A key is already saved. Paste here only to replace it."
+                : "-----BEGIN RSA PRIVATE KEY-----\n...paste the whole block from kalshi.com...\n-----END RSA PRIVATE KEY-----"}
+              rows={4}
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={() => saveProdKeysMutation.mutate()} disabled={saveProdKeysMutation.isPending}>
+              Save Production Keys
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => testProdMutation.mutate()} disabled={testProdMutation.isPending}>
+              {testProdMutation.isPending ? "Testing..." : "Test Live Connection"}
+            </Button>
+          </div>
+
+          <div className="border-t pt-4 space-y-3">
+            <div className="text-xs text-muted-foreground">
+              {liveStatus?.armedStrategies?.length
+                ? <>Allowlist ({liveStatus.armedStrategies.length}): {liveStatus.armedStrategies.map((s) => s.name).join(", ")}</>
+                : "No strategies currently qualify for the live allowlist."}
+            </div>
+            {liveStatus?.killSwitch === "tripped" ? (
+              <div className="space-y-2">
+                <p className="text-xs text-destructive">
+                  Kill switch tripped{liveStatus.killSwitchReason ? `: ${liveStatus.killSwitchReason}` : ""}. Live trading is disabled.
+                </p>
+                <Button size="sm" variant="outline" onClick={() => resetKillSwitchMutation.mutate()} disabled={resetKillSwitchMutation.isPending}>
+                  Reset Kill Switch
+                </Button>
+              </div>
+            ) : liveStatus?.enabled ? (
+              <Button size="sm" variant="destructive" onClick={() => disarmMutation.mutate()} disabled={disarmMutation.isPending}>
+                Disarm Live Trading
+              </Button>
+            ) : (
+              <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
+                <Input
+                  value={armPhrase}
+                  onChange={(e) => setArmPhrase(e.target.value)}
+                  placeholder='Type GO LIVE to confirm'
+                  className="font-mono text-xs sm:w-56"
+                />
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => armMutation.mutate()}
+                  disabled={armMutation.isPending || armPhrase !== "GO LIVE" || !liveStatus?.prodConfigured}
+                >
+                  Arm Live Trading
+                </Button>
+                {!liveStatus?.prodConfigured && (
+                  <span className="text-xs text-muted-foreground">Save and test production keys first.</span>
+                )}
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>

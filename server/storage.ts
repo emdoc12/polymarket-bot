@@ -8,6 +8,7 @@ import {
   type AgentLabRun, type InsertAgentLabRun, agentLabRuns,
   type ExecutorTrade, type InsertExecutorTrade, executorTrades,
   type PerpTrade, type InsertPerpTrade, perpTrades,
+  type LiveTrade, type InsertLiveTrade, liveTrades,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
@@ -184,6 +185,31 @@ function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_perp_trades_status ON perp_trades(status);
   `);
 
+  // Live (real-money) trades table
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS live_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER REFERENCES candidate_strategies(id),
+      candidate_name TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      series TEXT NOT NULL,
+      side TEXT NOT NULL,
+      entry_price REAL NOT NULL,
+      contracts INTEGER NOT NULL,
+      cost REAL NOT NULL,
+      fee REAL NOT NULL,
+      status TEXT NOT NULL,
+      order_id TEXT,
+      error TEXT,
+      result TEXT,
+      net_pnl REAL,
+      placed_at TEXT NOT NULL,
+      market_close_at TEXT NOT NULL,
+      settled_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_live_trades_status ON live_trades(status);
+  `);
+
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS executor_trades (
@@ -291,6 +317,13 @@ export interface IStorage {
   updatePerpTrade(id: number, updates: Partial<PerpTrade>): void;
   getPerpTrades(limit?: number): PerpTrade[];
   getOpenPerpTrades(): PerpTrade[];
+
+  // Live (real-money) trades
+  createLiveTrade(trade: InsertLiveTrade): LiveTrade;
+  updateLiveTrade(id: number, updates: Partial<LiveTrade>): void;
+  getLiveTrades(limit?: number): LiveTrade[];
+  getUnsettledLiveTrades(): LiveTrade[];
+  hasLiveTradeFor(candidateId: number, ticker: string): boolean;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -549,6 +582,29 @@ export class DatabaseStorage implements IStorage {
   getOpenPerpTrades(): PerpTrade[] {
     return db.select().from(perpTrades).orderBy(desc(perpTrades.id)).all()
       .filter((trade) => trade.status === "open" || trade.status === "dry_run");
+  }
+
+  // Live (real-money) trades
+  createLiveTrade(trade: InsertLiveTrade): LiveTrade {
+    return db.insert(liveTrades).values(trade).returning().get();
+  }
+
+  updateLiveTrade(id: number, updates: Partial<LiveTrade>): void {
+    db.update(liveTrades).set(updates as any).where(eq(liveTrades.id, id)).run();
+  }
+
+  getLiveTrades(limit = 100): LiveTrade[] {
+    return db.select().from(liveTrades).orderBy(desc(liveTrades.id)).limit(limit).all();
+  }
+
+  getUnsettledLiveTrades(): LiveTrade[] {
+    return db.select().from(liveTrades).orderBy(desc(liveTrades.id)).all()
+      .filter((trade) => trade.status === "open");
+  }
+
+  hasLiveTradeFor(candidateId: number, ticker: string): boolean {
+    return db.select().from(liveTrades).all()
+      .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
   }
 
   // One-shot cleanup of the Polymarket paper-trading era: legacy strategies,

@@ -8,6 +8,7 @@ import { registerAgentLabRoutes } from "./agent-lab";
 import { registerExecutorRoutes } from "./kalshi-executor";
 import { registerPerpsRoutes } from "./kalshi-perps";
 import { registerPerpExecutorRoutes } from "./kalshi-perp-executor";
+import { registerLiveExecutorRoutes } from "./kalshi-live-executor";
 import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeLog } from "@shared/schema";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -2491,6 +2492,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   registerExecutorRoutes(app);
   registerPerpsRoutes(app);
   registerPerpExecutorRoutes(app);
+  registerLiveExecutorRoutes(app);
 
   app.get("/api/version", (_req, res) => {
     res.json({ version: APP_VERSION });
@@ -2818,7 +2820,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // Secrets stored via the settings UI are never echoed back to the client;
   // the UI only needs to know whether one is configured.
-  const SECRET_SETTING_KEYS = new Set(["kalshi_private_key_pem", "anthropic_api_key"]);
+  const SECRET_SETTING_KEYS = new Set([
+    "kalshi_private_key_pem",
+    "anthropic_api_key",
+    "kalshi_prod_api_key_id",
+    "kalshi_prod_private_key_pem",
+  ]);
 
   app.get("/api/settings", async (_req, res) => {
     ensurePaperDefaults();
@@ -2840,6 +2847,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (key === "mode") {
       storage.setSetting("mode", "paper");
       res.json({ success: true, value: "paper" });
+      return;
+    }
+
+    // A client re-submitting the mask must never clobber a stored secret.
+    if (SECRET_SETTING_KEYS.has(key) && String(value) === "__secret_set__") {
+      res.json({ success: true, unchanged: true });
+      return;
+    }
+
+    // Arming real-money trading only happens through the confirmed
+    // /api/live/arm flow - never via a generic settings write. Turning it
+    // OFF this way is fine.
+    if (key === "live_executor_enabled" && String(value) === "true") {
+      res.status(400).json({ error: "use POST /api/live/arm with the confirmation phrase to enable live trading" });
+      return;
+    }
+    if (key === "live_kill_switch") {
+      res.status(400).json({ error: "the kill switch is managed via /api/live/reset-kill-switch" });
       return;
     }
 

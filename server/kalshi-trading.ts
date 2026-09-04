@@ -14,7 +14,17 @@ import { storage } from "./storage";
 // 2026-08-14: Kalshi retired external-api.demo.kalshi.co (410 "switch to V2
 // endpoints", then 503s); demo-api.kalshi.co is the serving demo host. Same
 // /trade-api/v2 prefix and signing scheme. Overridable without a rebuild.
-const KALSHI_DEMO_API = process.env.KALSHI_DEMO_API_BASE || "https://demo-api.kalshi.co";
+//
+// Phase 3 (2026-09-04): the same client is env-parameterized so the live
+// executor can trade the PRODUCTION exchange with separate credentials while
+// the demo pipeline keeps running unchanged. Demo-named exports remain and
+// delegate with env="demo".
+export type KalshiEnv = "demo" | "prod";
+const API_BASES: Record<KalshiEnv, string> = {
+  demo: process.env.KALSHI_DEMO_API_BASE || "https://demo-api.kalshi.co",
+  prod: process.env.KALSHI_PROD_API_BASE || "https://external-api.kalshi.com",
+};
+const KALSHI_DEMO_API = API_BASES.demo;
 const API_PREFIX = "/trade-api/v2";
 
 type KalshiCredentials = {
@@ -29,7 +39,22 @@ type KalshiCredentials = {
 //   3. kalshi_api_key_id + kalshi_private_key_pem settings (Settings page UI)
 //   4. kalshi_api_key_id setting + $DATA_DIR/kalshi-api-key.pem file
 // The recommended path is 3: paste both values into the app's Settings page.
-export function getKalshiCredentials(): KalshiCredentials | null {
+export function getKalshiCredentialsEnv(env: KalshiEnv): KalshiCredentials | null {
+  if (env === "prod") {
+    const keyId = process.env.KALSHI_PROD_API_KEY_ID || storage.getSetting("kalshi_prod_api_key_id");
+    if (!keyId) return null;
+    if (process.env.KALSHI_PROD_PRIVATE_KEY) {
+      return { keyId, privateKeyPem: process.env.KALSHI_PROD_PRIVATE_KEY, source: "env:KALSHI_PROD_PRIVATE_KEY" };
+    }
+    const settingPem = storage.getSetting("kalshi_prod_private_key_pem");
+    if (settingPem) return { keyId, privateKeyPem: settingPem, source: "settings" };
+    const pemPath = process.env.KALSHI_PROD_PRIVATE_KEY_PATH;
+    if (pemPath && existsSync(pemPath)) {
+      return { keyId, privateKeyPem: readFileSync(pemPath, "utf8"), source: `file:${pemPath}` };
+    }
+    return null;
+  }
+
   const envKeyId = process.env.KALSHI_API_KEY_ID;
   const settingKeyId = storage.getSetting("kalshi_api_key_id");
   const keyId = envKeyId || settingKeyId;
@@ -58,6 +83,10 @@ export function getKalshiCredentials(): KalshiCredentials | null {
   return null;
 }
 
+export function getKalshiCredentials(): KalshiCredentials | null {
+  return getKalshiCredentialsEnv("demo");
+}
+
 // Kalshi request signing: RSA-PSS over `timestampMs + METHOD + path`, where
 // path includes the /trade-api/v2 prefix and excludes the query string.
 // SHA-256 digest, MGF1-SHA-256, salt length = digest length.
@@ -81,19 +110,20 @@ export function isKalshiDryRun() {
   return storage.getSetting("kalshi_dry_run") !== "false" || !getKalshiCredentials();
 }
 
-export async function kalshiPrivateFetch(
+export async function kalshiPrivateFetchEnv(
+  env: KalshiEnv,
   method: "GET" | "POST" | "DELETE",
   endpointPath: string,
   body?: unknown,
 ) {
-  const creds = getKalshiCredentials();
+  const creds = getKalshiCredentialsEnv(env);
   if (!creds) {
-    throw new Error("Kalshi API credentials not configured (need key id + private key PEM)");
+    throw new Error(`Kalshi ${env} API credentials not configured (need key id + private key PEM)`);
   }
   const requestPath = `${API_PREFIX}${endpointPath}`;
   const timestampMs = String(Date.now());
   const signature = signKalshiRequest(creds.privateKeyPem, timestampMs, method, requestPath);
-  const res = await fetch(`${KALSHI_DEMO_API}${requestPath}`, {
+  const res = await fetch(`${API_BASES[env]}${requestPath}`, {
     method,
     headers: {
       "Content-Type": "application/json",
@@ -114,9 +144,18 @@ export async function kalshiPrivateFetch(
   }
   if (!res.ok) {
     const detail = json?.error?.message || json?.message || res.statusText;
-    throw new Error(`Kalshi demo API ${res.status}: ${detail}`);
+    throw new Error(`Kalshi ${env} API ${res.status}: ${detail}`);
   }
   return json;
+}
+
+// Demo-bound wrapper: every pre-Phase-3 call site keeps its exact behavior.
+export async function kalshiPrivateFetch(
+  method: "GET" | "POST" | "DELETE",
+  endpointPath: string,
+  body?: unknown,
+) {
+  return kalshiPrivateFetchEnv("demo", method, endpointPath, body);
 }
 
 export async function getKalshiBalance() {
@@ -153,8 +192,8 @@ export type KalshiOrderRequest = {
 // preallocated on a market's shard before orders are accepted there - a
 // fresh shard even reports "user not found" until first funding. Returns the
 // per-shard balances in dollars.
-export async function getShardBalances(): Promise<Map<number, number>> {
-  const response = await kalshiPrivateFetch("GET", "/portfolio/balance");
+export async function getShardBalancesEnv(env: KalshiEnv): Promise<Map<number, number>> {
+  const response = await kalshiPrivateFetchEnv(env, "GET", "/portfolio/balance");
   const balances = new Map<number, number>();
   for (const entry of response?.balance_breakdown ?? []) {
     const index = Number(entry?.exchange_index);
@@ -168,9 +207,17 @@ export async function getShardBalances(): Promise<Map<number, number>> {
 // from shard 0 when needed. Transfers are asynchronous on Kalshi's side, so
 // after initiating one we poll briefly; if it hasn't landed by then, this
 // window's order fails cleanly and the next window finds the funds waiting.
+export async function getShardBalances(): Promise<Map<number, number>> {
+  return getShardBalancesEnv("demo");
+}
+
 export async function ensureShardFunds(exchangeIndex: number, minDollars: number): Promise<void> {
+  return ensureShardFundsEnv("demo", exchangeIndex, minDollars);
+}
+
+export async function ensureShardFundsEnv(env: KalshiEnv, exchangeIndex: number, minDollars: number): Promise<void> {
   if (exchangeIndex === 0) return;
-  const balances = await getShardBalances();
+  const balances = await getShardBalancesEnv(env);
   if ((balances.get(exchangeIndex) ?? 0) >= minDollars) return;
 
   const available = balances.get(0) ?? 0;
@@ -179,17 +226,17 @@ export async function ensureShardFunds(exchangeIndex: number, minDollars: number
   if (amount < minDollars) {
     throw new Error(`insufficient shard-0 balance ($${available.toFixed(2)}) to fund shard ${exchangeIndex}`);
   }
-  await kalshiPrivateFetch("POST", "/portfolio/intra_exchange_instance_transfer", {
+  await kalshiPrivateFetchEnv(env, "POST", "/portfolio/intra_exchange_instance_transfer", {
     source: "event_contract",
     destination: "event_contract",
     amount: Math.round(amount * 10000), // centicents
     source_exchange_shard: 0,
     destination_exchange_shard: exchangeIndex,
   });
-  console.log(`${new Date().toISOString()} [info] [kalshi] transferring $${amount.toFixed(2)} shard 0 -> ${exchangeIndex}`);
+  console.log(`${new Date().toISOString()} [info] [kalshi] (${env}) transferring $${amount.toFixed(2)} shard 0 -> ${exchangeIndex}`);
   for (let attempt = 0; attempt < 4; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    const refreshed = await getShardBalances();
+    const refreshed = await getShardBalancesEnv(env);
     if ((refreshed.get(exchangeIndex) ?? 0) >= minDollars) return;
   }
   throw new Error(`shard ${exchangeIndex} funding still settling - will retry next window`);
@@ -249,9 +296,9 @@ export type KalshiOrderResult =
 // exchange shards (e.g. crypto 15-min markets on exchange_index 2, while
 // production uses 0). Orders defaulting to index 0 get "market not found" -
 // so resolve the market's demo-side index right before placing.
-export async function getDemoMarketExchangeIndex(ticker: string): Promise<number | null> {
+export async function getMarketExchangeIndexEnv(env: KalshiEnv, ticker: string): Promise<number | null> {
   try {
-    const res = await fetch(`${KALSHI_DEMO_API}${API_PREFIX}/markets/${encodeURIComponent(ticker)}`, {
+    const res = await fetch(`${API_BASES[env]}${API_PREFIX}/markets/${encodeURIComponent(ticker)}`, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(8000),
     });
@@ -264,26 +311,36 @@ export async function getDemoMarketExchangeIndex(ticker: string): Promise<number
   }
 }
 
+export async function getDemoMarketExchangeIndex(ticker: string): Promise<number | null> {
+  return getMarketExchangeIndexEnv("demo", ticker);
+}
+
 export async function placeKalshiOrder(order: KalshiOrderRequest): Promise<KalshiOrderResult> {
+  return placeKalshiOrderEnv("demo", order);
+}
+
+export async function placeKalshiOrderEnv(env: KalshiEnv, order: KalshiOrderRequest): Promise<KalshiOrderResult> {
   const payload = buildOrderPayload(order);
-  if (isKalshiDryRun()) {
+  // Dry-run is a demo-pipeline concept; the live executor's gates are
+  // credentials + its own enable switch + kill switch.
+  if (env === "demo" && isKalshiDryRun()) {
     dryRunLog.unshift({ at: new Date().toISOString(), payload });
     if (dryRunLog.length > DRY_RUN_LOG_MAX) dryRunLog.length = DRY_RUN_LOG_MAX;
     return { dryRun: true, wouldSend: payload, env: "demo" };
   }
-  const exchangeIndex = order.exchangeIndex ?? await getDemoMarketExchangeIndex(order.ticker);
+  const exchangeIndex = order.exchangeIndex ?? await getMarketExchangeIndexEnv(env, order.ticker);
   if (exchangeIndex == null) {
-    throw new Error(`market ${order.ticker} is not listed on the demo exchange`);
+    throw new Error(`market ${order.ticker} is not listed on the ${env} exchange`);
   }
   (payload as Record<string, unknown>).exchange_index = exchangeIndex;
-  const response = await kalshiPrivateFetch("POST", "/portfolio/events/orders", payload);
+  const response = await kalshiPrivateFetchEnv(env, "POST", "/portfolio/events/orders", payload);
   const parseFp = (value: unknown) => {
     const parsed = parseFloat(String(value ?? ""));
     return Number.isFinite(parsed) ? parsed : null;
   };
   return {
     dryRun: false,
-    env: "demo",
+    env,
     orderId: typeof response?.order_id === "string" ? response.order_id : null,
     fillCount: parseFp(response?.fill_count) ?? 0,
     averageFillPriceYesLeg: parseFp(response?.average_fill_price),
@@ -293,6 +350,15 @@ export async function placeKalshiOrder(order: KalshiOrderRequest): Promise<Kalsh
 
 export async function cancelKalshiOrder(orderId: string) {
   return kalshiPrivateFetch("DELETE", `/portfolio/orders/${encodeURIComponent(orderId)}`);
+}
+
+export async function getKalshiBalanceEnv(env: KalshiEnv) {
+  return kalshiPrivateFetchEnv(env, "GET", "/portfolio/balance");
+}
+
+export function getKalshiAuthStatusEnv(env: KalshiEnv) {
+  const creds = getKalshiCredentialsEnv(env);
+  return { configured: Boolean(creds), keySource: creds?.source ?? null };
 }
 
 export function getKalshiAuthStatus() {
@@ -312,7 +378,11 @@ export function getKalshiAuthStatus() {
 // key the probe should come back 401 (proves the signed request reaches
 // Kalshi's auth layer); with a real demo key it returns the balance.
 export async function runKalshiAuthSelfTest() {
-  const creds = getKalshiCredentials();
+  return runKalshiAuthSelfTestEnv("demo");
+}
+
+export async function runKalshiAuthSelfTestEnv(env: KalshiEnv) {
+  const creds = getKalshiCredentialsEnv(env);
   if (!creds) {
     return { configured: false, localSignature: null, liveProbe: null };
   }
@@ -343,7 +413,7 @@ export async function runKalshiAuthSelfTest() {
 
   let liveProbe: string;
   try {
-    const balance = await getKalshiBalance();
+    const balance = await getKalshiBalanceEnv(env);
     liveProbe = `ok: balance=${JSON.stringify(balance)}`;
   } catch (err) {
     liveProbe = err instanceof Error ? err.message : String(err);

@@ -63,7 +63,7 @@ type LiveEntryDecision =
 
 // Live twin of the backtester's entry logic in kalshi.ts: same side rules and
 // filters, but priced off the market's current executable quotes.
-async function decideLiveEntry(
+export async function decideLiveEntry(
   spec: KalshiStrategySpec,
   market: KalshiMarket,
   nowMs: number,
