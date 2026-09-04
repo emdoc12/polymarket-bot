@@ -414,7 +414,10 @@ export async function runKalshiAuthSelfTestEnv(env: KalshiEnv) {
   let liveProbe: string;
   try {
     const balance = await getKalshiBalanceEnv(env);
-    liveProbe = `ok: balance=${JSON.stringify(balance)}`;
+    // The API reports cents; show dollars so $50.00 doesn't read as "5000".
+    liveProbe = typeof balance?.balance === "number"
+      ? `ok: balance=$${(balance.balance / 100).toFixed(2)}`
+      : `ok: balance=${JSON.stringify(balance)}`;
   } catch (err) {
     liveProbe = err instanceof Error ? err.message : String(err);
   }
