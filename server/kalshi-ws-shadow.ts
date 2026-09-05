@@ -206,7 +206,11 @@ function scheduleShadow() {
 // divergence is transport.
 function buildComparison() {
   const shadow = storage.getWsShadowTrades(500);
-  const live = storage.getLiveTrades(500);
+  // Fair summary: only count REST trades from the period the shadow was also
+  // watching (rows come newest-first, so the oldest shadow row is last).
+  const shadowStart = shadow.length > 0 ? shadow[shadow.length - 1].placedAt : null;
+  const live = storage.getLiveTrades(500)
+    .filter((t) => shadowStart == null || t.placedAt >= shadowStart);
   const liveByTicker = new Map(live.map((t) => [t.ticker, t] as const));
   const rows = shadow
     .slice(0, 60)
@@ -276,6 +280,13 @@ export function registerWsShadowRoutes(app: Express) {
 
   app.get("/api/ws-shadow/compare", (_req, res) => {
     res.json(buildComparison());
+  });
+
+  // Restart the experiment: wipe the shadow ledger (e.g. after a book-logic
+  // fix invalidates old rows). Real trade ledgers are untouched.
+  app.post("/api/ws-shadow/reset", (_req, res) => {
+    const removed = storage.clearWsShadowTrades();
+    res.json({ ok: true, removed });
   });
 
   app.post("/api/ws-shadow/toggle", (req, res) => {

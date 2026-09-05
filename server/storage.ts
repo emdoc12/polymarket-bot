@@ -356,6 +356,7 @@ export interface IStorage {
   getWsShadowTrades(limit?: number): WsShadowTrade[];
   getUnsettledWsShadowTrades(): WsShadowTrade[];
   hasWsShadowTradeFor(candidateId: number, ticker: string): boolean;
+  clearWsShadowTrades(): number;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -661,6 +662,12 @@ export class DatabaseStorage implements IStorage {
   hasWsShadowTradeFor(candidateId: number, ticker: string): boolean {
     return db.select().from(wsShadowTrades).all()
       .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
+  }
+
+  clearWsShadowTrades(): number {
+    const count = db.select().from(wsShadowTrades).all().length;
+    sqlite.exec("DELETE FROM ws_shadow_trades");
+    return count;
   }
 
   // One-shot cleanup of the Polymarket paper-trading era: legacy strategies,

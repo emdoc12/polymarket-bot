@@ -16,7 +16,11 @@ const PROD_WS_HOSTS = (process.env.KALSHI_PROD_WS_BASE
   ? [process.env.KALSHI_PROD_WS_BASE]
   : ["wss://external-api-ws.kalshi.com", "wss://api.elections.kalshi.com"]);
 
-type BookSide = Map<number, number>; // price in cents -> resting contracts
+// price in cents -> resting contracts in CENTI-CONTRACTS (integer). Kalshi
+// sends fixed-point strings with 2 decimals; storing them as scaled integers
+// keeps delta arithmetic exact - float accumulation left ~1e-12 residue that
+// kept emptied "ghost" levels alive in the book.
+type BookSide = Map<number, number>;
 
 type MarketBook = {
   yes: BookSide; // resting YES bids
@@ -35,6 +39,12 @@ export type StreamQuote = {
 };
 
 function centsFromDollarStr(s: unknown): number | null {
+  const v = typeof s === "string" ? parseFloat(s) : typeof s === "number" ? s : NaN;
+  if (!Number.isFinite(v)) return null;
+  return Math.round(v * 100);
+}
+
+function centiContracts(s: unknown): number | null {
   const v = typeof s === "string" ? parseFloat(s) : typeof s === "number" ? s : NaN;
   if (!Number.isFinite(v)) return null;
   return Math.round(v * 100);
@@ -113,8 +123,8 @@ class KalshiMarketStream {
     return {
       yesBid,
       yesAsk,
-      yesAskDepth: bestNoBidCents != null ? (book.no.get(bestNoBidCents) ?? 0) : 0,
-      yesBidDepth: bestYesBidCents != null ? (book.yes.get(bestYesBidCents) ?? 0) : 0,
+      yesAskDepth: bestNoBidCents != null ? (book.no.get(bestNoBidCents) ?? 0) / 100 : 0,
+      yesBidDepth: bestYesBidCents != null ? (book.yes.get(bestYesBidCents) ?? 0) / 100 : 0,
       lastUpdateMs: book.lastUpdateMs,
       ageMs: age,
     };
@@ -224,6 +234,10 @@ class KalshiMarketStream {
       this.send({ cmd: "update_subscription", params: { sids: [this.sid], market_tickers: toDrop, action: "delete_markets" } });
       for (const t of toDrop) { this.subscribed.delete(t); this.books.delete(t); }
     }
+    // A subscription change can restart the sid's seq numbering (observed as
+    // spurious "gaps" at every window rotation). Re-anchor on the next
+    // message instead of tearing the connection down.
+    if (toAdd.length > 0 || toDrop.length > 0) this.lastSeq = null;
   }
 
   private forceResync(reason: string) {
@@ -276,8 +290,8 @@ class KalshiMarketStream {
           for (const level of levels) {
             if (!Array.isArray(level) || level.length < 2) continue;
             const cents = centsFromDollarStr(level[0]);
-            const qty = parseFloat(String(level[1]));
-            if (cents != null && Number.isFinite(qty) && qty > 0) sideMap.set(cents, qty);
+            const qty = centiContracts(level[1]);
+            if (cents != null && qty != null && qty > 0) sideMap.set(cents, qty);
           }
         }
         this.books.set(ticker, book);
@@ -288,9 +302,9 @@ class KalshiMarketStream {
       const book = this.books.get(ticker);
       if (!book || !book.ready) return; // snapshot not seen yet; ignore
       const cents = centsFromDollarStr(msg.price_dollars);
-      const delta = parseFloat(String(msg.delta_fp));
+      const delta = centiContracts(msg.delta_fp);
       const side: "yes" | "no" | undefined = msg.side;
-      if (cents == null || !Number.isFinite(delta) || (side !== "yes" && side !== "no")) return;
+      if (cents == null || delta == null || (side !== "yes" && side !== "no")) return;
       const sideMap = side === "yes" ? book.yes : book.no;
       const next = (sideMap.get(cents) ?? 0) + delta;
       if (next > 0) sideMap.set(cents, next);
