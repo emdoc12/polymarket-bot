@@ -54,6 +54,20 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_min_demo_trades")) storage.setSetting("live_min_demo_trades", "20");
   if (!storage.getSetting("live_kill_switch")) storage.setSetting("live_kill_switch", "ok");
   if (!storage.getSetting("live_poll_seconds")) storage.setSetting("live_poll_seconds", "15");
+  if (!storage.getSetting("live_max_entry_price")) storage.setSetting("live_max_entry_price", "0.80");
+}
+
+// Live-only price guards. The floor mirrors the demo executor's fillability
+// floor; the ceiling exists because early live evidence shows extreme
+// favorites (>80c) underperforming their demo win rates on real books, and
+// at those prices there is almost no cushion for being wrong. The demo
+// pipeline keeps trading the full band so the evidence keeps accumulating.
+function passesLivePriceGuards(price: number): boolean {
+  const minFillable = parseFloat(storage.getSetting("executor_min_fillable_price") || "0.30");
+  if (Number.isFinite(minFillable) && price < minFillable) return false;
+  const maxEntry = parseFloat(storage.getSetting("live_max_entry_price") || "0.80");
+  if (Number.isFinite(maxEntry) && maxEntry > 0 && price > maxEntry) return false;
+  return true;
 }
 
 // Only actual fills count toward the daily cap - unfilled IOC orders and
@@ -120,18 +134,15 @@ async function settleLiveTrades() {
 }
 
 async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySpec, market: KalshiMarket, nowMs: number) {
-  const decision = await decideLiveEntry(spec, market, nowMs);
+  let decision = await decideLiveEntry(spec, market, nowMs);
   if (!decision.ok) return;
-
-  const minFillable = parseFloat(storage.getSetting("executor_min_fillable_price") || "0.30");
-  if (Number.isFinite(minFillable) && decision.entryPrice < minFillable) return;
+  if (!passesLivePriceGuards(decision.entryPrice)) return;
 
   const orderSize = Math.max(0.5, parseFloat(storage.getSetting("live_order_size") || "2"));
   let contracts = Math.max(1, Math.floor(orderSize / decision.entryPrice));
   let entryPrice = decision.entryPrice;
   let cost = contracts * entryPrice;
   let fee = kalshiTradingFee(contracts, entryPrice);
-  const priceCents = Math.min(99, Math.max(1, Math.round(decision.entryPrice * 100)));
 
   let status = "failed";
   let orderId: string | null = null;
@@ -139,36 +150,60 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
   try {
     const exchangeIndex = await getMarketExchangeIndexEnv("prod", market.ticker);
     if (exchangeIndex == null) throw new Error(`market ${market.ticker} is not listed on the prod exchange`);
-    await ensureShardFundsEnv("prod", exchangeIndex, cost + 1);
-    const placed = await placeKalshiOrderEnv("prod", {
-      ticker: market.ticker,
-      side: decision.side,
-      action: "buy",
-      count: contracts,
-      type: "limit",
-      yesPriceCents: decision.side === "yes" ? priceCents : undefined,
-      noPriceCents: decision.side === "no" ? priceCents : undefined,
-      exchangeIndex,
-    });
-    if (placed.dryRun) {
-      throw new Error("unexpected dry-run result from prod order path");
-    } else if (placed.fillCount <= 0) {
-      status = "unfilled";
-      orderId = placed.orderId;
-      contracts = 0;
-      cost = 0;
-      fee = 0;
-    } else {
-      status = "open";
-      orderId = placed.orderId;
-      contracts = placed.fillCount;
-      if (placed.averageFillPriceYesLeg != null) {
-        entryPrice = decision.side === "yes"
-          ? placed.averageFillPriceYesLeg
-          : 1 - placed.averageFillPriceYesLeg;
-      }
+
+    // Up to two attempts: if the first IOC misses (the book moved between
+    // quote and order), requote through the SAME entry logic and retry once.
+    // The strategy's own price band and the live guards still gate the retry,
+    // so this only converts latency misses into fills - it never chases
+    // beyond what the spec would have entered at in the first place.
+    const MAX_ATTEMPTS = 2;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      contracts = Math.max(1, Math.floor(orderSize / decision.entryPrice));
+      entryPrice = decision.entryPrice;
       cost = contracts * entryPrice;
-      fee = placed.averageFeePaid != null ? placed.averageFeePaid * contracts : kalshiTradingFee(contracts, entryPrice);
+      fee = kalshiTradingFee(contracts, entryPrice);
+      const priceCents = Math.min(99, Math.max(1, Math.round(decision.entryPrice * 100)));
+
+      await ensureShardFundsEnv("prod", exchangeIndex, cost + 1);
+      const placed = await placeKalshiOrderEnv("prod", {
+        ticker: market.ticker,
+        side: decision.side,
+        action: "buy",
+        count: contracts,
+        type: "limit",
+        yesPriceCents: decision.side === "yes" ? priceCents : undefined,
+        noPriceCents: decision.side === "no" ? priceCents : undefined,
+        exchangeIndex,
+      });
+      if (placed.dryRun) {
+        throw new Error("unexpected dry-run result from prod order path");
+      } else if (placed.fillCount <= 0) {
+        status = "unfilled";
+        orderId = placed.orderId;
+        contracts = 0;
+        cost = 0;
+        fee = 0;
+        if (attempt < MAX_ATTEMPTS) {
+          const requote = await decideLiveEntry(spec, market, Date.now());
+          if (requote.ok && requote.side === decision.side && passesLivePriceGuards(requote.entryPrice)) {
+            decision = requote;
+            continue;
+          }
+        }
+        break;
+      } else {
+        status = "open";
+        orderId = placed.orderId;
+        contracts = placed.fillCount;
+        if (placed.averageFillPriceYesLeg != null) {
+          entryPrice = decision.side === "yes"
+            ? placed.averageFillPriceYesLeg
+            : 1 - placed.averageFillPriceYesLeg;
+        }
+        cost = contracts * entryPrice;
+        fee = placed.averageFeePaid != null ? placed.averageFeePaid * contracts : kalshiTradingFee(contracts, entryPrice);
+        break;
+      }
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
@@ -288,6 +323,7 @@ export function registerLiveExecutorRoutes(app: Express) {
       maxOpenTrades: parseInt(storage.getSetting("live_max_open_trades") || "2", 10),
       maxTradesPerDay: parseInt(storage.getSetting("live_max_trades_per_day") || "20", 10),
       maxTotalLoss: parseFloat(storage.getSetting("live_max_total_loss") || "25"),
+      maxEntryPrice: parseFloat(storage.getSetting("live_max_entry_price") || "0.80"),
       totalSettled: settled.length,
       totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),
     });
