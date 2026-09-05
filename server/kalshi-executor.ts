@@ -51,10 +51,12 @@ function ensureExecutorDefaults() {
 
 function executorTradesToday() {
   const today = new Date().toISOString().slice(0, 10);
-  // Failed attempts (e.g. a Kalshi outage) must not consume the daily budget,
-  // or an outage morning blocks real trading for the rest of the day.
-  return storage.getExecutorTrades(500)
-    .filter((trade) => trade.placedAt.startsWith(today) && trade.status !== "failed").length;
+  // Failed attempts (e.g. a Kalshi outage) and unfilled IOC orders must not
+  // consume the daily budget - neither costs anything, and a thin-liquidity
+  // morning shouldn't block real trading for the rest of the day.
+  return storage.getExecutorTrades(1000)
+    .filter((trade) => trade.placedAt.startsWith(today)
+      && trade.status !== "failed" && trade.status !== "unfilled").length;
 }
 
 type LiveEntryDecision =
@@ -252,9 +254,10 @@ async function runExecutorTick() {
   if (promoted.length === 0) return;
 
   const maxOpen = Math.max(1, parseInt(storage.getSetting("executor_max_open_trades") || "6", 10));
-  const maxPerDay = Math.max(1, parseInt(storage.getSetting("executor_max_trades_per_day") || "120", 10));
+  // 0 = no daily cap; open-position and per-window limits still apply.
+  const maxPerDay = Math.max(0, parseInt(storage.getSetting("executor_max_trades_per_day") || "120", 10));
   if (storage.getUnsettledExecutorTrades().length >= maxOpen) return;
-  if (executorTradesToday() >= maxPerDay) return;
+  if (maxPerDay > 0 && executorTradesToday() >= maxPerDay) return;
 
   const specs = promoted.map((candidate) => ({
     candidate,

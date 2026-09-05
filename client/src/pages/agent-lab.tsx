@@ -363,7 +363,7 @@ export default function AgentLabPage() {
             </div>
             <span className="text-xs text-muted-foreground">
               {executor
-                ? `${executor.promotedStrategies} strategies armed · ${executor.openTrades} open · ${executor.tradesToday}/${executor.maxTradesPerDay} today`
+                ? `${executor.promotedStrategies} strategies armed · ${executor.openTrades} open · ${executor.tradesToday}${executor.maxTradesPerDay > 0 ? `/${executor.maxTradesPerDay}` : ""} today`
                 : "—"}
             </span>
             {executor && executor.totalSettled > 0 && (
