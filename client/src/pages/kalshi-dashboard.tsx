@@ -346,134 +346,6 @@ export default function KalshiDashboard() {
         </Card>
       </div>
 
-      {/* Live (real-money) trading */}
-      {showLive && (
-        <Card className={liveStatus?.enabled ? "border-destructive/40" : undefined}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-2">
-              <CardTitle className="text-sm font-medium">Live account — real money</CardTitle>
-              {liveStatus?.enabled ? (
-                <Badge variant="destructive" className="text-[10px]">ARMED</Badge>
-              ) : (
-                <Badge variant="secondary" className="text-[10px]">disarmed</Badge>
-              )}
-              {liveStatus?.killSwitch === "tripped" && (
-                <Badge variant="destructive" className="text-[10px]">KILL SWITCH</Badge>
-              )}
-            </div>
-            <CardDescription className="text-xs">
-              Production Kalshi account, tracked completely separately from the demo pipeline.
-              Arm/disarm from <Link href="/settings" className="underline">Settings</Link>.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <div>
-                <p className="text-xs text-muted-foreground">Live balance</p>
-                <p className="text-base font-semibold font-mono">
-                  {liveBalanceDollars != null ? `$${liveBalanceDollars.toFixed(2)}` : "—"}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Live P&L (settled)</p>
-                <p className="text-base font-semibold">
-                  <PnlText value={(liveStatus?.totalSettled ?? 0) > 0 ? liveStatus?.totalNetPnl : null} />
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Open / today</p>
-                <p className="text-base font-semibold font-mono">
-                  {liveStatus
-                    ? `${liveStatus.openTrades} · ${liveStatus.tradesToday}${liveStatus.maxTradesPerDay > 0 ? `/${liveStatus.maxTradesPerDay}` : ""}`
-                    : "—"}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Allowlisted strategies</p>
-                <p className="text-base font-semibold font-mono">{liveStatus?.armedStrategies.length ?? "—"}</p>
-              </div>
-            </div>
-
-            {liveSeries.length >= 2 && (
-              <div className="h-44">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={liveSeries} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
-                    <CartesianGrid stroke={gridStroke} strokeOpacity={0.4} vertical={false} />
-                    <XAxis
-                      dataKey="time" type="number" scale="time" domain={["dataMin", "dataMax"]}
-                      tickFormatter={timeFmt} tick={tickStyle} axisLine={false} tickLine={false} minTickGap={60}
-                    />
-                    <YAxis
-                      tickFormatter={(v: number) => `$${v}`} tick={tickStyle}
-                      axisLine={false} tickLine={false} width={48}
-                    />
-                    <Tooltip
-                      contentStyle={chartTooltipStyle()}
-                      labelFormatter={(v) => timeFmt(Number(v))}
-                      formatter={(value, name) => [money(Number(value), true), String(name)]}
-                    />
-                    <Line
-                      type="monotone" dataKey="live" stroke={SERIES_COLORS[2]} strokeWidth={2}
-                      dot={false} activeDot={{ r: 4 }} name="Live P&L"
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-
-            {liveTrades.length > 0 ? (
-              <table className="w-full text-sm table-fixed sm:table-auto">
-                <thead>
-                  <tr className="text-[11px] text-muted-foreground border-b border-border">
-                    <th className="text-left font-medium py-2 pr-2">Trade</th>
-                    <th className="text-right font-medium px-2 py-2 w-16 sm:w-auto">Entry</th>
-                    <th className="text-right font-medium px-2 py-2 hidden sm:table-cell">Cost</th>
-                    <th className="text-left font-medium px-2 py-2 w-[4.5rem] sm:w-auto">Status</th>
-                    <th className="text-right font-medium pl-2 py-2 w-16 sm:w-auto">P&L</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {liveTrades.slice(0, 12).map((t) => (
-                    <tr key={t.id} className="border-b border-border/50">
-                      <td className="py-2 pr-2 overflow-hidden">
-                        <p className="text-xs font-medium whitespace-nowrap">
-                          {(t.series || t.ticker).replace("KX", "").replace("15M", "")} {t.side.toUpperCase()}
-                          <span className="text-muted-foreground font-normal text-[10px]">
-                            {" "}
-                            {new Date(t.placedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase()}
-                          </span>
-                        </p>
-                        <p className="text-[10px] text-muted-foreground truncate">
-                          <span className="hidden sm:inline font-mono">{t.ticker} · </span>
-                          {t.candidateName}
-                        </p>
-                      </td>
-                      <td className="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
-                        {t.contracts > 0 ? `${t.contracts}@${(t.entryPrice * 100).toFixed(0)}¢` : "—"}
-                      </td>
-                      <td className="px-2 py-2 text-right text-xs font-mono hidden sm:table-cell">{money(t.cost)}</td>
-                      <td className="px-2 py-2 text-xs">
-                        <Badge
-                          variant={t.status === "settled_won" ? "default" : t.status === "settled_lost" || t.status === "failed" ? "destructive" : "secondary"}
-                          className="text-[10px]"
-                        >
-                          {t.status.replace("settled_", "")}
-                        </Badge>
-                      </td>
-                      <td className="pl-2 py-2 text-right text-xs whitespace-nowrap"><PnlText value={t.netPnl} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                No live trades yet{liveStatus?.enabled ? " — waiting for the next qualifying entry window." : " — live trading is disarmed."}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
       {/* WebSocket shadow — streaming-quote rehearsal vs REST live executor */}
       {showLive && (
         <Card>
@@ -600,6 +472,134 @@ export default function KalshiDashboard() {
                 {wsStatus?.enabled
                   ? "Collecting — shadow entries appear as the next windows hit their entry timing."
                   : "Shadow paused."}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Live (real-money) trading */}
+      {showLive && (
+        <Card className={liveStatus?.enabled ? "border-destructive/40" : undefined}>
+          <CardHeader className="pb-2">
+            <div className="flex items-center gap-2">
+              <CardTitle className="text-sm font-medium">Live account — real money</CardTitle>
+              {liveStatus?.enabled ? (
+                <Badge variant="destructive" className="text-[10px]">ARMED</Badge>
+              ) : (
+                <Badge variant="secondary" className="text-[10px]">disarmed</Badge>
+              )}
+              {liveStatus?.killSwitch === "tripped" && (
+                <Badge variant="destructive" className="text-[10px]">KILL SWITCH</Badge>
+              )}
+            </div>
+            <CardDescription className="text-xs">
+              Production Kalshi account, tracked completely separately from the demo pipeline.
+              Arm/disarm from <Link href="/settings" className="underline">Settings</Link>.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div>
+                <p className="text-xs text-muted-foreground">Live balance</p>
+                <p className="text-base font-semibold font-mono">
+                  {liveBalanceDollars != null ? `$${liveBalanceDollars.toFixed(2)}` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Live P&L (settled)</p>
+                <p className="text-base font-semibold">
+                  <PnlText value={(liveStatus?.totalSettled ?? 0) > 0 ? liveStatus?.totalNetPnl : null} />
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Open / today</p>
+                <p className="text-base font-semibold font-mono">
+                  {liveStatus
+                    ? `${liveStatus.openTrades} · ${liveStatus.tradesToday}${liveStatus.maxTradesPerDay > 0 ? `/${liveStatus.maxTradesPerDay}` : ""}`
+                    : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Allowlisted strategies</p>
+                <p className="text-base font-semibold font-mono">{liveStatus?.armedStrategies.length ?? "—"}</p>
+              </div>
+            </div>
+
+            {liveSeries.length >= 2 && (
+              <div className="h-44">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={liveSeries} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+                    <CartesianGrid stroke={gridStroke} strokeOpacity={0.4} vertical={false} />
+                    <XAxis
+                      dataKey="time" type="number" scale="time" domain={["dataMin", "dataMax"]}
+                      tickFormatter={timeFmt} tick={tickStyle} axisLine={false} tickLine={false} minTickGap={60}
+                    />
+                    <YAxis
+                      tickFormatter={(v: number) => `$${v}`} tick={tickStyle}
+                      axisLine={false} tickLine={false} width={48}
+                    />
+                    <Tooltip
+                      contentStyle={chartTooltipStyle()}
+                      labelFormatter={(v) => timeFmt(Number(v))}
+                      formatter={(value, name) => [money(Number(value), true), String(name)]}
+                    />
+                    <Line
+                      type="monotone" dataKey="live" stroke={SERIES_COLORS[2]} strokeWidth={2}
+                      dot={false} activeDot={{ r: 4 }} name="Live P&L"
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {liveTrades.length > 0 ? (
+              <table className="w-full text-sm table-fixed sm:table-auto">
+                <thead>
+                  <tr className="text-[11px] text-muted-foreground border-b border-border">
+                    <th className="text-left font-medium py-2 pr-2">Trade</th>
+                    <th className="text-right font-medium px-2 py-2 w-16 sm:w-auto">Entry</th>
+                    <th className="text-right font-medium px-2 py-2 hidden sm:table-cell">Cost</th>
+                    <th className="text-left font-medium px-2 py-2 w-[4.5rem] sm:w-auto">Status</th>
+                    <th className="text-right font-medium pl-2 py-2 w-16 sm:w-auto">P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {liveTrades.slice(0, 12).map((t) => (
+                    <tr key={t.id} className="border-b border-border/50">
+                      <td className="py-2 pr-2 overflow-hidden">
+                        <p className="text-xs font-medium whitespace-nowrap">
+                          {(t.series || t.ticker).replace("KX", "").replace("15M", "")} {t.side.toUpperCase()}
+                          <span className="text-muted-foreground font-normal text-[10px]">
+                            {" "}
+                            {new Date(t.placedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase()}
+                          </span>
+                        </p>
+                        <p className="text-[10px] text-muted-foreground truncate">
+                          <span className="hidden sm:inline font-mono">{t.ticker} · </span>
+                          {t.candidateName}
+                        </p>
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
+                        {t.contracts > 0 ? `${t.contracts}@${(t.entryPrice * 100).toFixed(0)}¢` : "—"}
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs font-mono hidden sm:table-cell">{money(t.cost)}</td>
+                      <td className="px-2 py-2 text-xs">
+                        <Badge
+                          variant={t.status === "settled_won" ? "default" : t.status === "settled_lost" || t.status === "failed" ? "destructive" : "secondary"}
+                          className="text-[10px]"
+                        >
+                          {t.status.replace("settled_", "")}
+                        </Badge>
+                      </td>
+                      <td className="pl-2 py-2 text-right text-xs whitespace-nowrap"><PnlText value={t.netPnl} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                No live trades yet{liveStatus?.enabled ? " — waiting for the next qualifying entry window." : " — live trading is disarmed."}
               </p>
             )}
           </CardContent>
