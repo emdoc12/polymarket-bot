@@ -62,7 +62,7 @@ function ensureLiveDefaults() {
 // favorites (>80c) underperforming their demo win rates on real books, and
 // at those prices there is almost no cushion for being wrong. The demo
 // pipeline keeps trading the full band so the evidence keeps accumulating.
-function passesLivePriceGuards(price: number): boolean {
+export function passesLivePriceGuards(price: number): boolean {
   const minFillable = parseFloat(storage.getSetting("executor_min_fillable_price") || "0.30");
   if (Number.isFinite(minFillable) && price < minFillable) return false;
   const maxEntry = parseFloat(storage.getSetting("live_max_entry_price") || "0.80");

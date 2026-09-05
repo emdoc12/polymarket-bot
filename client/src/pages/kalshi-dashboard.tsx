@@ -1,6 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
 import { BrainCircuit, Trophy, Wallet, Activity } from "lucide-react";
@@ -72,6 +74,34 @@ type LiveTradeRow = {
   status: string;
   netPnl: number | null;
   placedAt: string;
+};
+
+type WsShadowStatus = {
+  enabled: boolean;
+  stream: {
+    connected: boolean;
+    host: string;
+    booksReady: number;
+    marketsSubscribed: string[];
+    resyncs: number;
+    disconnects: number;
+    lastError: string | null;
+  };
+  openShadows: number;
+};
+
+type WsCompare = {
+  summary: {
+    ws: { attempts: number; wouldFill: number; fillRate: number | null; settled: number; wins: number; netPnl: number };
+    rest: { attempts: number; filled: number; fillRate: number | null; settled: number; wins: number; netPnl: number };
+  };
+  rows: {
+    ticker: string;
+    side: string;
+    placedAt: string;
+    ws: { entryPrice: number; wouldFill: boolean; depth: number | null; status: string; netPnl: number | null };
+    rest: { entryPrice: number; status: string; filled: boolean; netPnl: number | null } | null;
+  }[];
 };
 
 type Candidate = {
@@ -177,6 +207,24 @@ export default function KalshiDashboard() {
     queryKey: ["/api/live/pnl-series"],
     refetchInterval: 30000,
     retry: false,
+  });
+  const { data: wsStatus } = useQuery<WsShadowStatus>({
+    queryKey: ["/api/ws-shadow/status"],
+    refetchInterval: 15000,
+    retry: false,
+  });
+  const { data: wsCompare } = useQuery<WsCompare>({
+    queryKey: ["/api/ws-shadow/compare"],
+    refetchInterval: 20000,
+    retry: false,
+  });
+  const wsToggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("POST", "/api/ws-shadow/toggle", { enabled });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ws-shadow/status"] });
+    },
   });
 
   const candidates = candidatesData?.candidates ?? [];
@@ -420,6 +468,138 @@ export default function KalshiDashboard() {
             ) : (
               <p className="text-xs text-muted-foreground">
                 No live trades yet{liveStatus?.enabled ? " — waiting for the next qualifying entry window." : " — live trading is disarmed."}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* WebSocket shadow — streaming-quote rehearsal vs REST live executor */}
+      {showLive && (
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <CardTitle className="text-sm font-medium">Streaming shadow (WebSocket) — rehearsal</CardTitle>
+              {wsStatus?.enabled ? (
+                <Badge variant="secondary" className="text-[10px]">recording</Badge>
+              ) : (
+                <Badge variant="outline" className="text-[10px]">off</Badge>
+              )}
+              {wsStatus?.enabled && (
+                wsStatus.stream.connected
+                  ? <Badge className="text-[10px] bg-emerald-600/20 text-emerald-400 border-transparent">stream connected</Badge>
+                  : <Badge variant="destructive" className="text-[10px]">stream down</Badge>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="ml-auto h-6 px-2 text-[11px]"
+                onClick={() => wsToggleMutation.mutate(!wsStatus?.enabled)}
+                disabled={wsToggleMutation.isPending}
+              >
+                {wsStatus?.enabled ? "Pause shadow" : "Start shadow"}
+              </Button>
+            </div>
+            <CardDescription className="text-xs">
+              Same account, strategies, sizing, and entry logic as the live executor — but priced off
+              streamed orderbook quotes, evaluated every second, and never sent to the exchange.
+              Head-to-head on identical windows: is 15s polling costing us fills?
+              {wsStatus?.enabled && !wsStatus.stream.connected && wsStatus.stream.lastError && (
+                <span className="text-destructive"> Stream error: {wsStatus.stream.lastError}</span>
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {wsCompare && wsCompare.summary.ws.attempts + wsCompare.summary.rest.attempts > 0 ? (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-md border border-border/60 p-3">
+                    <p className="text-[11px] text-muted-foreground mb-1">WebSocket (would-be)</p>
+                    <p className="text-sm font-mono">
+                      {wsCompare.summary.ws.wouldFill}/{wsCompare.summary.ws.attempts} fillable
+                      {wsCompare.summary.ws.fillRate != null && ` (${Math.round(wsCompare.summary.ws.fillRate * 100)}%)`}
+                    </p>
+                    <p className="text-xs mt-0.5">
+                      {wsCompare.summary.ws.settled > 0
+                        ? <>{wsCompare.summary.ws.wins}W/{wsCompare.summary.ws.settled - wsCompare.summary.ws.wins}L · <PnlText value={wsCompare.summary.ws.netPnl} /></>
+                        : <span className="text-muted-foreground">no settlements yet</span>}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-border/60 p-3">
+                    <p className="text-[11px] text-muted-foreground mb-1">REST polling (real)</p>
+                    <p className="text-sm font-mono">
+                      {wsCompare.summary.rest.filled}/{wsCompare.summary.rest.attempts} filled
+                      {wsCompare.summary.rest.fillRate != null && ` (${Math.round(wsCompare.summary.rest.fillRate * 100)}%)`}
+                    </p>
+                    <p className="text-xs mt-0.5">
+                      {wsCompare.summary.rest.settled > 0
+                        ? <>{wsCompare.summary.rest.wins}W/{wsCompare.summary.rest.settled - wsCompare.summary.rest.wins}L · <PnlText value={wsCompare.summary.rest.netPnl} /></>
+                        : <span className="text-muted-foreground">no settlements yet</span>}
+                    </p>
+                  </div>
+                </div>
+
+                {wsCompare.rows.length > 0 && (
+                  <table className="w-full text-sm table-fixed sm:table-auto">
+                    <thead>
+                      <tr className="text-[11px] text-muted-foreground border-b border-border">
+                        <th className="text-left font-medium py-2 pr-2">Window</th>
+                        <th className="text-right font-medium px-2 py-2">WS saw</th>
+                        <th className="text-left font-medium px-2 py-2 w-[4.2rem] sm:w-auto">WS</th>
+                        <th className="text-right font-medium px-2 py-2 hidden sm:table-cell">REST got</th>
+                        <th className="text-left font-medium px-2 py-2 w-[4.2rem] sm:w-auto">REST</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {wsCompare.rows.slice(0, 10).map((r) => (
+                        <tr key={`${r.ticker}-${r.placedAt}`} className="border-b border-border/50">
+                          <td className="py-2 pr-2 overflow-hidden">
+                            <p className="text-xs font-medium whitespace-nowrap">
+                              {r.ticker.replace("KX", "").replace("15M", "").split("-")[0]} {r.side.toUpperCase()}
+                              <span className="text-muted-foreground font-normal text-[10px]">
+                                {" "}
+                                {new Date(r.placedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase()}
+                              </span>
+                            </p>
+                            <p className="text-[10px] text-muted-foreground truncate font-mono">{r.ticker}</p>
+                          </td>
+                          <td className="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
+                            {(r.ws.entryPrice * 100).toFixed(0)}¢
+                          </td>
+                          <td className="px-2 py-2 text-xs">
+                            <Badge
+                              variant={r.ws.status === "settled_won" ? "default" : r.ws.status === "settled_lost" ? "destructive" : r.ws.wouldFill ? "secondary" : "outline"}
+                              className="text-[10px]"
+                            >
+                              {r.ws.status === "would_fill" ? "fillable" : r.ws.status === "no_depth" ? "no depth" : r.ws.status.replace("settled_", "")}
+                            </Badge>
+                          </td>
+                          <td className="px-2 py-2 text-right text-xs font-mono hidden sm:table-cell">
+                            {r.rest ? `${(r.rest.entryPrice * 100).toFixed(0)}¢` : "—"}
+                          </td>
+                          <td className="px-2 py-2 text-xs">
+                            {r.rest ? (
+                              <Badge
+                                variant={r.rest.status === "settled_won" ? "default" : r.rest.status === "settled_lost" || r.rest.status === "failed" ? "destructive" : "secondary"}
+                                className="text-[10px]"
+                              >
+                                {r.rest.status === "unfilled" ? "unfilled" : r.rest.status.replace("settled_", "")}
+                              </Badge>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">no entry</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {wsStatus?.enabled
+                  ? "Collecting — shadow entries appear as the next windows hit their entry timing."
+                  : "Shadow paused."}
               </p>
             )}
           </CardContent>

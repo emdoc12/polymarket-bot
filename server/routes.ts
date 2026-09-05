@@ -9,6 +9,7 @@ import { registerExecutorRoutes } from "./kalshi-executor";
 import { registerPerpsRoutes } from "./kalshi-perps";
 import { registerPerpExecutorRoutes } from "./kalshi-perp-executor";
 import { registerLiveExecutorRoutes } from "./kalshi-live-executor";
+import { registerWsShadowRoutes } from "./kalshi-ws-shadow";
 import { insertStrategySchema, insertWatchlistSchema, type Strategy, type TradeLog } from "@shared/schema";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -2493,6 +2494,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   registerPerpsRoutes(app);
   registerPerpExecutorRoutes(app);
   registerLiveExecutorRoutes(app);
+  registerWsShadowRoutes(app);
 
   app.get("/api/version", (_req, res) => {
     res.json({ version: APP_VERSION });

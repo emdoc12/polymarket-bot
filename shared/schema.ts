@@ -197,6 +197,32 @@ export const liveTrades = sqliteTable("live_trades", {
   settledAt: text("settled_at"),
 });
 
+// WebSocket shadow trades - would-be entries recorded by the streaming-quote
+// shadow executor. Same markets, strategies, and entry logic as the REST live
+// executor, but priced off the prod websocket book and NEVER sent to the
+// exchange. Exists to A/B the two transports on identical windows.
+export const wsShadowTrades = sqliteTable("ws_shadow_trades", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  candidateId: integer("candidate_id").references(() => candidateStrategies.id),
+  candidateName: text("candidate_name").notNull(),
+  ticker: text("ticker").notNull(),
+  series: text("series").notNull(),
+  side: text("side").notNull(),
+  entryPrice: real("entry_price").notNull(),   // price the stream showed at decision time
+  contracts: integer("contracts").notNull(),
+  cost: real("cost").notNull(),
+  fee: real("fee").notNull(),
+  depthAtEntry: real("depth_at_entry"),        // contracts resting at that price
+  wouldFill: integer("would_fill", { mode: "boolean" }).notNull(),
+  quoteAgeMs: integer("quote_age_ms"),         // staleness of the streamed quote when fired
+  status: text("status").notNull(),            // would_fill | no_depth | settled_won | settled_lost
+  result: text("result"),
+  netPnl: real("net_pnl"),                     // simulated, only for would_fill rows
+  placedAt: text("placed_at").notNull(),
+  marketCloseAt: text("market_close_at").notNull(),
+  settledAt: text("settled_at"),
+});
+
 // Bot settings
 export const botSettings = sqliteTable("bot_settings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -216,6 +242,7 @@ export const insertAgentLabRunSchema = createInsertSchema(agentLabRuns).omit({ i
 export const insertExecutorTradeSchema = createInsertSchema(executorTrades).omit({ id: true });
 export const insertPerpTradeSchema = createInsertSchema(perpTrades).omit({ id: true });
 export const insertLiveTradeSchema = createInsertSchema(liveTrades).omit({ id: true });
+export const insertWsShadowTradeSchema = createInsertSchema(wsShadowTrades).omit({ id: true });
 
 // Types
 export type CandidateStrategy = typeof candidateStrategies.$inferSelect;
@@ -228,6 +255,8 @@ export type PerpTrade = typeof perpTrades.$inferSelect;
 export type InsertPerpTrade = z.infer<typeof insertPerpTradeSchema>;
 export type LiveTrade = typeof liveTrades.$inferSelect;
 export type InsertLiveTrade = z.infer<typeof insertLiveTradeSchema>;
+export type WsShadowTrade = typeof wsShadowTrades.$inferSelect;
+export type InsertWsShadowTrade = z.infer<typeof insertWsShadowTradeSchema>;
 export type Strategy = typeof strategies.$inferSelect;
 export type BacktestRun = typeof backtestRuns.$inferSelect;
 export type InsertBacktestRun = z.infer<typeof insertBacktestRunSchema>;

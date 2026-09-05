@@ -9,6 +9,7 @@ import {
   type ExecutorTrade, type InsertExecutorTrade, executorTrades,
   type PerpTrade, type InsertPerpTrade, perpTrades,
   type LiveTrade, type InsertLiveTrade, liveTrades,
+  type WsShadowTrade, type InsertWsShadowTrade, wsShadowTrades,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
@@ -210,6 +211,32 @@ function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_live_trades_status ON live_trades(status);
   `);
 
+  // WebSocket shadow trades table (streaming-quote rehearsal, never real orders)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ws_shadow_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER REFERENCES candidate_strategies(id),
+      candidate_name TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      series TEXT NOT NULL,
+      side TEXT NOT NULL,
+      entry_price REAL NOT NULL,
+      contracts INTEGER NOT NULL,
+      cost REAL NOT NULL,
+      fee REAL NOT NULL,
+      depth_at_entry REAL,
+      would_fill INTEGER NOT NULL,
+      quote_age_ms INTEGER,
+      status TEXT NOT NULL,
+      result TEXT,
+      net_pnl REAL,
+      placed_at TEXT NOT NULL,
+      market_close_at TEXT NOT NULL,
+      settled_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ws_shadow_trades_status ON ws_shadow_trades(status);
+  `);
+
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS executor_trades (
@@ -324,6 +351,11 @@ export interface IStorage {
   getLiveTrades(limit?: number): LiveTrade[];
   getUnsettledLiveTrades(): LiveTrade[];
   hasLiveTradeFor(candidateId: number, ticker: string): boolean;
+  createWsShadowTrade(trade: InsertWsShadowTrade): WsShadowTrade;
+  updateWsShadowTrade(id: number, updates: Partial<WsShadowTrade>): void;
+  getWsShadowTrades(limit?: number): WsShadowTrade[];
+  getUnsettledWsShadowTrades(): WsShadowTrade[];
+  hasWsShadowTradeFor(candidateId: number, ticker: string): boolean;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -604,6 +636,30 @@ export class DatabaseStorage implements IStorage {
 
   hasLiveTradeFor(candidateId: number, ticker: string): boolean {
     return db.select().from(liveTrades).all()
+      .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
+  }
+
+  // WebSocket shadow trades (streaming-quote rehearsal)
+  createWsShadowTrade(trade: InsertWsShadowTrade): WsShadowTrade {
+    return db.insert(wsShadowTrades).values(trade).returning().get();
+  }
+
+  updateWsShadowTrade(id: number, updates: Partial<WsShadowTrade>): void {
+    db.update(wsShadowTrades).set(updates as any).where(eq(wsShadowTrades.id, id)).run();
+  }
+
+  getWsShadowTrades(limit = 100): WsShadowTrade[] {
+    return db.select().from(wsShadowTrades).orderBy(desc(wsShadowTrades.id)).limit(limit).all();
+  }
+
+  getUnsettledWsShadowTrades(): WsShadowTrade[] {
+    return db.select().from(wsShadowTrades).orderBy(desc(wsShadowTrades.id)).all()
+      .filter((trade) => trade.settledAt == null
+        && (trade.status === "would_fill" || trade.status === "no_depth"));
+  }
+
+  hasWsShadowTradeFor(candidateId: number, ticker: string): boolean {
+    return db.select().from(wsShadowTrades).all()
       .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
   }
 
