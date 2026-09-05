@@ -56,10 +56,12 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_poll_seconds")) storage.setSetting("live_poll_seconds", "15");
 }
 
+// Only actual fills count toward the daily cap - unfilled IOC orders and
+// failed placements cost nothing and shouldn't throttle later entries.
 function liveTradesToday() {
   const today = new Date().toISOString().slice(0, 10);
-  return storage.getLiveTrades(300)
-    .filter((t) => t.placedAt.startsWith(today) && t.status !== "failed").length;
+  return storage.getLiveTrades(500)
+    .filter((t) => t.placedAt.startsWith(today) && t.status !== "failed" && t.status !== "unfilled").length;
 }
 
 function liveTotalNetPnl() {
@@ -203,9 +205,11 @@ async function runLiveTick() {
   if (armed.length === 0) return;
 
   const maxOpen = Math.max(1, parseInt(storage.getSetting("live_max_open_trades") || "2", 10));
-  const maxPerDay = Math.max(1, parseInt(storage.getSetting("live_max_trades_per_day") || "20", 10));
+  // 0 = no daily cap. The rails that actually bound risk are max open
+  // positions, one-position-per-window, and the cumulative-loss kill switch.
+  const maxPerDay = Math.max(0, parseInt(storage.getSetting("live_max_trades_per_day") || "20", 10));
   if (storage.getUnsettledLiveTrades().length >= maxOpen) return;
-  if (liveTradesToday() >= maxPerDay) return;
+  if (maxPerDay > 0 && liveTradesToday() >= maxPerDay) return;
 
   const specs = armed.map((candidate) => ({ candidate, spec: clampSpec(JSON.parse(candidate.spec)) }));
   const seriesNeeded = [...new Set(specs.map((s) => s.spec.series))];
