@@ -144,6 +144,7 @@ const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk huntin
 
 Decision rules:
 - promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading. For binary specs, weigh the 'execution' fill rate heavily: a spec whose entries rarely fill on the live exchange earns nothing no matter how good its replays look, so prefer specs in price bands that actually fill.
+- REAL MONEY: candidates with a 'realMoney' field are trading the production account with actual dollars against real crowds (demo counterparties are seeded market makers, so demo can flatter a spec). Real-money evidence outranks demo evidence at equal sample size. If a strategy's real-money record diverges badly from its demo record (win rate collapsing, a price band losing consistently), say so explicitly in your commentary and steer the research focus toward specs that work where real money trades - the REAL-MONEY RESULTS digest in the context shows which entry bands are actually paying.
 - reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample (>= 10 combined train+holdout trades), or a duplicate-in-spirit of a rejected idea. Do NOT reject on tiny samples (fewer than 10 total trades) - that is noise, not evidence; keep_testing instead. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest ADEQUATELY-SAMPLED ones so evidence concentrates on the contenders.
 - keep_testing: genuinely promising but still under-sampled on live evidence, or any candidate with fewer than 10 total trades.
 The desk runs TWO strategy kinds, reviewed together:
@@ -187,8 +188,32 @@ function ensureAgentLabDefaults() {
 
 type FillStats = Map<number, { attempts: number; filled: number; unfilled: number; failed: number }>;
 
-function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats) {
+// Real-money (production account) execution record per candidate. Only
+// allowlisted promoted strategies ever trade live, so most candidates have
+// no entry here - but for those that do, this is the ground truth.
+type LiveExecStats = Map<number, { attempts: number; filled: number; unfilled: number; wins: number; losses: number; netPnl: number }>;
+
+function buildLiveExecStats(): LiveExecStats {
+  const map: LiveExecStats = new Map();
+  for (const t of storage.getLiveTrades(10000)) {
+    if (t.candidateId == null || t.status === "failed") continue;
+    const s = map.get(t.candidateId) ?? { attempts: 0, filled: 0, unfilled: 0, wins: 0, losses: 0, netPnl: 0 };
+    s.attempts += 1;
+    if (t.status === "unfilled") s.unfilled += 1;
+    else s.filled += 1;
+    if (t.netPnl != null) {
+      s.netPnl += t.netPnl;
+      if (t.netPnl > 0) s.wins += 1;
+      else s.losses += 1;
+    }
+    map.set(t.candidateId, s);
+  }
+  return map;
+}
+
+function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, liveStats?: LiveExecStats) {
   const fills = fillStats?.get(candidate.id);
+  const real = liveStats?.get(candidate.id);
   return {
     id: candidate.id,
     name: candidate.name,
@@ -205,12 +230,25 @@ function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats) 
     execution: fills
       ? { attempts: fills.attempts, filled: fills.filled, unfilled: fills.unfilled, fillRate: fills.attempts > 0 ? Number((fills.filled / fills.attempts).toFixed(2)) : null }
       : null,
+    // REAL-MONEY record from the production account ($2 stakes). Ground truth:
+    // when this disagrees with demo results, trust this.
+    realMoney: real
+      ? {
+          attempts: real.attempts,
+          filled: real.filled,
+          unfilled: real.unfilled,
+          fillRate: real.attempts > 0 ? Number((real.filled / real.attempts).toFixed(2)) : null,
+          wins: real.wins,
+          losses: real.losses,
+          netPnl: Number(real.netPnl.toFixed(2)),
+        }
+      : null,
     rationale: candidate.rationale,
     pmNotes: candidate.pmNotes,
   };
 }
 
-function buildResearchContext(fillStats: FillStats) {
+function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats) {
   const all = storage.getCandidateStrategies();
   const leaderboard = [...all]
     .filter((c) => c.holdoutNetPnl != null)
@@ -233,6 +271,30 @@ function buildResearchContext(fillStats: FillStats) {
     .sort()
     .map(([band, b]) => `${band}: ${b.filled}/${b.attempts} filled (${b.attempts > 0 ? Math.round((b.filled / b.attempts) * 100) : 0}%)`)
     .join(" | ");
+
+  // Real-money digest: the production account's record by entry price band.
+  // Small samples, but it is the only evidence measured against real crowds
+  // instead of demo's seeded books.
+  const realBands = new Map<string, { attempts: number; filled: number; wins: number; settled: number; netPnl: number }>();
+  let realSettled = 0; let realWins = 0; let realNet = 0;
+  for (const t of storage.getLiveTrades(10000)) {
+    if (t.status === "failed") continue;
+    const cents = Math.round(t.entryPrice * 100);
+    const band = cents < 50 ? "<50c" : cents < 60 ? "50-59c" : cents < 70 ? "60-69c" : cents < 80 ? "70-79c" : "80c+";
+    const b = realBands.get(band) ?? { attempts: 0, filled: 0, wins: 0, settled: 0, netPnl: 0 };
+    b.attempts += 1;
+    if (t.status !== "unfilled") b.filled += 1;
+    if (t.netPnl != null) {
+      b.settled += 1; b.netPnl += t.netPnl; realSettled += 1; realNet += t.netPnl;
+      if (t.netPnl > 0) { b.wins += 1; realWins += 1; }
+    }
+    realBands.set(band, b);
+  }
+  const realDigest = realSettled > 0
+    ? `${realWins}W/${realSettled - realWins}L net $${realNet.toFixed(2)} | by entry band: ` + [...realBands.entries()].sort()
+        .map(([band, b]) => `${band}: ${b.filled}/${b.attempts} filled, ${b.wins}W/${b.settled - b.wins}L, $${b.netPnl.toFixed(2)}`)
+        .join(" | ")
+    : "";
   const recentRuns = storage.getAgentLabRuns(3).map((run) => ({
     ranAt: run.ranAt,
     focus: run.focus,
@@ -248,8 +310,11 @@ function buildResearchContext(fillStats: FillStats) {
       fillDigest
         ? `LIVE EXECUTION REALITY (binary desk, real demo order attempts by entry price band): ${fillDigest}. Entries that don't fill earn nothing regardless of backtest edge - favor bands that actually fill.`
         : "",
+      realDigest
+        ? `REAL-MONEY RESULTS (production account, $2 stakes, only allowlisted promoted strategies trade there): ${realDigest}. This is measured against real crowds, not demo's seeded market makers - when real-money results disagree with demo results, trust real money and steer research accordingly. Note: production skips entries above ${Math.round(parseFloat(storage.getSetting("live_max_entry_price") || "0.80") * 100)}c.`
+        : "",
       `Leaderboard (top by holdout net P&L, $10 stakes; 'execution' shows real fill rates where available):`,
-      JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats)), null, 1),
+      JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats, liveStats)), null, 1),
       `Recent cycles:`,
       JSON.stringify(recentRuns, null, 1),
     ].join("\n"),
@@ -299,7 +364,8 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     const lookback = Math.min(150, Math.max(20, parseInt(storage.getSetting("agent_lab_markets_lookback") || "80", 10)));
 
     const fillStats = storage.getExecutorFillStats();
-    const { contextText } = buildResearchContext(fillStats);
+    const liveStats = buildLiveExecStats();
+    const { contextText } = buildResearchContext(fillStats, liveStats);
 
     // Self-regulating research intensity: when the testing pool is saturated,
     // stop proposing and let walk-forward + culls drain it; resume when there
@@ -536,7 +602,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
               contextText,
               `\nSpecialist notes from this cycle:\n${skepticNotes}`,
               `\nCandidates currently under review (decide each by candidateId):`,
-              JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats)), null, 1),
+              JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats, liveStats)), null, 1),
             ].join("\n"),
           }],
           output_config: { format: zodOutputFormat(PmOutputSchema) },
@@ -624,7 +690,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       commentary,
       candidates: testedResults.map((t) => {
         const updated = storage.getCandidateStrategies().find((c) => c.id === t.candidate.id);
-        return describeCandidate(updated ?? t.candidate, fillStats);
+        return describeCandidate(updated ?? t.candidate, fillStats, liveStats);
       }),
     };
   } catch (err) {
@@ -720,7 +786,8 @@ export function registerAgentLabRoutes(app: Express) {
   app.get("/api/agent-lab/candidates", (req, res) => {
     const status = req.query.status as string | undefined;
     const fillStats = storage.getExecutorFillStats();
-    const candidates = storage.getCandidateStrategies(status).map((c) => describeCandidate(c, fillStats));
+    const liveStats = buildLiveExecStats();
+    const candidates = storage.getCandidateStrategies(status).map((c) => describeCandidate(c, fillStats, liveStats));
     res.json({ candidates });
   });
 
