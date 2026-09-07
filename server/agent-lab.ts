@@ -140,11 +140,12 @@ const PERP_WORKER_ROLES: { key: string; system: string; buildTask: (context: str
   },
 ];
 
-const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk hunting for a real, fee-surviving edge on Kalshi crypto prediction markets. Your team of specialist agents proposes strategy specs; each gets a discovery backtest (train/holdout split at proposal time) and then accumulates WALK-FORWARD results: every cycle, surviving candidates are re-scored on markets that settled after they were proposed. Walk-forward ("live") evidence is the truth - it cannot be overfit.
+const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk hunting for a real, fee-surviving edge on Kalshi crypto prediction markets. THE DESK'S GOAL IS LIVE-ACCOUNT P&L: real dollars on the production exchange. Demo, discovery, and walk-forward are stages of evidence, not ends - a strategy only matters if it would earn on real production orderbooks. Prefer payoff shapes that survive being wrong: lower entry prices mean wins pay more relative to losses (at 75c a 71% win rate LOSES money; at 55c it prints), so favor "more winners AND smaller losers" geometry over high-win-rate premium bands with no cushion. Your team of specialist agents proposes strategy specs; each gets a discovery backtest (train/holdout split at proposal time) and then accumulates WALK-FORWARD results: every cycle, surviving candidates are re-scored on markets that settled after they were proposed. Walk-forward ("live") evidence is the truth - it cannot be overfit.
 
 Decision rules:
 - promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading. For binary specs, weigh the 'execution' fill rate heavily: a spec whose entries rarely fill on the live exchange earns nothing no matter how good its replays look, so prefer specs in price bands that actually fill.
 - REAL MONEY: candidates with a 'realMoney' field are trading the production account with actual dollars against real crowds (demo counterparties are seeded market makers, so demo can flatter a spec). Real-money evidence outranks demo evidence at equal sample size. If a strategy's real-money record diverges badly from its demo record (win rate collapsing, a price band losing consistently), say so explicitly in your commentary and steer the research focus toward specs that work where real money trades - the REAL-MONEY RESULTS digest in the context shows which entry bands are actually paying.
+- PROD AUDITION: candidates with a 'prodAudition' field have been rehearsed risk-free against REAL production orderbooks (streamed quotes, actual resting depth). It is the strongest available predictor of live transfer for candidates without real-money history: evidence quality ranks realMoney > prodAudition > demo execution > walk-forward > discovery. A spec that shines on demo but flunks its prod audition should not be trusted with real money; say so and prefer audition-proven specs when reasoning about what belongs closest to the live account.
 - reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample (>= 10 combined train+holdout trades), or a duplicate-in-spirit of a rejected idea. Do NOT reject on tiny samples (fewer than 10 total trades) - that is noise, not evidence; keep_testing instead. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest ADEQUATELY-SAMPLED ones so evidence concentrates on the contenders.
 - keep_testing: genuinely promising but still under-sampled on live evidence, or any candidate with fewer than 10 total trades.
 The desk runs TWO strategy kinds, reviewed together:
@@ -193,6 +194,28 @@ type FillStats = Map<number, { attempts: number; filled: number; unfilled: numbe
 // no entry here - but for those that do, this is the ground truth.
 type LiveExecStats = Map<number, { attempts: number; filled: number; unfilled: number; wins: number; losses: number; netPnl: number }>;
 
+// Prod-audition record per candidate: would-be results on REAL production
+// orderbooks from the streaming shadow. Covers every promoted strategy, not
+// just the live allowlist - the bridge between demo evidence and live money.
+type AuditionStats = Map<number, { attempts: number; fillable: number; settled: number; wins: number; netPnl: number }>;
+
+function buildAuditionStats(): AuditionStats {
+  const map: AuditionStats = new Map();
+  for (const t of storage.getWsShadowTrades(10000)) {
+    if (t.candidateId == null) continue;
+    const s = map.get(t.candidateId) ?? { attempts: 0, fillable: 0, settled: 0, wins: 0, netPnl: 0 };
+    s.attempts += 1;
+    if (t.wouldFill) s.fillable += 1;
+    if (t.netPnl != null) {
+      s.settled += 1;
+      s.netPnl += t.netPnl;
+      if (t.netPnl > 0) s.wins += 1;
+    }
+    map.set(t.candidateId, s);
+  }
+  return map;
+}
+
 function buildLiveExecStats(): LiveExecStats {
   const map: LiveExecStats = new Map();
   for (const t of storage.getLiveTrades(10000)) {
@@ -211,9 +234,10 @@ function buildLiveExecStats(): LiveExecStats {
   return map;
 }
 
-function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, liveStats?: LiveExecStats) {
+function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, liveStats?: LiveExecStats, auditionStats?: AuditionStats) {
   const fills = fillStats?.get(candidate.id);
   const real = liveStats?.get(candidate.id);
+  const audition = auditionStats?.get(candidate.id);
   return {
     id: candidate.id,
     name: candidate.name,
@@ -243,12 +267,25 @@ function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, 
           netPnl: Number(real.netPnl.toFixed(2)),
         }
       : null,
+    // Would-be record on REAL production orderbooks (streaming shadow).
+    // The best predictor of live transfer for candidates without a
+    // real-money history - measured on the venue live money actually trades.
+    prodAudition: audition
+      ? {
+          attempts: audition.attempts,
+          fillable: audition.fillable,
+          settled: audition.settled,
+          wins: audition.wins,
+          losses: audition.settled - audition.wins,
+          netPnl: Number(audition.netPnl.toFixed(2)),
+        }
+      : null,
     rationale: candidate.rationale,
     pmNotes: candidate.pmNotes,
   };
 }
 
-function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats) {
+function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats, auditionStats: AuditionStats) {
   const all = storage.getCandidateStrategies();
   const leaderboard = [...all]
     .filter((c) => c.holdoutNetPnl != null)
@@ -313,12 +350,28 @@ function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats) {
       realDigest
         ? `REAL-MONEY RESULTS (production account, $2 stakes, only allowlisted promoted strategies trade there): ${realDigest}. This is measured against real crowds, not demo's seeded market makers - when real-money results disagree with demo results, trust real money and steer research accordingly. Note: production skips entries above ${Math.round(parseFloat(storage.getSetting("live_max_entry_price") || "0.80") * 100)}c.`
         : "",
+      buildAuditionDigest(auditionStats),
       `Leaderboard (top by holdout net P&L, $10 stakes; 'execution' shows real fill rates where available):`,
-      JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats, liveStats)), null, 1),
+      JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
       `Recent cycles:`,
       JSON.stringify(recentRuns, null, 1),
     ].join("\n"),
   };
+}
+
+function buildAuditionDigest(auditionStats: AuditionStats): string {
+  const named: { name: string; s: { settled: number; wins: number; netPnl: number } }[] = [];
+  for (const [candidateId, s] of auditionStats) {
+    if (s.settled < 5) continue;
+    const candidate = storage.getCandidateStrategies().find((c) => c.id === candidateId);
+    if (candidate) named.push({ name: candidate.name, s });
+  }
+  if (named.length === 0) return "";
+  named.sort((a, b) => b.s.netPnl - a.s.netPnl);
+  const line = (e: typeof named[number]) => `${e.name}: ${e.s.wins}W/${e.s.settled - e.s.wins}L $${e.s.netPnl.toFixed(2)}`;
+  const top = named.slice(0, 5).map(line).join(" | ");
+  const bottom = named.length > 5 ? ` WORST: ${named.slice(-3).map(line).join(" | ")}` : "";
+  return `PROD AUDITION (every promoted strategy rehearsed risk-free on REAL production orderbooks via streaming quotes; 'prodAudition' per candidate): BEST: ${top}.${bottom} This is the venue live money trades on - weigh it above demo execution when samples allow.`;
 }
 
 type CycleResult = {
@@ -365,7 +418,8 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
 
     const fillStats = storage.getExecutorFillStats();
     const liveStats = buildLiveExecStats();
-    const { contextText } = buildResearchContext(fillStats, liveStats);
+    const auditionStats = buildAuditionStats();
+    const { contextText } = buildResearchContext(fillStats, liveStats, auditionStats);
 
     // Self-regulating research intensity: when the testing pool is saturated,
     // stop proposing and let walk-forward + culls drain it; resume when there
@@ -602,7 +656,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
               contextText,
               `\nSpecialist notes from this cycle:\n${skepticNotes}`,
               `\nCandidates currently under review (decide each by candidateId):`,
-              JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats, liveStats)), null, 1),
+              JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
             ].join("\n"),
           }],
           output_config: { format: zodOutputFormat(PmOutputSchema) },
@@ -690,7 +744,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       commentary,
       candidates: testedResults.map((t) => {
         const updated = storage.getCandidateStrategies().find((c) => c.id === t.candidate.id);
-        return describeCandidate(updated ?? t.candidate, fillStats, liveStats);
+        return describeCandidate(updated ?? t.candidate, fillStats, liveStats, auditionStats);
       }),
     };
   } catch (err) {
@@ -787,7 +841,8 @@ export function registerAgentLabRoutes(app: Express) {
     const status = req.query.status as string | undefined;
     const fillStats = storage.getExecutorFillStats();
     const liveStats = buildLiveExecStats();
-    const candidates = storage.getCandidateStrategies(status).map((c) => describeCandidate(c, fillStats, liveStats));
+    const auditionStats = buildAuditionStats();
+    const candidates = storage.getCandidateStrategies(status).map((c) => describeCandidate(c, fillStats, liveStats, auditionStats));
     res.json({ candidates });
   });
 

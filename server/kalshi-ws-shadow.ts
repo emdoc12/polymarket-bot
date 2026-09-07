@@ -92,7 +92,7 @@ async function settleShadowTrades() {
   }
 }
 
-async function tryShadowEntry(candidate: CandidateStrategy, spec: KalshiStrategySpec, market: KalshiMarket, nowMs: number) {
+async function tryShadowEntry(candidate: CandidateStrategy, spec: KalshiStrategySpec, market: KalshiMarket, nowMs: number, audition: boolean) {
   const quote = kalshiProdStream.getQuote(market.ticker);
   if (!quote || quote.yesAsk == null || quote.yesBid == null) return;
 
@@ -129,6 +129,7 @@ async function tryShadowEntry(candidate: CandidateStrategy, spec: KalshiStrategy
     depthAtEntry: depth,
     wouldFill,
     quoteAgeMs: quote.ageMs,
+    audition,
     status: wouldFill ? "would_fill" : "no_depth",
     result: null,
     netPnl: null,
@@ -149,14 +150,22 @@ async function runShadowTick() {
     return;
   }
 
-  const armed = getLiveArmedStrategies();
-  if (armed.length === 0) {
+  // Two tiers share the stream:
+  //  - MIRROR (audition=0): the allowlisted strategies under the live
+  //    executor's exact shared rails - the strict A/B vs REST polling.
+  //  - AUDITION (audition=1): EVERY other promoted binary strategy, each
+  //    earning a would-be record on real prod books before any real money.
+  //    Free trades, so no shared caps - only one entry per candidate per
+  //    window and the live price guards (so the record predicts live rules).
+  const armedIds = new Set(getLiveArmedStrategies().map((c) => c.id));
+  const promoted = storage.getCandidateStrategies("promoted").filter((c) => c.kind !== "perp");
+  if (promoted.length === 0) {
     kalshiProdStream.setMarkets([]);
     return;
   }
   kalshiProdStream.start();
 
-  const specs = armed.map((candidate) => ({ candidate, spec: clampSpec(JSON.parse(candidate.spec)) }));
+  const specs = promoted.map((candidate) => ({ candidate, spec: clampSpec(JSON.parse(candidate.spec)) }));
   const seriesNeeded = [...new Set(specs.map((s) => s.spec.series))];
   const nowMs = Date.now();
 
@@ -176,17 +185,36 @@ async function runShadowTick() {
       if (spec.series !== active.series) continue;
       if (secondsToClose > spec.entrySecondsBeforeClose) continue;
       if (secondsToClose < spec.entrySecondsBeforeClose - ENTRY_TOLERANCE_SEC) continue;
+      // Trend rules need candle history over REST - evaluate those at a
+      // gentler cadence (the 10s candle cache absorbs the rest).
+      if (spec.sideRule.startsWith("trend") && !dueForEval(candidate.id, active.market.ticker, 10_000)) continue;
       if (storage.hasWsShadowTradeFor(candidate.id, active.market.ticker)) continue;
-      // Mirror the live executor's rails exactly so the comparison is fair.
-      if (storage.getWsShadowTrades(50).some((t) => t.ticker === active.market.ticker)) continue;
-      if (storage.getUnsettledWsShadowTrades().filter((t) => t.status === "would_fill").length >= maxOpen) break;
+
+      const isMirror = armedIds.has(candidate.id);
+      if (isMirror) {
+        // Mirror the live executor's shared rails exactly so the A/B is fair.
+        if (storage.getWsShadowTrades(100).some((t) => !t.audition && t.ticker === active.market.ticker)) continue;
+        if (storage.getUnsettledWsShadowTrades().filter((t) => !t.audition && t.status === "would_fill").length >= maxOpen) continue;
+      }
       try {
-        await tryShadowEntry(candidate, spec, active.market, nowMs);
+        await tryShadowEntry(candidate, spec, active.market, nowMs, !isMirror);
       } catch (err) {
         console.error(`${new Date().toISOString()} [error] [ws-shadow] entry failed for candidate ${candidate.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
+}
+
+// Per-candidate/window evaluation throttle for REST-hungry rules.
+const lastEvalAt = new Map<string, number>();
+function dueForEval(candidateId: number, ticker: string, intervalMs: number): boolean {
+  const key = `${candidateId}:${ticker}`;
+  const last = lastEvalAt.get(key) ?? 0;
+  const now = Date.now();
+  if (now - last < intervalMs) return false;
+  lastEvalAt.set(key, now);
+  if (lastEvalAt.size > 2000) lastEvalAt.clear();
+  return true;
 }
 
 let shadowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -205,7 +233,9 @@ function scheduleShadow() {
 // one market ticker; both executors saw the same books and windows, so any
 // divergence is transport.
 function buildComparison() {
-  const shadow = storage.getWsShadowTrades(500);
+  // Only MIRROR rows belong in the A/B - audition strategies enter windows
+  // the REST executor never attempts, which would poison the summary.
+  const shadow = storage.getWsShadowTrades(1000).filter((t) => !t.audition);
   // Fair summary: only count REST trades from the period the shadow was also
   // watching (rows come newest-first, so the oldest shadow row is last).
   const shadowStart = shadow.length > 0 ? shadow[shadow.length - 1].placedAt : null;
@@ -261,6 +291,30 @@ function buildComparison() {
   };
 }
 
+// Prod-audition leaderboard: every promoted strategy's would-be record on
+// REAL production orderbooks. This is the evidence that eventually earns a
+// strategy real money - it measures the venue live actually trades on.
+export function buildAuditionBoard() {
+  const byCandidate = new Map<number, {
+    candidateId: number; name: string;
+    attempts: number; fillable: number; settled: number; wins: number; netPnl: number;
+  }>();
+  for (const t of storage.getWsShadowTrades(10000)) {
+    if (t.candidateId == null) continue;
+    const entry = byCandidate.get(t.candidateId)
+      ?? { candidateId: t.candidateId, name: t.candidateName, attempts: 0, fillable: 0, settled: 0, wins: 0, netPnl: 0 };
+    entry.attempts += 1;
+    if (t.wouldFill) entry.fillable += 1;
+    if (t.netPnl != null) {
+      entry.settled += 1;
+      entry.netPnl += t.netPnl;
+      if (t.netPnl > 0) entry.wins += 1;
+    }
+    byCandidate.set(t.candidateId, entry);
+  }
+  return [...byCandidate.values()].sort((a, b) => b.netPnl - a.netPnl);
+}
+
 export function registerWsShadowRoutes(app: Express) {
   ensureShadowDefaults();
   if (!shadowTimer) scheduleShadow();
@@ -280,6 +334,10 @@ export function registerWsShadowRoutes(app: Express) {
 
   app.get("/api/ws-shadow/compare", (_req, res) => {
     res.json(buildComparison());
+  });
+
+  app.get("/api/ws-shadow/audition", (_req, res) => {
+    res.json({ board: buildAuditionBoard() });
   });
 
   // Restart the experiment: wipe the shadow ledger (e.g. after a book-logic

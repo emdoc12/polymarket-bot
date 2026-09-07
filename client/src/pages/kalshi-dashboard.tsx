@@ -104,6 +104,16 @@ type WsCompare = {
   }[];
 };
 
+type AuditionRow = {
+  candidateId: number;
+  name: string;
+  attempts: number;
+  fillable: number;
+  settled: number;
+  wins: number;
+  netPnl: number;
+};
+
 type Candidate = {
   id: number;
   name: string;
@@ -216,6 +226,11 @@ export default function KalshiDashboard() {
   const { data: wsCompare } = useQuery<WsCompare>({
     queryKey: ["/api/ws-shadow/compare"],
     refetchInterval: 20000,
+    retry: false,
+  });
+  const { data: auditionData } = useQuery<{ board: AuditionRow[] }>({
+    queryKey: ["/api/ws-shadow/audition"],
+    refetchInterval: 30000,
     retry: false,
   });
   const wsToggleMutation = useMutation({
@@ -475,6 +490,40 @@ export default function KalshiDashboard() {
                   ? "Collecting — shadow entries appear as the next windows hit their entry timing."
                   : "Shadow paused."}
               </p>
+            )}
+
+            {(auditionData?.board?.length ?? 0) > 0 && (
+              <div className="border-t pt-3">
+                <p className="text-xs font-medium mb-0.5">Prod audition — earning a shot at real money</p>
+                <p className="text-[11px] text-muted-foreground mb-2">
+                  Every promoted strategy rehearses risk-free on the real production books. A positive
+                  record over 15+ settled auditions qualifies for the live allowlist — ahead of any demo record.
+                </p>
+                <table className="w-full text-sm table-fixed sm:table-auto">
+                  <thead>
+                    <tr className="text-[11px] text-muted-foreground border-b border-border">
+                      <th className="text-left font-medium py-1.5 pr-2">Strategy</th>
+                      <th className="text-right font-medium px-2 py-1.5 w-16 sm:w-auto">Fillable</th>
+                      <th className="text-right font-medium px-2 py-1.5 w-14 sm:w-auto">W/L</th>
+                      <th className="text-right font-medium pl-2 py-1.5 w-16 sm:w-auto">Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditionData!.board.slice(0, 6).map((row) => (
+                      <tr key={row.candidateId} className="border-b border-border/40">
+                        <td className="py-1.5 pr-2 overflow-hidden">
+                          <p className="text-[11px] truncate">{row.name}</p>
+                        </td>
+                        <td className="px-2 py-1.5 text-right text-xs font-mono">{row.fillable}/{row.attempts}</td>
+                        <td className="px-2 py-1.5 text-right text-xs font-mono text-muted-foreground">
+                          {row.settled > 0 ? `${row.wins}/${row.settled - row.wins}` : "—"}
+                        </td>
+                        <td className="pl-2 py-1.5 text-right text-xs"><PnlText value={row.settled > 0 ? row.netPnl : null} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </CardContent>
         </Card>

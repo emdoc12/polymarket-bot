@@ -113,6 +113,11 @@ export async function getKalshiOrderbook(ticker: string, depth = 10) {
   return kalshiFetch(`/markets/${encodeURIComponent(ticker)}/orderbook`, { depth: String(depth) });
 }
 
+// Short-TTL cache: many strategies evaluating the same market within the same
+// few seconds (e.g. the prod-audition shadow) share one fetch instead of
+// stampeding the rate-limited REST API. Keyed on a 10s end-time bucket.
+const candleCache = new Map<string, { at: number; candles: KalshiCandle[] }>();
+
 export async function getKalshiCandlesticks(
   seriesTicker: string,
   marketTicker: string,
@@ -120,6 +125,10 @@ export async function getKalshiCandlesticks(
   endTs: number,
   periodIntervalMinutes = 1,
 ) {
+  const key = `${seriesTicker}|${marketTicker}|${periodIntervalMinutes}|${Math.floor(startTs / 60)}|${Math.floor(endTs / 10)}`;
+  const cached = candleCache.get(key);
+  if (cached && Date.now() - cached.at < 10_000) return cached.candles;
+
   const data = await kalshiFetch(
     `/series/${encodeURIComponent(seriesTicker)}/markets/${encodeURIComponent(marketTicker)}/candlesticks`,
     {
@@ -128,7 +137,10 @@ export async function getKalshiCandlesticks(
       period_interval: String(periodIntervalMinutes),
     },
   ) as { candlesticks?: KalshiCandle[] };
-  return Array.isArray(data.candlesticks) ? data.candlesticks : [];
+  const candles = Array.isArray(data.candlesticks) ? data.candlesticks : [];
+  if (candleCache.size > 200) candleCache.clear();
+  candleCache.set(key, { at: Date.now(), candles });
+  return candles;
 }
 
 // ---------------------------------------------------------------------------

@@ -215,6 +215,10 @@ export const wsShadowTrades = sqliteTable("ws_shadow_trades", {
   depthAtEntry: real("depth_at_entry"),        // contracts resting at that price
   wouldFill: integer("would_fill", { mode: "boolean" }).notNull(),
   quoteAgeMs: integer("quote_age_ms"),         // staleness of the streamed quote when fired
+  // 0 = allowlist mirror row (strict A/B vs the REST live executor, shared
+  // rails); 1 = prod audition row (any promoted strategy rehearsing on real
+  // books to earn a prod record before real money).
+  audition: integer("audition", { mode: "boolean" }).notNull().default(false),
   status: text("status").notNull(),            // would_fill | no_depth | settled_won | settled_lost
   result: text("result"),
   netPnl: real("net_pnl"),                     // simulated, only for would_fill rows

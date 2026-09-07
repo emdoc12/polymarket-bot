@@ -55,6 +55,7 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_kill_switch")) storage.setSetting("live_kill_switch", "ok");
   if (!storage.getSetting("live_poll_seconds")) storage.setSetting("live_poll_seconds", "15");
   if (!storage.getSetting("live_max_entry_price")) storage.setSetting("live_max_entry_price", "0.80");
+  if (!storage.getSetting("live_min_audition_trades")) storage.setSetting("live_min_audition_trades", "15");
 }
 
 // Live-only price guards. The floor mirrors the demo executor's fillability
@@ -84,16 +85,55 @@ function liveTotalNetPnl() {
     .reduce((sum, t) => sum + (t.netPnl ?? 0), 0);
 }
 
-// The allowlist is earned, not configured: only promoted binary strategies
-// with a real, positive demo execution record qualify, ranked by demo P&L.
+// The allowlist is earned, not configured - and it is earned on the venue
+// live money actually trades. Evidence hierarchy per promoted binary spec:
+//
+//   1. REAL live record: >= 25 settled live trades below -$10 net benches a
+//      strategy outright (only a positive prod audition can bring it back).
+//   2. PROD AUDITION: >= live_min_audition_trades settled would-fill shadow
+//      trades on real production orderbooks with positive net P&L qualifies,
+//      and audition-qualified specs always outrank demo-only ones.
+//   3. DEMO record (transitional fallback while audition data accumulates):
+//      >= live_min_demo_trades settled demo fills with positive net P&L.
 export function getLiveArmedStrategies(): CandidateStrategy[] {
   const topN = Math.max(1, parseInt(storage.getSetting("live_top_n") || "3", 10));
   const minDemo = Math.max(1, parseInt(storage.getSetting("live_min_demo_trades") || "20", 10));
+  const minAudition = Math.max(1, parseInt(storage.getSetting("live_min_audition_trades") || "15", 10));
+
+  const auditionByCandidate = new Map<number, { settled: number; netPnl: number }>();
+  for (const t of storage.getWsShadowTrades(10000)) {
+    if (t.candidateId == null || t.netPnl == null) continue;
+    const s = auditionByCandidate.get(t.candidateId) ?? { settled: 0, netPnl: 0 };
+    s.settled += 1;
+    s.netPnl += t.netPnl;
+    auditionByCandidate.set(t.candidateId, s);
+  }
+  const liveByCandidate = new Map<number, { settled: number; netPnl: number }>();
+  for (const t of storage.getLiveTrades(10000)) {
+    if (t.candidateId == null || t.netPnl == null) continue;
+    const s = liveByCandidate.get(t.candidateId) ?? { settled: 0, netPnl: 0 };
+    s.settled += 1;
+    s.netPnl += t.netPnl;
+    liveByCandidate.set(t.candidateId, s);
+  }
+
   return storage.getCandidateStrategies("promoted")
     .filter((c) => c.kind !== "perp")
-    .filter((c) => (c.demoTrades ?? 0) >= minDemo && (c.demoNetPnl ?? 0) > 0)
-    .sort((a, b) => (b.demoNetPnl ?? 0) - (a.demoNetPnl ?? 0))
-    .slice(0, topN);
+    .map((c) => {
+      const audition = auditionByCandidate.get(c.id);
+      const live = liveByCandidate.get(c.id);
+      const auditionOk = audition != null && audition.settled >= minAudition && audition.netPnl > 0;
+      const demoOk = (c.demoTrades ?? 0) >= minDemo && (c.demoNetPnl ?? 0) > 0;
+      const liveBenched = live != null && live.settled >= 25 && live.netPnl < -10;
+      const eligible = (auditionOk || demoOk) && (!liveBenched || auditionOk);
+      // Audition-qualified specs sort above demo-only ones regardless of size.
+      const score = auditionOk ? 1_000_000 + audition!.netPnl : (c.demoNetPnl ?? 0);
+      return { c, eligible, score };
+    })
+    .filter((entry) => entry.eligible)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topN)
+    .map((entry) => entry.c);
 }
 
 function tripKillSwitch(reason: string) {

@@ -227,6 +227,7 @@ function runMigrations() {
       depth_at_entry REAL,
       would_fill INTEGER NOT NULL,
       quote_age_ms INTEGER,
+      audition INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL,
       result TEXT,
       net_pnl REAL,
@@ -236,6 +237,11 @@ function runMigrations() {
     );
     CREATE INDEX IF NOT EXISTS idx_ws_shadow_trades_status ON ws_shadow_trades(status);
   `);
+
+  // audition column added after ws_shadow_trades first shipped.
+  const wsShadowCols = sqlite.pragma("table_info(ws_shadow_trades)") as { name: string }[];
+  const wsShadowColNames = new Set(wsShadowCols.map((c) => c.name));
+  if (!wsShadowColNames.has("audition")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN audition INTEGER NOT NULL DEFAULT 0;");
 
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
