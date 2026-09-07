@@ -249,10 +249,12 @@ export default function KalshiDashboard() {
   const realPnl = realStats.reduce((s, t) => s + t.pnl, 0);
   const rehearsalPnl = cumRehearsal;
 
-  // Top strategies by settled demo P&L; colors assigned once, in rank order at
-  // first paint, then follow the strategy name.
+  // Top strategies by REAL-fill demo P&L only. Dry-run rehearsal money is
+  // excluded: the fake-fill era (pre Aug 14) minted large totals for
+  // strategies whose bands never fill on real books, and ranking on the
+  // mixed total kept those phantoms on the leaderboard forever.
   const byStrategy = new Map<string, number>();
-  for (const t of settled) {
+  for (const t of realStats) {
     byStrategy.set(t.name, (byStrategy.get(t.name) ?? 0) + t.pnl);
   }
   const topStrategies = [...byStrategy.entries()]
@@ -261,9 +263,9 @@ export default function KalshiDashboard() {
     .slice(0, 4)
     .map((entry, i) => ({ ...entry, color: SERIES_COLORS[i] }));
 
-  // Build cumulative per-strategy points keyed by time.
+  // Build cumulative per-strategy points keyed by time (real fills only).
   const cumByStrategy = new Map<string, number>();
-  const perStrategyPoints = settled
+  const perStrategyPoints = realStats
     .filter((t) => topStrategies.some((s) => s.name === t.name))
     .map((point) => {
       const next = (cumByStrategy.get(point.name) ?? 0) + point.pnl;
@@ -659,7 +661,7 @@ export default function KalshiDashboard() {
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium">Top strategies — cumulative P&L</CardTitle>
           <CardDescription className="text-xs">
-            Up to four strategies with the largest settled demo P&L.
+            Up to four strategies with the largest real-fill demo P&L (rehearsal/dry-run money excluded).
           </CardDescription>
         </CardHeader>
         <CardContent>
