@@ -59,6 +59,7 @@ type LiveStatus = {
   tradesToday: number;
   maxTradesPerDay: number;
   totalSettled: number;
+  totalWins: number;
   totalNetPnl: number;
 };
 
@@ -410,7 +411,7 @@ export default function KalshiDashboard() {
                     </p>
                     <p className="text-xs mt-0.5">
                       {wsCompare.summary.ws.settled > 0
-                        ? <>{wsCompare.summary.ws.wins}W/{wsCompare.summary.ws.settled - wsCompare.summary.ws.wins}L · <PnlText value={wsCompare.summary.ws.netPnl} /></>
+                        ? <>{wsCompare.summary.ws.wins}W/{wsCompare.summary.ws.settled - wsCompare.summary.ws.wins}L ({Math.round((wsCompare.summary.ws.wins / wsCompare.summary.ws.settled) * 100)}% win) · <PnlText value={wsCompare.summary.ws.netPnl} /></>
                         : <span className="text-muted-foreground">no settlements yet</span>}
                     </p>
                   </div>
@@ -422,7 +423,7 @@ export default function KalshiDashboard() {
                     </p>
                     <p className="text-xs mt-0.5">
                       {wsCompare.summary.rest.settled > 0
-                        ? <>{wsCompare.summary.rest.wins}W/{wsCompare.summary.rest.settled - wsCompare.summary.rest.wins}L · <PnlText value={wsCompare.summary.rest.netPnl} /></>
+                        ? <>{wsCompare.summary.rest.wins}W/{wsCompare.summary.rest.settled - wsCompare.summary.rest.wins}L ({Math.round((wsCompare.summary.rest.wins / wsCompare.summary.rest.settled) * 100)}% win) · <PnlText value={wsCompare.summary.rest.netPnl} /></>
                         : <span className="text-muted-foreground">no settlements yet</span>}
                     </p>
                   </div>
@@ -562,6 +563,11 @@ export default function KalshiDashboard() {
                 <p className="text-base font-semibold">
                   <PnlText value={(liveStatus?.totalSettled ?? 0) > 0 ? liveStatus?.totalNetPnl : null} />
                 </p>
+                {(liveStatus?.totalSettled ?? 0) > 0 && liveStatus?.totalWins != null && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {Math.round((liveStatus.totalWins / liveStatus.totalSettled) * 100)}% win · {liveStatus.totalWins}W/{liveStatus.totalSettled - liveStatus.totalWins}L
+                  </p>
+                )}
               </div>
               <div>
                 <p className="text-xs text-muted-foreground">Open / today</p>

@@ -365,6 +365,7 @@ export function registerLiveExecutorRoutes(app: Express) {
       maxTotalLoss: parseFloat(storage.getSetting("live_max_total_loss") || "25"),
       maxEntryPrice: parseFloat(storage.getSetting("live_max_entry_price") || "0.80"),
       totalSettled: settled.length,
+      totalWins: settled.filter((t) => (t.netPnl ?? 0) > 0).length,
       totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),
     });
   });
