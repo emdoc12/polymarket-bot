@@ -46,6 +46,8 @@ const SpecProposalSchema = z.object({
   maxEntryPrice: z.number(),
   trendLookbackMinutes: z.number(),
   minSignal: z.number(),
+  minHourEt: z.number(),
+  maxHourEt: z.number(),
   rationale: z.string(),
 });
 
@@ -88,7 +90,8 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - minEntryPrice / maxEntryPrice: 0.03-0.97 (only enter if the executable price of the chosen side is inside this band)
 - trendLookbackMinutes: 1-10 (trend rules only)
 - minSignal: 0-0.45 (minimum |price-0.5| for momentum/fade; minimum |price move| for trend rules; 0 = no filter)
-Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, and signal thresholds.
+- minHourEt / maxHourEt: 0-24, entries allowed only in this ET-hour window (0 and 24 = all day; minHourEt > maxHourEt wraps overnight). Fully backtested like every other field. Live forensics show strong time-of-day regime structure (overnight 0-8 ET underperforms daytime badly), so hour-banded variants of proven specs are fertile ground - but let the backtests decide, not the anecdote.
+Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, signal thresholds, and trading hours.
 
 Output discipline: keep every rationale, note, and reason to one or two sentences. Structured output that exceeds the token limit is truncated and the whole response is lost - compact and complete always beats detailed and cut off.`;
 
@@ -351,12 +354,52 @@ function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats, au
         ? `REAL-MONEY RESULTS (production account, $2 stakes, only allowlisted promoted strategies trade there): ${realDigest}. This is measured against real crowds, not demo's seeded market makers - when real-money results disagree with demo results, trust real money and steer research accordingly. Note: production skips entries above ${Math.round(parseFloat(storage.getSetting("live_max_entry_price") || "0.80") * 100)}c.`
         : "",
       buildAuditionDigest(auditionStats),
+      buildForensicsDigest(),
       `Leaderboard (top by holdout net P&L, $10 stakes; 'execution' shows real fill rates where available):`,
       JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
       `Recent cycles:`,
       JSON.stringify(recentRuns, null, 1),
     ].join("\n"),
   };
+}
+
+// Win/loss forensics on the real-money ledger: WHERE do wins and losses
+// cluster? Gives the PM and workers the raw pattern material (time of day,
+// direction, streakiness) to tune specs toward more winners and fewer of the
+// trades that lose.
+function buildForensicsDigest(): string {
+  const settled = storage.getLiveTrades(10000)
+    .filter((t) => t.netPnl != null)
+    .sort((a, b) => a.placedAt.localeCompare(b.placedAt));
+  if (settled.length < 20) return "";
+
+  const line = (rows: typeof settled) => {
+    const w = rows.filter((t) => (t.netPnl ?? 0) > 0).length;
+    const p = rows.reduce((s, t) => s + (t.netPnl ?? 0), 0);
+    return `${w}W/${rows.length - w}L $${p.toFixed(2)}`;
+  };
+  const hourOf = (t: typeof settled[number]) =>
+    parseInt(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false })
+      .format(new Date(t.placedAt)), 10) % 24;
+
+  const blocks: string[] = [];
+  for (let start = 0; start < 24; start += 4) {
+    const rows = settled.filter((t) => { const h = hourOf(t); return h >= start && h < start + 4; });
+    if (rows.length > 0) blocks.push(`${start}-${start + 4}ET: ${line(rows)}`);
+  }
+  const up = settled.filter((t) => t.result === "yes");
+  const down = settled.filter((t) => t.result === "no");
+  let lossAfterLoss = 0, afterLoss = 0, lossAfterWin = 0, afterWin = 0;
+  for (let i = 1; i < settled.length; i++) {
+    const prevWon = (settled[i - 1].netPnl ?? 0) > 0;
+    const lost = (settled[i].netPnl ?? 0) <= 0;
+    if (prevWon) { afterWin++; if (lost) lossAfterWin++; }
+    else { afterLoss++; if (lost) lossAfterLoss++; }
+  }
+  return `LIVE FORENSICS (all real-money settled trades, ${settled.length}): by hour ${blocks.join(" | ")}. ` +
+    `Window closed UP: ${line(up)}; closed DOWN: ${line(down)}. ` +
+    `Loss clustering: after a loss the next trade loses ${afterLoss > 0 ? Math.round(100 * lossAfterLoss / afterLoss) : 0}% vs ${afterWin > 0 ? Math.round(100 * lossAfterWin / afterWin) : 0}% after a win - losses streak (momentum fails in persistent chop). ` +
+    `Use these patterns: hour-band winning specs away from losing sessions (minHourEt/maxHourEt), and prefer geometry that avoids the clusters - but validate every pattern through the backtests before trusting it.`;
 }
 
 function buildAuditionDigest(auditionStats: AuditionStats): string {

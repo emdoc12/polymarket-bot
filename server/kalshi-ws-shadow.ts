@@ -9,7 +9,7 @@ import {
   type KalshiStrategySpec,
 } from "./kalshi";
 import { decideLiveEntry } from "./kalshi-executor";
-import { getLiveArmedStrategies, passesLivePriceGuards } from "./kalshi-live-executor";
+import { getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
 import { kalshiProdStream } from "./kalshi-ws";
 import type { CandidateStrategy } from "@shared/schema";
 
@@ -149,6 +149,9 @@ async function runShadowTick() {
     kalshiProdStream.setMarkets([]);
     return;
   }
+  // The curfew applies to shadow rows too, so their records keep predicting
+  // what live would have done under the same rules.
+  if (!withinLiveTradingHours()) return;
 
   // Two tiers share the stream:
   //  - MIRROR (audition=0): the allowlisted strategies under the live

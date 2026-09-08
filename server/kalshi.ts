@@ -162,8 +162,27 @@ export type KalshiStrategySpec = {
   trendLookbackMinutes: number;
   // Minimum signal strength: |price - 0.5| for momentum/fade, |move| for trend rules.
   minSignal: number;
+  // Entry-time window in ET hours [minHourEt, maxHourEt). 0/24 = all day;
+  // minHourEt > maxHourEt wraps overnight. Live forensics showed regime
+  // structure by time of day, so hour-banding is a first-class, backtestable
+  // strategy dimension rather than an executor hack.
+  minHourEt: number;
+  maxHourEt: number;
   orderSize: number;
 };
+
+const ET_HOUR_FMT = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false });
+export function hourEt(ms: number): number {
+  const h = parseInt(ET_HOUR_FMT.format(new Date(ms)), 10);
+  return Number.isFinite(h) ? (h === 24 ? 0 : h) : 0;
+}
+
+export function hourInWindow(hour: number, minHour: number, maxHour: number): boolean {
+  if (minHour === maxHour || (minHour === 0 && maxHour === 24)) return true;
+  return minHour < maxHour
+    ? hour >= minHour && hour < maxHour
+    : hour >= minHour || hour < maxHour;
+}
 
 export const SPEC_SIDE_RULES = ["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade"] as const;
 export const SPEC_SERIES = ["KXBTC15M", "KXETH15M"] as const;
@@ -192,6 +211,8 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     maxEntryPrice: Math.max(minEntry, maxEntry),
     trendLookbackMinutes: Math.round(clampNum(raw.trendLookbackMinutes, 1, 10, 3)),
     minSignal: clampNum(raw.minSignal, 0, 0.45, 0),
+    minHourEt: Math.round(clampNum(raw.minHourEt, 0, 24, 0)),
+    maxHourEt: Math.round(clampNum(raw.maxHourEt, 0, 24, 24)),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -202,6 +223,10 @@ export function specHash(spec: KalshiStrategySpec) {
     spec.series, spec.sideRule, spec.entrySecondsBeforeClose,
     spec.minEntryPrice.toFixed(3), spec.maxEntryPrice.toFixed(3),
     spec.trendLookbackMinutes, spec.minSignal.toFixed(3),
+    // Hour band joins the hash only when restrictive, so every pre-existing
+    // stored hash (implicitly all-day) stays valid and still dedupes.
+    ...(spec.minHourEt === spec.maxHourEt || (spec.minHourEt === 0 && spec.maxHourEt === 24)
+      ? [] : [spec.minHourEt, spec.maxHourEt]),
   ].join("|");
 }
 
@@ -249,6 +274,7 @@ type SpecTrade = { ticker: string; side: "YES" | "NO"; entryPrice: number; fee: 
 
 function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData): SpecTrade | null {
   const entryTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
+  if (!hourInWindow(hourEt(entryTs * 1000), spec.minHourEt, spec.maxHourEt)) return null;
   const sorted = [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
   const entryCandle = [...sorted].reverse().find((c) => c.end_period_ts <= entryTs);
   if (!entryCandle) return null;

@@ -4,6 +4,8 @@ import {
   clampSpec,
   getKalshiMarket,
   getKalshiMarkets,
+  hourEt,
+  hourInWindow,
   kalshiTradingFee,
   type KalshiMarket,
   type KalshiStrategySpec,
@@ -56,6 +58,20 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_poll_seconds")) storage.setSetting("live_poll_seconds", "15");
   if (!storage.getSetting("live_max_entry_price")) storage.setSetting("live_max_entry_price", "0.80");
   if (!storage.getSetting("live_min_audition_trades")) storage.setSetting("live_min_audition_trades", "15");
+  if (!storage.getSetting("live_trading_hours_et")) storage.setSetting("live_trading_hours_et", "0-24");
+}
+
+// Executor-level trading-hours curfew ("8-24" = only 8am-midnight ET;
+// "0-24" = always). A manual rail layered on top of per-spec hour bands -
+// the stopgap while the lab learns hour windows from data. Applies to live
+// and to every shadow row so the shadow record stays predictive of live.
+export function withinLiveTradingHours(nowMs = Date.now()): boolean {
+  const raw = storage.getSetting("live_trading_hours_et") || "0-24";
+  const match = raw.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+  if (!match) return true;
+  const start = Math.min(24, Math.max(0, parseInt(match[1], 10)));
+  const end = Math.min(24, Math.max(0, parseInt(match[2], 10)));
+  return hourInWindow(hourEt(nowMs), start, end);
 }
 
 // Live-only price guards. The floor mirrors the demo executor's fillability
@@ -274,6 +290,7 @@ async function runLiveTick() {
   await settleLiveTrades();
 
   if (!liveEnabled()) return;
+  if (!withinLiveTradingHours()) return;
   if (!getKalshiAuthStatusEnv("prod").configured) return;
 
   const armed = getLiveArmedStrategies();
@@ -364,6 +381,7 @@ export function registerLiveExecutorRoutes(app: Express) {
       maxTradesPerDay: parseInt(storage.getSetting("live_max_trades_per_day") || "20", 10),
       maxTotalLoss: parseFloat(storage.getSetting("live_max_total_loss") || "25"),
       maxEntryPrice: parseFloat(storage.getSetting("live_max_entry_price") || "0.80"),
+      tradingHoursEt: storage.getSetting("live_trading_hours_et") || "0-24",
       totalSettled: settled.length,
       totalWins: settled.filter((t) => (t.netPnl ?? 0) > 0).length,
       totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),
