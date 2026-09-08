@@ -238,10 +238,16 @@ function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_ws_shadow_trades_status ON ws_shadow_trades(status);
   `);
 
-  // audition column added after ws_shadow_trades first shipped.
+  // Columns added after ws_shadow_trades / live_trades first shipped.
   const wsShadowCols = sqlite.pragma("table_info(ws_shadow_trades)") as { name: string }[];
   const wsShadowColNames = new Set(wsShadowCols.map((c) => c.name));
   if (!wsShadowColNames.has("audition")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN audition INTEGER NOT NULL DEFAULT 0;");
+  if (!wsShadowColNames.has("spot_at_entry")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN spot_at_entry REAL;");
+  if (!wsShadowColNames.has("spot_strike")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN spot_strike REAL;");
+  const liveCols = sqlite.pragma("table_info(live_trades)") as { name: string }[];
+  const liveColNames = new Set(liveCols.map((c) => c.name));
+  if (!liveColNames.has("spot_at_entry")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_at_entry REAL;");
+  if (!liveColNames.has("spot_strike")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_strike REAL;");
 
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`

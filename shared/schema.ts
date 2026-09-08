@@ -192,6 +192,10 @@ export const liveTrades = sqliteTable("live_trades", {
   error: text("error"),
   result: text("result"),
   netPnl: real("net_pnl"),
+  // Settlement-index context captured at entry (research dataset for the
+  // fair-value model: was the crowd's price justified by the underlying?).
+  spotAtEntry: real("spot_at_entry"),
+  spotStrike: real("spot_strike"),
   placedAt: text("placed_at").notNull(),
   marketCloseAt: text("market_close_at").notNull(),
   settledAt: text("settled_at"),
@@ -219,6 +223,8 @@ export const wsShadowTrades = sqliteTable("ws_shadow_trades", {
   // rails); 1 = prod audition row (any promoted strategy rehearsing on real
   // books to earn a prod record before real money).
   audition: integer("audition", { mode: "boolean" }).notNull().default(false),
+  spotAtEntry: real("spot_at_entry"),
+  spotStrike: real("spot_strike"),
   status: text("status").notNull(),            // would_fill | no_depth | settled_won | settled_lost
   result: text("result"),
   netPnl: real("net_pnl"),                     // simulated, only for would_fill rows

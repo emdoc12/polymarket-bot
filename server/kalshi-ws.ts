@@ -50,13 +50,28 @@ function centiContracts(s: unknown): number | null {
   return Math.round(v * 100);
 }
 
+// Underlying settlement-index feed (CF Benchmarks via Kalshi's own WS).
+// One rolling buffer per index of ~1s samples for strike capture, spot
+// reads, and realized-vol estimates. Values are the actual index the
+// markets settle on - not an exchange approximation.
+type SpotSample = { ts: number; value: number };
+type SpotBuffer = { samples: SpotSample[]; lastValue: number | null; lastTs: number; avg60s: number | null };
+
+export const SERIES_INDEX: Record<string, string> = {
+  KXBTC15M: "BRTI",
+  KXETH15M: "ETHUSD_RTI",
+};
+const SPOT_BUFFER_MS = 40 * 60 * 1000;
+
 class KalshiMarketStream {
   private ws: WebSocket | null = null;
   private books = new Map<string, MarketBook>();
   private wanted = new Set<string>();
   private subscribed = new Set<string>();
   private sid: number | null = null;
-  private lastSeq: number | null = null;
+  private cfbenchSid: number | null = null;
+  private lastSeqBySid = new Map<number, number>();
+  private spot = new Map<string, SpotBuffer>();
   private cmdId = 1;
   private hostIndex = 0;
   private reconnectDelayMs = 1000;
@@ -98,7 +113,54 @@ class KalshiMarketStream {
       resyncs: this.resyncs,
       disconnects: this.disconnects,
       lastError: this.lastError,
+      spot: Object.fromEntries([...this.spot.entries()].map(([index, buf]) => [index, {
+        value: buf.lastValue,
+        ageMs: buf.lastTs ? Date.now() - buf.lastTs : null,
+        avg60s: buf.avg60s,
+        samples: buf.samples.length,
+      }])),
     };
+  }
+
+  // ---- Spot (settlement index) accessors ----
+
+  getSpot(series: string, maxAgeMs = 15_000): { value: number; ts: number; ageMs: number } | null {
+    const buf = this.spot.get(SERIES_INDEX[series] ?? series);
+    if (!buf || buf.lastValue == null) return null;
+    const age = Date.now() - buf.lastTs;
+    if (age > maxAgeMs) return null;
+    return { value: buf.lastValue, ts: buf.lastTs, ageMs: age };
+  }
+
+  // Index value nearest a past timestamp (e.g. a window's open = the strike).
+  getSpotAt(series: string, ts: number, toleranceMs = 90_000): number | null {
+    const buf = this.spot.get(SERIES_INDEX[series] ?? series);
+    if (!buf || buf.samples.length === 0) return null;
+    let best: SpotSample | null = null;
+    for (const s of buf.samples) {
+      if (!best || Math.abs(s.ts - ts) < Math.abs(best.ts - ts)) best = s;
+    }
+    return best && Math.abs(best.ts - ts) <= toleranceMs ? best.value : null;
+  }
+
+  // Realized volatility of the index as stddev of per-second log returns
+  // over the lookback. Multiply by value*sqrt(seconds) for a move scale.
+  getSpotVolPerSecond(series: string, lookbackMinutes: number): number | null {
+    const buf = this.spot.get(SERIES_INDEX[series] ?? series);
+    if (!buf) return null;
+    const cutoff = Date.now() - lookbackMinutes * 60_000;
+    const samples = buf.samples.filter((s) => s.ts >= cutoff);
+    if (samples.length < 30) return null;
+    const rets: number[] = [];
+    for (let i = 1; i < samples.length; i++) {
+      const dt = (samples[i].ts - samples[i - 1].ts) / 1000;
+      if (dt <= 0 || dt > 10) continue;
+      rets.push(Math.log(samples[i].value / samples[i - 1].value) / Math.sqrt(dt));
+    }
+    if (rets.length < 20) return null;
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const variance = rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length;
+    return Math.sqrt(variance);
   }
 
   // Declare which markets we care about; subscriptions follow.
@@ -165,10 +227,14 @@ class KalshiMarketStream {
       this.reconnectDelayMs = 1000;
       this.lastError = null;
       this.sid = null;
-      this.lastSeq = null;
+      this.cfbenchSid = null;
+      this.lastSeqBySid.clear();
       this.subscribed.clear();
       console.log(`${new Date().toISOString()} [kalshi-ws] connected to ${host}`);
       this.syncSubscriptions();
+      // Settlement-index feed: always on while connected - it is the
+      // underlying truth every strategy family can price against.
+      this.send({ cmd: "subscribe", params: { channels: ["cfbenchmarks_value"], index_ids: Object.values(SERIES_INDEX) } });
     });
     // The ws library answers server pings with pongs automatically.
     ws.on("message", (data) => this.onMessage(data.toString()));
@@ -197,7 +263,10 @@ class KalshiMarketStream {
     for (const book of this.books.values()) book.ready = false;
     this.subscribed.clear();
     this.sid = null;
-    this.lastSeq = null;
+    this.cfbenchSid = null;
+    this.lastSeqBySid.clear();
+    // Spot buffers survive reconnects: values are absolute (no delta state)
+    // and strike capture needs continuity; staleness gates handle gaps.
     if (reason !== "stopped") this.resyncs += 1;
   }
 
@@ -237,7 +306,7 @@ class KalshiMarketStream {
     // A subscription change can restart the sid's seq numbering (observed as
     // spurious "gaps" at every window rotation). Re-anchor on the next
     // message instead of tearing the connection down.
-    if (toAdd.length > 0 || toDrop.length > 0) this.lastSeq = null;
+    if ((toAdd.length > 0 || toDrop.length > 0) && this.sid != null) this.lastSeqBySid.delete(this.sid);
   }
 
   private forceResync(reason: string) {
@@ -257,8 +326,49 @@ class KalshiMarketStream {
     const type = parsed?.type;
 
     if (type === "subscribed") {
-      this.sid = parsed.msg?.sid ?? parsed.sid ?? null;
-      for (const t of this.wanted) this.subscribed.add(t);
+      const channel = parsed.msg?.channel;
+      const sid = parsed.msg?.sid ?? parsed.sid ?? null;
+      if (channel === "cfbenchmarks_value") {
+        this.cfbenchSid = sid;
+      } else {
+        this.sid = sid;
+        for (const t of this.wanted) this.subscribed.add(t);
+      }
+      return;
+    }
+
+    if (type === "cfbenchmarks_value") {
+      const msg = parsed.msg ?? {};
+      const indexId: string | undefined = msg.index_id;
+      if (!indexId) return;
+      // Live value from the raw CF frame when parseable; the trailing 60s
+      // average (always present, and literally the settlement statistic)
+      // as fallback and side-channel.
+      let value: number | null = null;
+      try {
+        const frame = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data;
+        const rawVal = frame?.value ?? frame?.price ?? frame?.v;
+        const parsedVal = typeof rawVal === "string" ? parseFloat(rawVal) : typeof rawVal === "number" ? rawVal : NaN;
+        if (Number.isFinite(parsedVal) && parsedVal > 0) value = parsedVal;
+      } catch { /* fall through to avg60s */ }
+      const avgRaw = msg.avg_60s_data?.value;
+      const avg60s = typeof avgRaw === "string" ? parseFloat(avgRaw) : typeof avgRaw === "number" ? avgRaw : NaN;
+      if (value == null && Number.isFinite(avg60s) && avg60s > 0) value = avg60s;
+      if (value == null) return;
+
+      const ts = typeof msg.received_at === "number" ? msg.received_at : Date.now();
+      const buf = this.spot.get(indexId) ?? { samples: [], lastValue: null, lastTs: 0, avg60s: null };
+      buf.lastValue = value;
+      buf.lastTs = ts;
+      if (Number.isFinite(avg60s) && avg60s > 0) buf.avg60s = avg60s;
+      // Sample at ~1s resolution regardless of feed rate.
+      const lastSample = buf.samples[buf.samples.length - 1];
+      if (!lastSample || ts - lastSample.ts >= 900) {
+        buf.samples.push({ ts, value });
+        const cutoff = ts - SPOT_BUFFER_MS;
+        while (buf.samples.length > 0 && buf.samples[0].ts < cutoff) buf.samples.shift();
+      }
+      this.spot.set(indexId, buf);
       return;
     }
     if (type === "error") {
@@ -268,15 +378,17 @@ class KalshiMarketStream {
     }
 
     if (type === "orderbook_snapshot" || type === "orderbook_delta") {
-      // Sequence check: deltas must arrive with no gaps. A snapshot resets
-      // the counter (Kalshi numbers messages per subscription).
+      // Sequence check per subscription: deltas must arrive with no gaps.
+      // A snapshot resets the counter for its sid.
       const seq = typeof parsed.seq === "number" ? parsed.seq : null;
+      const sid = typeof parsed.sid === "number" ? parsed.sid : this.sid ?? -1;
       if (seq != null) {
-        if (type === "orderbook_delta" && this.lastSeq != null && seq !== this.lastSeq + 1) {
-          this.forceResync(`seq gap: expected ${this.lastSeq + 1}, got ${seq}`);
+        const last = this.lastSeqBySid.get(sid);
+        if (type === "orderbook_delta" && last != null && seq !== last + 1) {
+          this.forceResync(`seq gap on sid ${sid}: expected ${last + 1}, got ${seq}`);
           return;
         }
-        this.lastSeq = seq;
+        this.lastSeqBySid.set(sid, seq);
       }
       const msg = parsed.msg ?? {};
       const ticker: string | undefined = msg.market_ticker;

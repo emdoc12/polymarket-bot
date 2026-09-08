@@ -40,7 +40,7 @@ const DEFAULT_WORKER_MODEL = "claude-haiku-4-5";
 const SpecProposalSchema = z.object({
   name: z.string(),
   series: z.enum(["KXBTC15M", "KXETH15M"]),
-  sideRule: z.enum(["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade"]),
+  sideRule: z.enum(["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade", "value"]),
   entrySecondsBeforeClose: z.number(),
   minEntryPrice: z.number(),
   maxEntryPrice: z.number(),
@@ -85,7 +85,7 @@ const PmOutputSchema = z.object({
 
 const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalshi crypto up/down markets, quadratic fee ~= 0.07*P*(1-P) per contract, taker side):
 - series: "KXBTC15M" (BTC 15-min up/down) or "KXETH15M" (ETH 15-min up/down)
-- sideRule: "momentum" (back the currently favored side), "fade" (back the underdog), "always_yes", "always_no", "trend_follow" (back the direction the market price moved over the lookback), "trend_fade" (against it)
+- sideRule: "momentum" (back the currently favored side), "fade" (back the underdog), "always_yes", "always_no", "trend_follow" (back the direction the market price moved over the lookback), "trend_fade" (against it), "value" (NEW and important: prices the contract from the UNDERLYING settlement index itself - distance from strike + time remaining + 30-min realized vol -> model probability - and takes whichever side the crowd underprices by >= minSignal. For value specs, minSignal means minimum fair-value edge in probability points, e.g. 0.04 = only trade >= 4-point mispricings; sensible range 0.03-0.15. This is the only rule grounded in the objective settlement source rather than crowd prices - explore it seriously across edge thresholds, timings, and price bands)
 - entrySecondsBeforeClose: 60-840 (when to enter, seconds before the window closes)
 - minEntryPrice / maxEntryPrice: 0.03-0.97 (only enter if the executable price of the chosen side is inside this band)
 - trendLookbackMinutes: 1-10 (trend rules only)

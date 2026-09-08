@@ -11,6 +11,7 @@ import {
   type KalshiStrategySpec,
 } from "./kalshi";
 import { decideLiveEntry } from "./kalshi-executor";
+import { kalshiProdStream } from "./kalshi-ws";
 import {
   ensureShardFundsEnv,
   getKalshiAuthStatusEnv,
@@ -280,6 +281,10 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
     error,
     result: null,
     netPnl: null,
+    spotAtEntry: kalshiProdStream.getSpot(spec.series)?.value ?? null,
+    spotStrike: market.open_time
+      ? kalshiProdStream.getSpotAt(spec.series, new Date(market.open_time).getTime())
+      : null,
     placedAt: new Date().toISOString(),
     marketCloseAt: market.close_time ?? new Date(nowMs).toISOString(),
     settledAt: null,

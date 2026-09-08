@@ -5,6 +5,7 @@ import {
   getKalshiMarket,
   getKalshiMarkets,
   kalshiTradingFee,
+  valueModelProbUp,
   type KalshiMarket,
   type KalshiStrategySpec,
 } from "./kalshi";
@@ -130,6 +131,10 @@ async function tryShadowEntry(candidate: CandidateStrategy, spec: KalshiStrategy
     wouldFill,
     quoteAgeMs: quote.ageMs,
     audition,
+    spotAtEntry: kalshiProdStream.getSpot(spec.series)?.value ?? null,
+    spotStrike: market.open_time
+      ? kalshiProdStream.getSpotAt(spec.series, new Date(market.open_time).getTime())
+      : null,
     status: wouldFill ? "would_fill" : "no_depth",
     result: null,
     netPnl: null,
@@ -341,6 +346,37 @@ export function registerWsShadowRoutes(app: Express) {
 
   app.get("/api/ws-shadow/audition", (_req, res) => {
     res.json({ board: buildAuditionBoard() });
+  });
+
+  // Settlement-index feed diagnostics: current index values, strike capture,
+  // and the fair-value read on each active window.
+  app.get("/api/spot/status", async (_req, res) => {
+    const out: Record<string, unknown> = {};
+    for (const series of ["KXBTC15M", "KXETH15M"]) {
+      const spot = kalshiProdStream.getSpot(series);
+      const vol = kalshiProdStream.getSpotVolPerSecond(series, 30);
+      const active = await activeMarketForSeries(series, Date.now()).catch(() => null);
+      let strike: number | null = null;
+      let modelPUp: number | null = null;
+      let marketYesAsk: string | null = null;
+      if (active?.market.open_time) {
+        strike = kalshiProdStream.getSpotAt(series, new Date(active.market.open_time).getTime());
+        marketYesAsk = active.market.yes_ask_dollars ?? null;
+        if (spot && strike != null && vol != null) {
+          modelPUp = Number(valueModelProbUp(spot.value, strike, vol, (active.closeMs - Date.now()) / 1000).toFixed(3));
+        }
+      }
+      out[series] = {
+        spot: spot?.value ?? null,
+        spotAgeMs: spot?.ageMs ?? null,
+        volPerSqrtSec: vol,
+        activeTicker: active?.market.ticker ?? null,
+        strike,
+        modelPUp,
+        marketYesAsk,
+      };
+    }
+    res.json(out);
   });
 
   // Restart the experiment: wipe the shadow ledger (e.g. after a book-logic

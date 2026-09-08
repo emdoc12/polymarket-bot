@@ -152,7 +152,10 @@ export async function getKalshiCandlesticks(
 export type KalshiStrategySpec = {
   name: string;
   series: string;
-  sideRule: "momentum" | "fade" | "always_yes" | "always_no" | "trend_follow" | "trend_fade";
+  // "value": price the contract from the underlying settlement index
+  // (distance to strike + time left + realized vol -> model probability) and
+  // take whichever side the market underprices by >= minSignal.
+  sideRule: "momentum" | "fade" | "always_yes" | "always_no" | "trend_follow" | "trend_fade" | "value";
   // How long before market close the entry decision is made.
   entrySecondsBeforeClose: number;
   // Only enter when the executable price of the chosen side is inside this band.
@@ -184,7 +187,7 @@ export function hourInWindow(hour: number, minHour: number, maxHour: number): bo
     : hour >= minHour || hour < maxHour;
 }
 
-export const SPEC_SIDE_RULES = ["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade"] as const;
+export const SPEC_SIDE_RULES = ["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade", "value"] as const;
 export const SPEC_SERIES = ["KXBTC15M", "KXETH15M"] as const;
 
 const clampNum = (value: unknown, min: number, max: number, fallback: number) => {
@@ -234,7 +237,79 @@ export type SettledMarketData = {
   market: KalshiMarket;
   candles: KalshiCandle[];
   closeMs: number;
+  // Underlying spot history for the window (minute closes; Coinbase proxy for
+  // the CF index in backtests - live uses the real streamed index).
+  spotValueAt?: (tsSec: number) => number | null;
 };
+
+// Abramowitz-Stegun normal CDF approximation - plenty for pricing 15-min binaries.
+export function normalCdf(z: number): number {
+  if (z < -8) return 0;
+  if (z > 8) return 1;
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989422804014327 * Math.exp(-z * z / 2);
+  const p = d * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return z >= 0 ? 1 - p : p;
+}
+
+// Model probability that the index ends the window above the strike.
+// Settlement is a 60s average ending at close, so effective time-to-settle
+// is ~30s less than time-to-close. sigma floor keeps dead-calm periods from
+// producing fake certainty.
+export function valueModelProbUp(spot: number, strike: number, volPerSqrtSec: number, secondsToClose: number): number {
+  const tSec = Math.max(5, secondsToClose - 30);
+  const sigma = Math.max(spot * Math.max(volPerSqrtSec, 1e-6) * Math.sqrt(tSec), spot * 1e-5);
+  return normalCdf((spot - strike) / sigma);
+}
+
+// --- Spot history for backtests: Coinbase minute candles, keyless & cached ---
+const SPOT_PRODUCTS: Record<string, string> = { KXBTC15M: "BTC-USD", KXETH15M: "ETH-USD" };
+const spotRangeCache = new Map<string, { at: number; closes: { ts: number; close: number }[] }>();
+
+export async function fetchSpotMinuteCloses(series: string, startTsSec: number, endTsSec: number): Promise<{ ts: number; close: number }[]> {
+  const product = SPOT_PRODUCTS[series];
+  if (!product) return [];
+  const key = `${product}|${Math.floor(startTsSec / 600)}|${Math.floor(endTsSec / 600)}`;
+  const cached = spotRangeCache.get(key);
+  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.closes;
+
+  const closes: { ts: number; close: number }[] = [];
+  // Coinbase caps 300 candles per request; page through the range.
+  for (let cursor = startTsSec; cursor < endTsSec; cursor += 300 * 60) {
+    const chunkEnd = Math.min(endTsSec, cursor + 300 * 60);
+    try {
+      const res = await fetch(
+        `https://api.exchange.coinbase.com/products/${product}/candles?granularity=60` +
+        `&start=${new Date(cursor * 1000).toISOString()}&end=${new Date(chunkEnd * 1000).toISOString()}`,
+        { headers: { "User-Agent": "polybot-research" } },
+      );
+      if (!res.ok) continue;
+      const rows = await res.json() as [number, number, number, number, number, number][];
+      for (const row of rows) {
+        if (Array.isArray(row) && row.length >= 5) closes.push({ ts: row[0], close: row[4] });
+      }
+      await sleep(150);
+    } catch {
+      continue;
+    }
+  }
+  closes.sort((a, b) => a.ts - b.ts);
+  if (spotRangeCache.size > 20) spotRangeCache.clear();
+  spotRangeCache.set(key, { at: Date.now(), closes });
+  return closes;
+}
+
+function makeSpotLookup(closes: { ts: number; close: number }[]): (tsSec: number) => number | null {
+  return (tsSec: number) => {
+    // Latest minute close at or before ts (candle ts = bucket start, so the
+    // close is known at ts+60; use the bucket covering ts-60 for causality).
+    let best: { ts: number; close: number } | null = null;
+    for (const c of closes) {
+      if (c.ts + 60 <= tsSec + 1 && (!best || c.ts > best.ts)) best = c;
+    }
+    return best && tsSec - best.ts < 15 * 60 ? best.close : null;
+  };
+}
 
 // Fetch settled markets and their 1-min candles ONCE, then evaluate any number
 // of specs in memory. Candle fetches dominate cycle latency, so reuse matters.
@@ -266,6 +341,20 @@ export async function fetchSettledMarketData(series: string, lookback: number): 
       continue;
     }
   }
+  // Attach underlying spot history (one range fetch shared by all windows) so
+  // "value" specs can be evaluated like any other rule.
+  if (data.length > 0) {
+    try {
+      const startSec = Math.min(...data.map((d) => Math.floor(d.closeMs / 1000))) - 3600;
+      const endSec = Math.max(...data.map((d) => Math.floor(d.closeMs / 1000))) + 60;
+      const closes = await fetchSpotMinuteCloses(series, startSec, endSec);
+      if (closes.length > 10) {
+        const lookup = makeSpotLookup(closes);
+        for (const entry of data) entry.spotValueAt = lookup;
+      }
+    } catch { /* value specs simply skip windows without spot data */ }
+  }
+
   // Oldest first so the train/holdout split is chronological.
   return data.sort((a, b) => a.closeMs - b.closeMs);
 }
@@ -291,6 +380,31 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
     if (Math.abs(marketPrice - 0.5) < spec.minSignal) return null;
     const favored: "YES" | "NO" = marketPrice >= 0.5 ? "YES" : "NO";
     side = spec.sideRule === "momentum" ? favored : favored === "YES" ? "NO" : "YES";
+  } else if (spec.sideRule === "value") {
+    if (!entry.spotValueAt || !entry.market.open_time) return null;
+    const openTs = Math.floor(new Date(entry.market.open_time).getTime() / 1000);
+    const strike = entry.spotValueAt(openTs);
+    const spot = entry.spotValueAt(entryTs);
+    if (strike == null || spot == null) return null;
+    // 30-min realized vol from minute closes (fixed window on both the
+    // backtest and live paths so the two agree).
+    const rets: number[] = [];
+    let prev: number | null = null;
+    for (let k = 30; k >= 0; k--) {
+      const v = entry.spotValueAt(entryTs - k * 60);
+      if (v != null && prev != null) rets.push(Math.log(v / prev));
+      if (v != null) prev = v;
+    }
+    if (rets.length < 15) return null;
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const volPerSqrtSec = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) / Math.sqrt(60);
+    const pUp = valueModelProbUp(spot, strike, volPerSqrtSec, spec.entrySecondsBeforeClose);
+    const edgeThreshold = Math.max(spec.minSignal, 0.02);
+    const edgeYes = pUp - yesAsk;
+    const edgeNo = yesBid - pUp; // buying NO at 1-yesBid pays off with prob 1-pUp
+    if (edgeYes >= edgeThreshold && edgeYes >= edgeNo) side = "YES";
+    else if (edgeNo >= edgeThreshold) side = "NO";
+    else return null;
   } else {
     const lookbackTs = entryTs - spec.trendLookbackMinutes * 60;
     const pastCandle = [...sorted].reverse().find((c) => c.end_period_ts <= lookbackTs);

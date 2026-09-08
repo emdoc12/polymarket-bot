@@ -9,6 +9,7 @@ import {
   hourInWindow,
   kalshiTradingFee,
   parseDollars,
+  valueModelProbUp,
   type KalshiMarket,
   type KalshiStrategySpec,
 } from "./kalshi";
@@ -19,6 +20,7 @@ import {
   isKalshiDryRun,
   placeKalshiOrder,
 } from "./kalshi-trading";
+import { kalshiProdStream } from "./kalshi-ws";
 
 // The demo executor closes the research loop: promoted Strategy Lab candidates
 // watch live markets and place real orders on the Kalshi DEMO account (or
@@ -89,6 +91,25 @@ export async function decideLiveEntry(
     if (Math.abs(marketPrice - 0.5) < spec.minSignal) return { ok: false, reason: "signal below threshold" };
     const favored = marketPrice >= 0.5 ? "yes" : "no";
     side = spec.sideRule === "momentum" ? favored : favored === "yes" ? "no" : "yes";
+  } else if (spec.sideRule === "value") {
+    // Price the contract from the settlement index itself: distance to
+    // strike + time left + realized vol -> model probability; take whichever
+    // side the market underprices by the spec's edge threshold.
+    const spot = kalshiProdStream.getSpot(spec.series);
+    const openMs = market.open_time ? new Date(market.open_time).getTime() : null;
+    const strike = openMs != null ? kalshiProdStream.getSpotAt(spec.series, openMs) : null;
+    const vol = kalshiProdStream.getSpotVolPerSecond(spec.series, 30);
+    if (!spot || strike == null || vol == null) {
+      return { ok: false, reason: "settlement-index stream unavailable (spot/strike/vol)" };
+    }
+    const closeMs = market.close_time ? new Date(market.close_time).getTime() : nowMs + spec.entrySecondsBeforeClose * 1000;
+    const pUp = valueModelProbUp(spot.value, strike, vol, (closeMs - nowMs) / 1000);
+    const edgeThreshold = Math.max(spec.minSignal, 0.02);
+    const edgeYes = pUp - yesAsk;
+    const edgeNo = yesBid - pUp;
+    if (edgeYes >= edgeThreshold && edgeYes >= edgeNo) side = "yes";
+    else if (edgeNo >= edgeThreshold) side = "no";
+    else return { ok: false, reason: "no fair-value edge vs market" };
   } else {
     // Trend rules need the market's own price history.
     const openMs = market.open_time ? new Date(market.open_time).getTime() : nowMs - 3600_000;
