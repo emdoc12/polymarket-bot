@@ -234,6 +234,10 @@ export default function KalshiDashboard() {
     refetchInterval: 30000,
     retry: false,
   });
+  const { data: versionData } = useQuery<{ version: string }>({
+    queryKey: ["/api/version"],
+    retry: false,
+  });
   const wsToggleMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
       await apiRequest("POST", "/api/ws-shadow/toggle", { enabled });
@@ -315,6 +319,7 @@ export default function KalshiDashboard() {
         <h2 className="text-xl font-semibold tracking-tight">Dashboard</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
           Kalshi demo account · agent-researched strategies
+          {versionData?.version && <span className="font-mono text-xs"> · v{versionData.version}</span>}
         </p>
       </div>
 

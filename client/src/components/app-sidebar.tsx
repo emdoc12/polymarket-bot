@@ -92,8 +92,8 @@ export function AppSidebar() {
       </div>
     </aside>
     <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-sidebar-border bg-sidebar/95 backdrop-blur supports-[backdrop-filter]:bg-sidebar/80">
-      <div className="grid grid-cols-5 px-1 py-1.5">
-        {navItems.slice(0, 5).map((item) => {
+      <div className="grid grid-cols-6 px-1 py-1.5">
+        {navItems.map((item) => {
           const isActive = location === item.path || (item.path !== "/" && location.startsWith(item.path));
           return (
             <Link key={item.path} href={item.path}>
@@ -107,7 +107,7 @@ export function AppSidebar() {
                 )}
               >
                 <item.icon className="w-4 h-4 shrink-0" />
-                <span className="max-w-full truncate">{item.label.replace("Trade Log", "Trades")}</span>
+                <span className="max-w-full truncate">{item.label.replace("Trade Log", "Trades").replace("Strategy Lab", "Lab")}</span>
               </div>
             </Link>
           );
