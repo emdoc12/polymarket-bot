@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { getKalshiCredentialsEnv, signKalshiRequest } from "./kalshi-trading";
+import { fetchCfPassthrough, getKalshiCredentialsEnv, signKalshiRequest } from "./kalshi-trading";
 
 // Streaming market data from Kalshi's WebSocket API (production).
 //
@@ -239,6 +239,10 @@ class KalshiMarketStream {
       // dedupes whatever arrives.
       this.send({ cmd: "subscribe", params: { channels: ["cfbenchmarks_value_5hz"], index_ids: Object.values(SERIES_INDEX) } });
       this.send({ cmd: "subscribe", params: { channels: ["cfbenchmarks_value"], index_ids: Object.values(SERIES_INDEX) } });
+      // Every restart used to blind the value model for ~30 min (empty vol
+      // buffer, unknown strikes). Backfill from the history passthrough so
+      // vol and strike capture are live within seconds of boot.
+      void this.backfillSpotHistory();
     });
     // The ws library answers server pings with pongs automatically.
     ws.on("message", (data) => this.onMessage(data.toString()));
@@ -257,6 +261,45 @@ class KalshiMarketStream {
         this.scheduleReconnect();
       }
     });
+  }
+
+  private backfilling = false;
+  private async backfillSpotHistory() {
+    if (this.backfilling) return;
+    this.backfilling = true;
+    try {
+      for (const indexId of Object.values(SERIES_INDEX)) {
+        const buf = this.spot.get(indexId) ?? { samples: [], lastValue: null, lastTs: 0, avg60s: null };
+        if (buf.samples.length > 200) continue; // already warm (e.g. brief reconnect)
+        const merged: SpotSample[] = [];
+        for (const hoursBack of [1, 0]) {
+          try {
+            const hourStart = (Math.floor(Date.now() / 3600_000) - hoursBack) * 3600_000;
+            const iso = new Date(hourStart).toISOString();
+            const { samples } = await fetchCfPassthrough("prod", "history/values",
+              `id=${encodeURIComponent(indexId)}&timespan=HOUR&timestamp=${encodeURIComponent(iso)}`);
+            let lastTs = merged.length > 0 ? merged[merged.length - 1].ts : 0;
+            for (const s of samples) {
+              if (s.ts - lastTs >= 900) { merged.push({ ts: s.ts, value: s.value }); lastTs = s.ts; }
+            }
+          } catch { /* partial backfill still helps */ }
+        }
+        if (merged.length === 0) continue;
+        const liveFloor = buf.samples[0]?.ts ?? Infinity;
+        const cutoff = Date.now() - SPOT_BUFFER_MS;
+        const hist = merged.filter((s) => s.ts >= cutoff && s.ts < liveFloor);
+        buf.samples = [...hist, ...buf.samples];
+        if (buf.lastValue == null) {
+          const newest = merged[merged.length - 1];
+          buf.lastValue = newest.value;
+          buf.lastTs = newest.ts;
+        }
+        this.spot.set(indexId, buf);
+        console.log(`${new Date().toISOString()} [kalshi-ws] backfilled ${hist.length} spot samples for ${indexId}`);
+      }
+    } finally {
+      this.backfilling = false;
+    }
   }
 
   private teardown(reason: string) {
