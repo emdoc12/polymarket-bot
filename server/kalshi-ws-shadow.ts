@@ -12,7 +12,7 @@ import {
 import { decideLiveEntry } from "./kalshi-executor";
 import { getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
 import { kalshiProdStream } from "./kalshi-ws";
-import { fetchCfIndexHistory } from "./kalshi-trading";
+import { fetchCfPassthrough } from "./kalshi-trading";
 import type { CandidateStrategy } from "@shared/schema";
 
 // The WebSocket SHADOW executor: an A/B experiment against the REST live
@@ -353,18 +353,20 @@ export function registerWsShadowRoutes(app: Express) {
   // response shape (auth only exists on the deployed box). Read-only.
   app.get("/api/spot/history-probe", async (req, res) => {
     try {
-      const index = String(req.query.index || "BRTI");
-      const minutes = Math.min(60, Math.max(1, parseInt(String(req.query.minutes || "5"), 10)));
-      const end = Date.now();
-      const { raw, samples } = await fetchCfIndexHistory("prod", index, end - minutes * 60_000, end);
+      const subPath = String(req.query.path || "api/v1/history/values");
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(req.query)) {
+        if (key !== "path" && typeof value === "string") params.set(key, value);
+      }
+      const { raw, samples } = await fetchCfPassthrough("prod", subPath, params.toString());
       res.json({
-        index,
-        minutes,
+        subPath,
+        query: params.toString(),
         parsedSamples: samples.length,
         first: samples[0] ?? null,
         last: samples[samples.length - 1] ?? null,
         approxIntervalMs: samples.length > 1 ? Math.round((samples[samples.length - 1].ts - samples[0].ts) / (samples.length - 1)) : null,
-        rawHead: JSON.stringify(raw).slice(0, 800),
+        rawHead: JSON.stringify(raw).slice(0, 900),
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });

@@ -153,18 +153,18 @@ export async function kalshiPrivateFetchEnv(
 // passthrough (free per the Sep 2026 API update). Signature covers the path
 // only; the query rides the URL - Kalshi's spec excludes query strings from
 // the signed message.
-export async function fetchCfIndexHistory(
+export async function fetchCfPassthrough(
   env: KalshiEnv,
-  indexId: string,
-  startMs: number,
-  endMs: number,
+  subPath: string,
+  queryString: string,
 ): Promise<{ raw: any; samples: { ts: number; value: number }[] }> {
   const creds = getKalshiCredentialsEnv(env);
   if (!creds) throw new Error(`Kalshi ${env} API credentials not configured`);
-  const requestPath = `${API_PREFIX}/cfbenchmarks/v1/values`;
+  const cleanSub = subPath.replace(/^\/+|\/+$/g, "").replace(/[^a-zA-Z0-9/_-]/g, "");
+  const requestPath = `${API_PREFIX}/cfbenchmarks/${cleanSub}`;
   const timestampMs = String(Date.now());
   const signature = signKalshiRequest(creds.privateKeyPem, timestampMs, "GET", requestPath);
-  const query = `?id=${encodeURIComponent(indexId)}&start_time=${Math.floor(startMs)}&end_time=${Math.floor(endMs)}`;
+  const query = queryString ? `?${queryString}` : "";
   const res = await fetch(`${API_BASES[env]}${requestPath}${query}`, {
     headers: {
       Accept: "application/json",
@@ -184,6 +184,7 @@ export async function fetchCfIndexHistory(
   // version: {payload:[{time,value}]}, {values:[...]}, or a bare array.
   const rows: any[] = Array.isArray(raw) ? raw
     : Array.isArray(raw?.payload) ? raw.payload
+    : Array.isArray(raw?.payload?.values) ? raw.payload.values
     : Array.isArray(raw?.values) ? raw.values
     : Array.isArray(raw?.data) ? raw.data
     : [];
