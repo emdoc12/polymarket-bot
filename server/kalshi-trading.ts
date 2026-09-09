@@ -183,6 +183,7 @@ export async function fetchCfPassthrough(
   // Defensive normalization - CF Benchmarks payloads vary by endpoint
   // version: {payload:[{time,value}]}, {values:[...]}, or a bare array.
   const rows: any[] = Array.isArray(raw) ? raw
+    : Array.isArray(raw?.data?.payload) ? raw.data.payload
     : Array.isArray(raw?.payload) ? raw.payload
     : Array.isArray(raw?.payload?.values) ? raw.payload.values
     : Array.isArray(raw?.values) ? raw.values

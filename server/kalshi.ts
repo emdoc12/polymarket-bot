@@ -188,7 +188,16 @@ export function hourInWindow(hour: number, minHour: number, maxHour: number): bo
 }
 
 export const SPEC_SIDE_RULES = ["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade", "value"] as const;
-export const SPEC_SERIES = ["KXBTC15M", "KXETH15M"] as const;
+// Crypto plus the seven 15-minute commodity series Kalshi launched Sep 2026.
+// Same window structure as crypto; commodity books are currently MM-quoted
+// with near-zero crowd volume - the same regime demo-crypto had when the
+// edge was largest. Value rule stays crypto-only (no free settlement feed
+// for Pyth-settled commodities); momentum/trend/hour families apply.
+export const SPEC_SERIES = [
+  "KXBTC15M", "KXETH15M",
+  "KXWTI15M", "KXGOLD15M", "KXSILVER15M", "KXNATGAS15M",
+  "KXCOPPER15M", "KXPLATINUM15M", "KXPALLADIUM15M",
+] as const;
 
 const clampNum = (value: unknown, min: number, max: number, fallback: number) => {
   const n = Number(value);
@@ -299,6 +308,65 @@ export async function fetchSpotMinuteCloses(series: string, startTsSec: number, 
   return closes;
 }
 
+// --- TRUE settlement-index history via Kalshi's CF Benchmarks passthrough ---
+// 200ms-resolution tape, fetched in HOUR chunks (larger spans 503 upstream),
+// downsampled to 5s and cached per completed hour. Falls back to the Coinbase
+// proxy when credentials or the endpoint are unavailable.
+const SERIES_CF_INDEX: Record<string, string> = { KXBTC15M: "BRTI", KXETH15M: "ETHUSD_RTI" };
+const cfHourCache = new Map<string, { ts: number; value: number }[]>();
+
+async function fetchCfHistoryRange(series: string, startSec: number, endSec: number): Promise<{ ts: number; value: number }[]> {
+  const indexId = SERIES_CF_INDEX[series];
+  if (!indexId) return [];
+  const { fetchCfPassthrough, getKalshiAuthStatusEnv } = await import("./kalshi-trading");
+  if (!getKalshiAuthStatusEnv("prod").configured) return [];
+  const out: { ts: number; value: number }[] = [];
+  const firstHour = Math.floor(startSec / 3600) * 3600;
+  for (let hour = firstHour; hour < endSec; hour += 3600) {
+    const key = `${indexId}|${hour}`;
+    let chunk = cfHourCache.get(key);
+    if (!chunk) {
+      try {
+        const iso = new Date(hour * 1000).toISOString();
+        const { samples } = await fetchCfPassthrough("prod", "history/values",
+          `id=${encodeURIComponent(indexId)}&timespan=HOUR&timestamp=${encodeURIComponent(iso)}`);
+        const downsampled: { ts: number; value: number }[] = [];
+        let lastTs = 0;
+        for (const s of samples) {
+          if (s.ts - lastTs >= 5000) { downsampled.push(s); lastTs = s.ts; }
+        }
+        chunk = downsampled;
+        const hourComplete = (hour + 3600) * 1000 < Date.now() - 60_000;
+        if (hourComplete && downsampled.length > 100) {
+          if (cfHourCache.size > 80) cfHourCache.delete(cfHourCache.keys().next().value!);
+          cfHourCache.set(key, downsampled);
+        }
+        await sleep(250);
+      } catch {
+        chunk = [];
+      }
+    }
+    out.push(...chunk);
+  }
+  return out;
+}
+
+// Causal lookup over tick-style samples (a sample IS the value at its own
+// timestamp). Binary search - value evaluations call this thousands of times.
+function makeTickLookup(samples: { ts: number; value: number }[]): (tsSec: number) => number | null {
+  return (tsSec: number) => {
+    const target = tsSec * 1000;
+    let lo = 0, hi = samples.length - 1, best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (samples[mid].ts <= target) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    if (best < 0) return null;
+    return target - samples[best].ts <= 10 * 60_000 ? samples[best].value : null;
+  };
+}
+
 function makeSpotLookup(closes: { ts: number; close: number }[]): (tsSec: number) => number | null {
   return (tsSec: number) => {
     // Latest minute close at or before ts (candle ts = bucket start, so the
@@ -342,16 +410,23 @@ export async function fetchSettledMarketData(series: string, lookback: number): 
     }
   }
   // Attach underlying spot history (one range fetch shared by all windows) so
-  // "value" specs can be evaluated like any other rule.
+  // "value" specs can be evaluated like any other rule. Prefer the TRUE
+  // settlement index via the CF Benchmarks passthrough; fall back to the
+  // Coinbase proxy when it's unavailable.
   if (data.length > 0) {
     try {
       const startSec = Math.min(...data.map((d) => Math.floor(d.closeMs / 1000))) - 3600;
       const endSec = Math.max(...data.map((d) => Math.floor(d.closeMs / 1000))) + 60;
-      const closes = await fetchSpotMinuteCloses(series, startSec, endSec);
-      if (closes.length > 10) {
-        const lookup = makeSpotLookup(closes);
-        for (const entry of data) entry.spotValueAt = lookup;
+      let lookup: ((tsSec: number) => number | null) | null = null;
+      const cfSamples = await fetchCfHistoryRange(series, startSec, endSec);
+      // Require decent coverage before trusting it over the proxy.
+      if (cfSamples.length > (endSec - startSec) / 30) {
+        lookup = makeTickLookup(cfSamples);
+      } else {
+        const closes = await fetchSpotMinuteCloses(series, startSec, endSec);
+        if (closes.length > 10) lookup = makeSpotLookup(closes);
       }
+      if (lookup) for (const entry of data) entry.spotValueAt = lookup;
     } catch { /* value specs simply skip windows without spot data */ }
   }
 
