@@ -149,6 +149,56 @@ export async function kalshiPrivateFetchEnv(
   return json;
 }
 
+// Historical settlement-index values via Kalshi's CF Benchmarks REST
+// passthrough (free per the Sep 2026 API update). Signature covers the path
+// only; the query rides the URL - Kalshi's spec excludes query strings from
+// the signed message.
+export async function fetchCfIndexHistory(
+  env: KalshiEnv,
+  indexId: string,
+  startMs: number,
+  endMs: number,
+): Promise<{ raw: any; samples: { ts: number; value: number }[] }> {
+  const creds = getKalshiCredentialsEnv(env);
+  if (!creds) throw new Error(`Kalshi ${env} API credentials not configured`);
+  const requestPath = `${API_PREFIX}/cfbenchmarks/v1/values`;
+  const timestampMs = String(Date.now());
+  const signature = signKalshiRequest(creds.privateKeyPem, timestampMs, "GET", requestPath);
+  const query = `?id=${encodeURIComponent(indexId)}&start_time=${Math.floor(startMs)}&end_time=${Math.floor(endMs)}`;
+  const res = await fetch(`${API_BASES[env]}${requestPath}${query}`, {
+    headers: {
+      Accept: "application/json",
+      "KALSHI-ACCESS-KEY": creds.keyId,
+      "KALSHI-ACCESS-TIMESTAMP": timestampMs,
+      "KALSHI-ACCESS-SIGNATURE": signature,
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  let raw: any = null;
+  try { raw = text ? JSON.parse(text) : null; } catch { raw = { unparsed: text.slice(0, 500) }; }
+  if (!res.ok) {
+    throw new Error(`Kalshi ${env} cfbenchmarks ${res.status}: ${raw?.error?.message || raw?.message || res.statusText}`);
+  }
+  // Defensive normalization - CF Benchmarks payloads vary by endpoint
+  // version: {payload:[{time,value}]}, {values:[...]}, or a bare array.
+  const rows: any[] = Array.isArray(raw) ? raw
+    : Array.isArray(raw?.payload) ? raw.payload
+    : Array.isArray(raw?.values) ? raw.values
+    : Array.isArray(raw?.data) ? raw.data
+    : [];
+  const samples: { ts: number; value: number }[] = [];
+  for (const row of rows) {
+    const ts = Number(row?.time ?? row?.timestamp ?? row?.ts ?? row?.[0]);
+    const value = parseFloat(String(row?.value ?? row?.price ?? row?.v ?? row?.[1]));
+    if (Number.isFinite(ts) && Number.isFinite(value) && value > 0) {
+      samples.push({ ts: ts > 1e12 ? ts : ts * 1000, value });
+    }
+  }
+  samples.sort((a, b) => a.ts - b.ts);
+  return { raw, samples };
+}
+
 // Demo-bound wrapper: every pre-Phase-3 call site keeps its exact behavior.
 export async function kalshiPrivateFetch(
   method: "GET" | "POST" | "DELETE",

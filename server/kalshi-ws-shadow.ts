@@ -12,6 +12,7 @@ import {
 import { decideLiveEntry } from "./kalshi-executor";
 import { getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
 import { kalshiProdStream } from "./kalshi-ws";
+import { fetchCfIndexHistory } from "./kalshi-trading";
 import type { CandidateStrategy } from "@shared/schema";
 
 // The WebSocket SHADOW executor: an A/B experiment against the REST live
@@ -346,6 +347,28 @@ export function registerWsShadowRoutes(app: Express) {
 
   app.get("/api/ws-shadow/audition", (_req, res) => {
     res.json({ board: buildAuditionBoard() });
+  });
+
+  // Probe the CF Benchmarks historical passthrough so we can see the real
+  // response shape (auth only exists on the deployed box). Read-only.
+  app.get("/api/spot/history-probe", async (req, res) => {
+    try {
+      const index = String(req.query.index || "BRTI");
+      const minutes = Math.min(60, Math.max(1, parseInt(String(req.query.minutes || "5"), 10)));
+      const end = Date.now();
+      const { raw, samples } = await fetchCfIndexHistory("prod", index, end - minutes * 60_000, end);
+      res.json({
+        index,
+        minutes,
+        parsedSamples: samples.length,
+        first: samples[0] ?? null,
+        last: samples[samples.length - 1] ?? null,
+        approxIntervalMs: samples.length > 1 ? Math.round((samples[samples.length - 1].ts - samples[0].ts) / (samples.length - 1)) : null,
+        rawHead: JSON.stringify(raw).slice(0, 800),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // Settlement-index feed diagnostics: current index values, strike capture,

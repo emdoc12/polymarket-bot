@@ -233,7 +233,11 @@ class KalshiMarketStream {
       console.log(`${new Date().toISOString()} [kalshi-ws] connected to ${host}`);
       this.syncSubscriptions();
       // Settlement-index feed: always on while connected - it is the
-      // underlying truth every strategy family can price against.
+      // underlying truth every strategy family can price against. Subscribe
+      // both rates: 5hz (Sep 2026 upgrade, free) for freshness, 1hz as the
+      // fallback on indices where 5hz isn't supported; the ~1s sampler
+      // dedupes whatever arrives.
+      this.send({ cmd: "subscribe", params: { channels: ["cfbenchmarks_value_5hz"], index_ids: Object.values(SERIES_INDEX) } });
       this.send({ cmd: "subscribe", params: { channels: ["cfbenchmarks_value"], index_ids: Object.values(SERIES_INDEX) } });
     });
     // The ws library answers server pings with pongs automatically.
@@ -328,7 +332,7 @@ class KalshiMarketStream {
     if (type === "subscribed") {
       const channel = parsed.msg?.channel;
       const sid = parsed.msg?.sid ?? parsed.sid ?? null;
-      if (channel === "cfbenchmarks_value") {
+      if (channel === "cfbenchmarks_value" || channel === "cfbenchmarks_value_5hz") {
         this.cfbenchSid = sid;
       } else {
         this.sid = sid;
@@ -337,7 +341,7 @@ class KalshiMarketStream {
       return;
     }
 
-    if (type === "cfbenchmarks_value") {
+    if (type === "cfbenchmarks_value" || type === "cfbenchmarks_value_5hz") {
       const msg = parsed.msg ?? {};
       const indexId: string | undefined = msg.index_id;
       if (!indexId) return;
