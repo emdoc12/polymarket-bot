@@ -95,6 +95,8 @@ class KalshiMarketStream {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    if (this.gapFillTimer) clearTimeout(this.gapFillTimer);
+    this.gapFillTimer = null;
     this.teardown("stopped");
   }
 
@@ -264,41 +266,52 @@ class KalshiMarketStream {
   }
 
   private backfilling = false;
+  private gapFillTimer: ReturnType<typeof setTimeout> | null = null;
   private async backfillSpotHistory() {
     if (this.backfilling) return;
     this.backfilling = true;
     try {
       for (const indexId of Object.values(SERIES_INDEX)) {
         const buf = this.spot.get(indexId) ?? { samples: [], lastValue: null, lastTs: 0, avg60s: null };
-        if (buf.samples.length > 200) continue; // already warm (e.g. brief reconnect)
-        const merged: SpotSample[] = [];
+        const fetched: SpotSample[] = [];
         for (const hoursBack of [1, 0]) {
           try {
             const hourStart = (Math.floor(Date.now() / 3600_000) - hoursBack) * 3600_000;
             const iso = new Date(hourStart).toISOString();
             const { samples } = await fetchCfPassthrough("prod", "history/values",
               `id=${encodeURIComponent(indexId)}&timespan=HOUR&timestamp=${encodeURIComponent(iso)}`);
-            let lastTs = merged.length > 0 ? merged[merged.length - 1].ts : 0;
-            for (const s of samples) {
-              if (s.ts - lastTs >= 900) { merged.push({ ts: s.ts, value: s.value }); lastTs = s.ts; }
-            }
+            for (const s of samples) fetched.push({ ts: s.ts, value: s.value });
           } catch { /* partial backfill still helps */ }
         }
-        if (merged.length === 0) continue;
-        const liveFloor = buf.samples[0]?.ts ?? Infinity;
+        if (fetched.length === 0) continue;
+        // Sorted union with the live buffer, ~1s spacing. History lags up to
+        // 15 min behind real time, so the connect-time pass leaves a hole
+        // before the first live sample; the delayed second pass fills it.
         const cutoff = Date.now() - SPOT_BUFFER_MS;
-        const hist = merged.filter((s) => s.ts >= cutoff && s.ts < liveFloor);
-        buf.samples = [...hist, ...buf.samples];
-        if (buf.lastValue == null) {
+        const before = buf.samples.length;
+        const all = [...buf.samples, ...fetched.filter((s) => s.ts >= cutoff)].sort((a, b) => a.ts - b.ts);
+        const merged: SpotSample[] = [];
+        for (const s of all) {
+          if (merged.length === 0 || s.ts - merged[merged.length - 1].ts >= 900) merged.push(s);
+        }
+        buf.samples = merged;
+        if (buf.lastValue == null && merged.length > 0) {
           const newest = merged[merged.length - 1];
           buf.lastValue = newest.value;
           buf.lastTs = newest.ts;
         }
         this.spot.set(indexId, buf);
-        console.log(`${new Date().toISOString()} [kalshi-ws] backfilled ${hist.length} spot samples for ${indexId}`);
+        console.log(`${new Date().toISOString()} [kalshi-ws] spot backfill ${indexId}: ${before} -> ${merged.length} samples`);
       }
     } finally {
       this.backfilling = false;
+    }
+    // Second pass once the upstream lag has passed, to close the boot hole.
+    if (!this.gapFillTimer && !this.stopped) {
+      this.gapFillTimer = setTimeout(() => {
+        this.gapFillTimer = null;
+        if (!this.stopped) void this.backfillSpotHistory();
+      }, 12 * 60_000);
     }
   }
 
