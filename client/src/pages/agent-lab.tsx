@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -256,14 +257,25 @@ export default function AgentLabPage() {
     },
   });
 
+  const [assetFilter, setAssetFilter] = useState<"all" | "crypto" | "commodities">("all");
   const candidates = candidatesData?.candidates ?? [];
   // Rank by accumulated walk-forward P&L once it exists; fall back to holdout
   // for candidates too new to have live evidence.
   const rankScore = (c: Candidate) =>
     (c.live.trades ?? 0) > 0 ? (c.live.netPnl ?? -Infinity) : (c.holdout.netPnl ?? -Infinity);
-  const leaderboard = [...candidates]
+  // Asset-class filter: commodities = any binary series beyond BTC/ETH
+  // (WTI, gold, silver, natgas, copper, platinum, palladium 15-min).
+  const isCommodity = (c: Candidate) => {
+    const series = (c.spec as { series?: string } | null)?.series;
+    return !!series && !series.startsWith("KXBTC") && !series.startsWith("KXETH");
+  };
+  const leaderboardAll = [...candidates]
     .filter((c) => c.holdout.netPnl != null)
     .sort((a, b) => rankScore(b) - rankScore(a));
+  const commodityCount = leaderboardAll.filter(isCommodity).length;
+  const leaderboard = assetFilter === "all"
+    ? leaderboardAll
+    : leaderboardAll.filter((c) => (assetFilter === "commodities") === isCommodity(c));
   const runs = runsData?.runs ?? [];
   const running = status?.cycleInFlight || runCycleMutation.isPending;
 
@@ -426,6 +438,22 @@ export default function AgentLabPage() {
                 results that accumulate every cycle on markets settled after the strategy was proposed — the
                 evidence promotions rest on.
               </CardDescription>
+              <div className="flex items-center gap-1.5 pt-1">
+                {(["all", "crypto", "commodities"] as const).map((key) => (
+                  <Button
+                    key={key}
+                    size="sm"
+                    variant={assetFilter === key ? "secondary" : "ghost"}
+                    className="h-6 px-2 text-[11px] capitalize"
+                    onClick={() => setAssetFilter(key)}
+                  >
+                    {key}
+                    {key === "commodities" && commodityCount > 0 && (
+                      <span className="ml-1 font-mono">({commodityCount})</span>
+                    )}
+                  </Button>
+                ))}
+              </div>
             </CardHeader>
             <CardContent className="px-0 pb-0">
               {leaderboard.length === 0 ? (
