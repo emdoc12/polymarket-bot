@@ -120,6 +120,27 @@ const WORKER_ROLES: WorkerRole[] = [
   },
 ];
 
+// Dedicated commodities desk: same binary grammar, domain-tuned heads. The
+// generalist workers' context is crypto-dominated; these two live and
+// breathe the commodity venues (added alongside them, like the perps desk).
+const COMMODITY_WORKER_ROLES: WorkerRole[] = [
+  {
+    key: "commodity_explorer",
+    system: `You are the Commodities Explorer on a quant research desk, covering Kalshi's NEW 15-minute commodity up/down markets: KXWTI15M (WTI crude), KXGOLD15M, KXSILVER15M, KXNATGAS15M, KXCOPPER15M, KXPLATINUM15M, KXPALLADIUM15M. Domain facts that matter:
+- Books are market-maker quoted with near-zero crowd volume (fresh venue). MM pricing of 15-minute moves may be crude - that is the opportunity. Fill reality is unproven; favor 25-65c bands where crypto fills actually happened.
+- Underlyings trade on CME/Globex hours: active roughly Sun 6pm-Fri 5pm ET with a 5-6pm ET daily pause; dead weekends; liquidity concentrates in US morning hours (~8am-2:30pm ET, pit hours). ALWAYS set minHourEt/maxHourEt sensibly - overnight commodity windows are dead air.
+- Scheduled catalysts create 15-min vol bursts: EIA crude inventories Wed 10:30am ET (WTI), EIA natgas storage Thu 10:30am ET, US data at 8:30am ET (metals). Hour bands around these are natural hypotheses.
+- The "value" rule is NOT available on commodities. Use momentum/fade/trend families.
+Propose NOVEL specs across different commodities, hours, and geometries - diversity beats depth on an unmapped venue.\n\n${SPEC_SPACE_DOC}`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 novel COMMODITY-series specs (series must be one of the seven commodity venues) with distinct hypotheses. One-sentence rationale each, naming the market microstructure or catalyst it targets.`,
+  },
+  {
+    key: "commodity_optimizer",
+    system: `You are the Commodities Optimizer on a quant research desk covering Kalshi's 15-minute commodity up/down markets (WTI, gold, silver, natgas, copper, platinum, palladium). Two jobs: (1) mutate the most promising existing commodity candidates - one or two parameters at a time, guided by train/holdout gaps and fill evidence; (2) PORT proven crypto geometry cross-asset: the crypto desk's real-fill winners (momentum favorites in fillable mid bands, T-420 to T-720 timing) are hypotheses worth translating to WTI and gold with commodity-appropriate hour bands (US morning session; avoid dead overnight). The "value" rule is unavailable on commodities.\n\n${SPEC_SPACE_DOC}`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 COMMODITY-series specs: mutations of existing commodity candidates when any exist, otherwise ports of the strongest crypto real-fill geometries onto WTI/gold with sensible hour bands. Name the parent idea in each rationale.`,
+  },
+];
+
 const PERP_SPEC_DOC = `Perp strategy spec fields (Kalshi perpetual futures, $50 notional per trade, taker fee ~0.12% of notional each side, long/short via continuous 1-min candles; funding is NOT modeled so holds are capped at 3h):
 - market: "KXBTCPERP1" (BTC perp, ~BTC/10000 price scale) or "KXETHPERP1" (ETH perp)
 - direction: "trend_follow" (enter with the move) or "trend_fade" (against it)
@@ -468,33 +489,49 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     // Self-regulating research intensity: when the testing pool is saturated,
     // stop proposing and let walk-forward + culls drain it; resume when there
     // is room to give new ideas a fair trial.
-    const testingBinaryCount = storage.getCandidateStrategies("testing").filter((c) => c.kind !== "perp").length;
+    // Saturation budgets are PER ASSET CLASS: a bloated crypto pool paused
+    // all binary proposing for days and silently sealed off the commodity
+    // launch (and would have re-sealed it the moment commodities stopped
+    // counting as "unexplored"). Each class now has its own budget.
+    const isCommoditySeries = (s: string) => s.startsWith("KX") && !s.startsWith("KXBTC") && !s.startsWith("KXETH");
+    const testingBinaries = storage.getCandidateStrategies("testing").filter((c) => c.kind !== "perp");
+    const seriesOf = (c: CandidateStrategy) => {
+      try { return String(JSON.parse(c.spec).series); } catch { return ""; }
+    };
+    const testingCryptoCount = testingBinaries.filter((c) => !isCommoditySeries(seriesOf(c))).length;
+    const testingCommodityCount = testingBinaries.filter((c) => isCommoditySeries(seriesOf(c))).length;
     const testingPerpCount = storage.getCandidateStrategies("testing").filter((c) => c.kind === "perp").length;
-    const binaryPoolOpen = testingBinaryCount < 300;
+    const cryptoPoolOpen = testingCryptoCount < 300;
+    const commodityPoolOpen = testingCommodityCount < 150;
     const perpPoolOpen = testingPerpCount < 150;
+    const poolOpenFor = (series: string) => (isCommoditySeries(series) ? commodityPoolOpen : cryptoPoolOpen);
 
-    // Frontier carve-out: the saturation throttle must never seal off a venue
-    // that has ZERO candidates ever (e.g. the Sep 2026 commodity 15-min
-    // launch) - a bloated crypto pool was silently blocking all commodity
-    // exploration. When unexplored venues exist, binary workers still run,
-    // and (if the pool is saturated) only unexplored-venue proposals are
-    // accepted so the bloat cannot grow.
+    // Frontier carve-out: a venue with ZERO candidates ever is always open.
     const exploredSeries = new Set<string>();
     for (const c of storage.getCandidateStrategies()) {
-      if (c.kind === "perp") continue;
-      try { exploredSeries.add(String(JSON.parse(c.spec).series)); } catch { /* skip */ }
+      if (c.kind !== "perp") exploredSeries.add(seriesOf(c));
     }
     const unexploredSeries = SPEC_SERIES.filter((s) => !exploredSeries.has(s));
-    const runBinaryWorkers = binaryPoolOpen || unexploredSeries.length > 0;
-    const frontierNote = unexploredSeries.length > 0
-      ? `\nUNEXPLORED VENUES: ${unexploredSeries.join(", ")} have ZERO candidates ever. These are newly launched markets - potentially the softest prices on the exchange, and nobody has tested a single spec. ${binaryPoolOpen ? "Each worker should aim at least one proposal at an unexplored venue." : "The testing pool is saturated, so ONLY proposals targeting these unexplored venues will be accepted this cycle - propose there or not at all."} Current research focus applies to existing venues; it does not override frontier exploration.`
-      : "";
+    const runBinaryWorkers = cryptoPoolOpen || commodityPoolOpen || unexploredSeries.length > 0;
+    const frontierNote = [
+      unexploredSeries.length > 0
+        ? `\nUNEXPLORED VENUES: ${unexploredSeries.join(", ")} have ZERO candidates ever - newly launched markets, potentially the softest prices on the exchange. Aim proposals there. A research focus never overrides frontier exploration.`
+        : "",
+      !cryptoPoolOpen ? `\nNOTE: the CRYPTO testing pool is saturated (${testingCryptoCount}); crypto proposals will be rejected this cycle. Commodity proposals ${commodityPoolOpen ? "remain open" : "are also closed"}.` : "",
+    ].join("");
     const workerContext = contextText + frontierNote;
 
     // 1. Specialist agents propose in parallel (structured outputs -> validated
     // JSON). Each worker is individually fault-isolated: a truncated or failed
     // response costs that worker's proposals, never the whole cycle.
-    const workerResults = !runBinaryWorkers ? [] : await Promise.all(WORKER_ROLES.map(async (role) => {
+    // Commodities desk runs whenever its own pool has room (or the venue is
+    // still unexplored) - independent of crypto saturation.
+    const runCommodityWorkers = commodityPoolOpen || unexploredSeries.some((s) => isCommoditySeries(s));
+    const activeWorkerRoles = [
+      ...(runBinaryWorkers ? WORKER_ROLES : []),
+      ...(runCommodityWorkers ? COMMODITY_WORKER_ROLES : []),
+    ];
+    const workerResults = await Promise.all(activeWorkerRoles.map(async (role) => {
       try {
         const response = await client.messages.parse({
           model: workerModel,
@@ -546,8 +583,8 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         proposalCount += 1;
         if (fresh.length >= maxCandidates) continue;
         const spec = clampSpec(proposal);
-        // Saturated pool: only frontier (unexplored-venue) proposals get in.
-        if (!binaryPoolOpen && !unexploredSeries.includes(spec.series as (typeof SPEC_SERIES)[number])) continue;
+        // Class-budget gate: a saturated class only admits frontier proposals.
+        if (!poolOpenFor(spec.series) && !unexploredSeries.includes(spec.series as (typeof SPEC_SERIES)[number])) continue;
         const hash = specHash(spec);
         if (storage.getCandidateBySpecHash(hash)) continue;
         const candidate = storage.createCandidateStrategy({
