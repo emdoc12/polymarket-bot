@@ -10,6 +10,7 @@ import {
   evaluateSpecOnData,
   evaluateSpecSample,
   fetchSettledMarketData,
+  SPEC_SERIES,
   specHash,
   type KalshiStrategySpec,
   type SettledMarketData,
@@ -155,7 +156,7 @@ The desk runs TWO strategy kinds, reviewed together:
 - kind "binary": event-contract specs on 15-min up/down markets (see the binary spec doc below).
 - kind "perp": perpetual-futures long/short specs. ${PERP_SPEC_DOC.split("\n")[0]} Same promotion discipline applies: >= 15 profitable live (walk-forward) trades with discovery agreement.
 
-Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
+Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 
@@ -472,16 +473,34 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     const binaryPoolOpen = testingBinaryCount < 300;
     const perpPoolOpen = testingPerpCount < 150;
 
+    // Frontier carve-out: the saturation throttle must never seal off a venue
+    // that has ZERO candidates ever (e.g. the Sep 2026 commodity 15-min
+    // launch) - a bloated crypto pool was silently blocking all commodity
+    // exploration. When unexplored venues exist, binary workers still run,
+    // and (if the pool is saturated) only unexplored-venue proposals are
+    // accepted so the bloat cannot grow.
+    const exploredSeries = new Set<string>();
+    for (const c of storage.getCandidateStrategies()) {
+      if (c.kind === "perp") continue;
+      try { exploredSeries.add(String(JSON.parse(c.spec).series)); } catch { /* skip */ }
+    }
+    const unexploredSeries = SPEC_SERIES.filter((s) => !exploredSeries.has(s));
+    const runBinaryWorkers = binaryPoolOpen || unexploredSeries.length > 0;
+    const frontierNote = unexploredSeries.length > 0
+      ? `\nUNEXPLORED VENUES: ${unexploredSeries.join(", ")} have ZERO candidates ever. These are newly launched markets - potentially the softest prices on the exchange, and nobody has tested a single spec. ${binaryPoolOpen ? "Each worker should aim at least one proposal at an unexplored venue." : "The testing pool is saturated, so ONLY proposals targeting these unexplored venues will be accepted this cycle - propose there or not at all."} Current research focus applies to existing venues; it does not override frontier exploration.`
+      : "";
+    const workerContext = contextText + frontierNote;
+
     // 1. Specialist agents propose in parallel (structured outputs -> validated
     // JSON). Each worker is individually fault-isolated: a truncated or failed
     // response costs that worker's proposals, never the whole cycle.
-    const workerResults = !binaryPoolOpen ? [] : await Promise.all(WORKER_ROLES.map(async (role) => {
+    const workerResults = !runBinaryWorkers ? [] : await Promise.all(WORKER_ROLES.map(async (role) => {
       try {
         const response = await client.messages.parse({
           model: workerModel,
           max_tokens: 6000,
           system: role.system,
-          messages: [{ role: "user", content: role.buildTask(contextText) }],
+          messages: [{ role: "user", content: role.buildTask(workerContext) }],
           output_config: { format: zodOutputFormat(WorkerOutputSchema) },
         });
         if (response.stop_reason === "refusal" || !response.parsed_output) {
@@ -527,6 +546,8 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         proposalCount += 1;
         if (fresh.length >= maxCandidates) continue;
         const spec = clampSpec(proposal);
+        // Saturated pool: only frontier (unexplored-venue) proposals get in.
+        if (!binaryPoolOpen && !unexploredSeries.includes(spec.series as (typeof SPEC_SERIES)[number])) continue;
         const hash = specHash(spec);
         if (storage.getCandidateBySpecHash(hash)) continue;
         const candidate = storage.createCandidateStrategy({
@@ -696,7 +717,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
           messages: [{
             role: "user",
             content: [
-              contextText,
+              workerContext,
               `\nSpecialist notes from this cycle:\n${skepticNotes}`,
               `\nCandidates currently under review (decide each by candidateId):`,
               JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
