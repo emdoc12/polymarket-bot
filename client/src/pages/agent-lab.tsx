@@ -109,7 +109,7 @@ function SampleCell({ sample }: { sample: Candidate["train"] }) {
   return (
     <div className="text-xs">
       <PnlText value={sample.netPnl} />
-      <span className="text-muted-foreground ml-1.5">
+      <span className="text-muted-foreground block sm:inline sm:ml-1.5 text-[10px] sm:text-xs whitespace-nowrap">
         {sample.trades}t · {winRate.toFixed(0)}%
       </span>
     </div>
@@ -117,9 +117,9 @@ function SampleCell({ sample }: { sample: Candidate["train"] }) {
 }
 
 function statusBadge(status: string) {
-  if (status === "promoted") return <Badge className="bg-profit/15 text-profit border-profit/20 text-[10px]">promoted</Badge>;
-  if (status === "rejected") return <Badge variant="outline" className="text-muted-foreground text-[10px]">rejected</Badge>;
-  return <Badge variant="secondary" className="text-[10px]">testing</Badge>;
+  if (status === "promoted") return <Badge className="bg-profit/15 text-profit border-profit/20 text-[10px] !px-1.5">promoted</Badge>;
+  if (status === "rejected") return <Badge variant="outline" className="text-muted-foreground text-[10px] !px-1.5">rejected</Badge>;
+  return <Badge variant="secondary" className="text-[10px] !px-1.5">testing</Badge>;
 }
 
 function describeSpec(candidate: Candidate) {
@@ -462,34 +462,34 @@ export default function AgentLabPage() {
                 </p>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-sm table-fixed sm:table-auto">
                     <thead>
                       <tr className="text-[11px] text-muted-foreground border-b border-border">
-                        <th className="text-left font-medium px-5 py-2">Strategy</th>
-                        <th className="text-left font-medium px-3 py-2">Status</th>
-                        <th className="text-left font-medium px-3 py-2">Train</th>
-                        <th className="text-left font-medium px-3 py-2">Holdout</th>
-                        <th className="text-left font-medium px-3 py-2">Live</th>
+                        <th className="text-left font-medium px-3 sm:px-5 py-2">Strategy</th>
+                        <th className="text-left font-medium px-2 sm:px-3 py-2 w-[4.6rem] sm:w-auto">Status</th>
+                        <th className="text-left font-medium px-2 sm:px-3 py-2 w-[3.7rem] sm:w-auto">Train</th>
+                        <th className="text-left font-medium px-2 sm:px-3 py-2 w-[3.7rem] sm:w-auto">Holdout</th>
+                        <th className="text-left font-medium px-2 sm:px-3 py-2 w-[3.7rem] sm:w-auto">Live</th>
                         <th className="text-left font-medium px-3 py-2 hidden lg:table-cell">PM notes</th>
                       </tr>
                     </thead>
                     <tbody>
                       {leaderboard.map((candidate) => (
                         <tr key={candidate.id} className="border-b border-border/50 align-top">
-                          <td className="px-5 py-2.5">
-                            <div className="flex items-center gap-1.5">
-                              <p className="text-xs font-medium">{candidate.name}</p>
+                          <td className="px-3 sm:px-5 py-2.5 overflow-hidden">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <p className="text-xs font-medium truncate">{candidate.name}</p>
                               {candidate.kind === "perp" && (
                                 <Badge variant="outline" className="text-[9px] px-1 py-0">perp</Badge>
                               )}
                             </div>
-                            <p className="text-[11px] text-muted-foreground">{describeSpec(candidate)}</p>
-                            <p className="text-[11px] text-muted-foreground/70">by {candidate.createdBy}</p>
+                            <p className="text-[11px] text-muted-foreground truncate">{describeSpec(candidate)}</p>
+                            <p className="text-[11px] text-muted-foreground/70 truncate">by {candidate.createdBy}</p>
                           </td>
-                          <td className="px-3 py-2.5">{statusBadge(candidate.status)}</td>
-                          <td className="px-3 py-2.5"><SampleCell sample={candidate.train} /></td>
-                          <td className="px-3 py-2.5"><SampleCell sample={candidate.holdout} /></td>
-                          <td className="px-3 py-2.5">
+                          <td className="px-1 sm:px-3 py-2.5">{statusBadge(candidate.status)}</td>
+                          <td className="px-2 sm:px-3 py-2.5"><SampleCell sample={candidate.train} /></td>
+                          <td className="px-2 sm:px-3 py-2.5"><SampleCell sample={candidate.holdout} /></td>
+                          <td className="px-2 sm:px-3 py-2.5">
                             {(candidate.live.trades ?? 0) > 0
                               ? <SampleCell sample={candidate.live} />
                               : <span className="text-xs text-muted-foreground">accruing</span>}
