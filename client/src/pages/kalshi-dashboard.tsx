@@ -58,6 +58,8 @@ type LiveStatus = {
   openTrades: number;
   tradesToday: number;
   maxTradesPerDay: number;
+  orderSize: number;
+  autoStake: boolean;
   totalSettled: number;
   totalWins: number;
   totalNetPnl: number;
@@ -580,6 +582,13 @@ export default function KalshiDashboard() {
                   {liveStatus
                     ? `${liveStatus.openTrades} · ${liveStatus.tradesToday}${liveStatus.maxTradesPerDay > 0 ? `/${liveStatus.maxTradesPerDay}` : ""}`
                     : "—"}
+                </p>
+                {liveStatus?.orderSize != null && (
+                  <p className="text-[11px] text-muted-foreground">
+                    ${liveStatus.orderSize.toFixed(0)} stakes{liveStatus.autoStake ? " · auto-scaling" : ""}
+                  </p>
+                )}
+                <p className="hidden">{/* structure keeps tile heights aligned */}
                 </p>
               </div>
               <div>

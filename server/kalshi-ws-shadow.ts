@@ -10,7 +10,7 @@ import {
   type KalshiStrategySpec,
 } from "./kalshi";
 import { decideLiveEntry } from "./kalshi-executor";
-import { getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
+import { computeLiveStake, getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
 import { kalshiProdStream } from "./kalshi-ws";
 import { fetchCfPassthrough } from "./kalshi-trading";
 import type { CandidateStrategy } from "@shared/schema";
@@ -109,7 +109,9 @@ async function tryShadowEntry(candidate: CandidateStrategy, spec: KalshiStrategy
   if (!decision.ok) return;
   if (!passesLivePriceGuards(decision.entryPrice)) return;
 
-  const orderSize = Math.max(0.5, parseFloat(storage.getSetting("live_order_size") || "2"));
+  // Mirror the live executor's bankroll-proportional stake so shadow rows
+  // keep predicting what live would actually risk.
+  const orderSize = await computeLiveStake();
   const contracts = Math.max(1, Math.floor(orderSize / decision.entryPrice));
   const cost = contracts * decision.entryPrice;
   const fee = kalshiTradingFee(contracts, decision.entryPrice);

@@ -60,6 +60,34 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_max_entry_price")) storage.setSetting("live_max_entry_price", "0.80");
   if (!storage.getSetting("live_min_audition_trades")) storage.setSetting("live_min_audition_trades", "15");
   if (!storage.getSetting("live_trading_hours_et")) storage.setSetting("live_trading_hours_et", "0-24");
+  if (!storage.getSetting("live_auto_stake")) storage.setSetting("live_auto_stake", "true");
+  if (!storage.getSetting("live_stake_fraction")) storage.setSetting("live_stake_fraction", "0.04");
+  if (!storage.getSetting("live_max_order_size")) storage.setSetting("live_max_order_size", "10");
+}
+
+// Bankroll-proportional stakes: 4% of (free cash + open-position cost),
+// floored to whole dollars, between live_order_size (floor) and
+// live_max_order_size (cap). $50->$2, $75->$3, $100->$4, $125->$5 ... and it
+// steps DOWN in drawdowns, protecting the kill-switch distance. Balance is
+// cached ~60s; any fetch failure falls back to the floor stake.
+let bankrollCache: { at: number; dollars: number } | null = null;
+export async function computeLiveStake(): Promise<number> {
+  const floorStake = Math.max(0.5, parseFloat(storage.getSetting("live_order_size") || "2"));
+  if (storage.getSetting("live_auto_stake") !== "true") return floorStake;
+  const cap = Math.max(floorStake, parseFloat(storage.getSetting("live_max_order_size") || "10"));
+  const fraction = Math.min(0.15, Math.max(0.01, parseFloat(storage.getSetting("live_stake_fraction") || "0.04")));
+  try {
+    if (!bankrollCache || Date.now() - bankrollCache.at > 60_000) {
+      const balance = await getKalshiBalanceEnv("prod");
+      const freeCash = typeof balance?.balance === "number" ? balance.balance / 100 : NaN;
+      if (!Number.isFinite(freeCash)) return floorStake;
+      const openCost = storage.getUnsettledLiveTrades().reduce((sum, t) => sum + t.cost, 0);
+      bankrollCache = { at: Date.now(), dollars: freeCash + openCost };
+    }
+    return Math.min(cap, Math.max(floorStake, Math.floor(bankrollCache.dollars * fraction)));
+  } catch {
+    return floorStake;
+  }
 }
 
 // Executor-level trading-hours curfew ("8-24" = only 8am-midnight ET;
@@ -195,7 +223,7 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
   if (!decision.ok) return;
   if (!passesLivePriceGuards(decision.entryPrice)) return;
 
-  const orderSize = Math.max(0.5, parseFloat(storage.getSetting("live_order_size") || "2"));
+  const orderSize = await computeLiveStake();
   let contracts = Math.max(1, Math.floor(orderSize / decision.entryPrice));
   let entryPrice = decision.entryPrice;
   let cost = contracts * entryPrice;
@@ -381,7 +409,8 @@ export function registerLiveExecutorRoutes(app: Express) {
       armedStrategies: armed.map((c) => ({ id: c.id, name: c.name, demoTrades: c.demoTrades, demoNetPnl: c.demoNetPnl })),
       openTrades: storage.getUnsettledLiveTrades().length,
       tradesToday: liveTradesToday(),
-      orderSize: parseFloat(storage.getSetting("live_order_size") || "2"),
+      orderSize: await computeLiveStake(),
+      autoStake: storage.getSetting("live_auto_stake") === "true",
       maxOpenTrades: parseInt(storage.getSetting("live_max_open_trades") || "2", 10),
       maxTradesPerDay: parseInt(storage.getSetting("live_max_trades_per_day") || "20", 10),
       maxTotalLoss: parseFloat(storage.getSetting("live_max_total_loss") || "25"),
