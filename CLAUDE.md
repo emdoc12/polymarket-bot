@@ -163,6 +163,15 @@ live_executor_enabled=true and live_kill_switch — use dedicated routes).
   only. Toggle switch on the dashboard live card (live_salvage_enabled).
   Rows: status 'salvaged' or blended partial via exit_* columns.
 
+## Self-tuning constitution (v1.21.1)
+
+The PM proposes rail-threshold changes ("RAIL PROPOSAL:") which the PM-watch
+agent validates against a ledger replay and applies via /api/settings ONLY
+inside these bounds: salvage edge 0.04-0.12, salvage cap 0.25-0.50, cooldown
+2-5 losses / 30-90 min, recency bench $4-10 / 10-25 trades, trailing soft
+8-18 / hard 15-25 / pause 3-12h. Human-only forever: kill switch, arming,
+stakes, floor/ceiling, transport, curfew, money-machinery code.
+
 ## PM watch (autonomous grammar-request loop)
 
 A local Claude Code session on the user's Mac runs a 4-hourly "PM WATCH"
