@@ -151,6 +151,14 @@ live_executor_enabled=true and live_kill_switch — use dedicated routes).
   user approval; the user runs sequenced rollouts themselves only for OTHER
   repos — this repo has standing push permission.
 
+- Salvage exits (v1.16.0): mid-window sale of dying positions when the
+  crowd's bid exceeds fair-value model by live_salvage_edge (0.06) with
+  model value <= live_salvage_max_model_value (0.35). Backtest-validated
+  across full grid before shipping. Selling = buying the opposite side
+  (Kalshi auto-nets). Runs even while disarmed/cooling; stream-transport
+  only. Toggle switch on the dashboard live card (live_salvage_enabled).
+  Rows: status 'salvaged' or blended partial via exit_* columns.
+
 ## Parked / open threads
 
 - Streaming (WS) order path: build only when audition math justifies it.
