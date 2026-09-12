@@ -390,7 +390,11 @@ function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats, au
         ? `LIVE EXECUTION REALITY (binary desk, real demo order attempts by entry price band): ${fillDigest}. Entries that don't fill earn nothing regardless of backtest edge - favor bands that actually fill.`
         : "",
       realDigest
-        ? `REAL-MONEY RESULTS (production account, $2 stakes, only allowlisted promoted strategies trade there): ${realDigest}. This is measured against real crowds, not demo's seeded market makers - when real-money results disagree with demo results, trust real money and steer research accordingly. Note: production skips entries above ${Math.round(parseFloat(storage.getSetting("live_max_entry_price") || "0.80") * 100)}c.`
+        ? `REAL-MONEY RESULTS (production account, $2 stakes, only allowlisted promoted strategies trade there): ${realDigest}. This is measured against real crowds, not demo's seeded market makers - when real-money results disagree with demo results, trust real money and steer research accordingly. Note: production skips entries above ${Math.round(parseFloat(storage.getSetting("live_max_entry_price") || "0.80") * 100)}c.${
+          storage.getSetting("live_transport") === "stream"
+            ? ` TRANSPORT REGIME CHANGE: since ${storage.getSetting("live_transport_since") || "2026-09-12"} production orders use the STREAMING transport (entries priced off the live orderbook with depth confirmation; fill rates near 100% vs ~60% before; entries fire at the first eligible second so expect slightly earlier/richer entry prices). Interpret post-switch fill-rate and price shifts as transport effects, not strategy drift; each live trade's 'transport' field says which regime it belongs to. The unfilled-order leak (73% of misses were winners) is now closed - strategies whose demo record was dragged by unfillable entries deserve fresh eyes.`
+            : ""
+        }`
         : "",
       buildAuditionDigest(auditionStats),
       buildForensicsDigest(),
