@@ -61,7 +61,7 @@ export const SERIES_INDEX: Record<string, string> = {
   KXBTC15M: "BRTI",
   KXETH15M: "ETHUSD_RTI",
 };
-const SPOT_BUFFER_MS = 40 * 60 * 1000;
+const SPOT_BUFFER_MS = 9.5 * 3600 * 1000; // multi-hour: trend-align gates read hours back
 
 class KalshiMarketStream {
   private ws: WebSocket | null = null;
@@ -141,11 +141,17 @@ class KalshiMarketStream {
   getSpotAt(series: string, ts: number, toleranceMs = 90_000): number | null {
     const buf = this.spot.get(SERIES_INDEX[series] ?? series);
     if (!buf || buf.samples.length === 0) return null;
-    let best: SpotSample | null = null;
-    for (const s of buf.samples) {
-      if (!best || Math.abs(s.ts - ts) < Math.abs(best.ts - ts)) best = s;
+    // Samples are time-ordered; binary search (buffer now spans ~9h).
+    const arr = buf.samples;
+    let lo = 0, hi = arr.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid].ts < ts) lo = mid + 1;
+      else hi = mid;
     }
-    return best && Math.abs(best.ts - ts) <= toleranceMs ? best.value : null;
+    let best = arr[lo];
+    if (lo > 0 && Math.abs(arr[lo - 1].ts - ts) < Math.abs(best.ts - ts)) best = arr[lo - 1];
+    return Math.abs(best.ts - ts) <= toleranceMs ? best.value : null;
   }
 
   // Realized volatility of the index as stddev of per-second log returns
@@ -282,7 +288,7 @@ class KalshiMarketStream {
       for (const indexId of Object.values(SERIES_INDEX)) {
         const buf = this.spot.get(indexId) ?? { samples: [], lastValue: null, lastTs: 0, avg60s: null };
         const fetched: SpotSample[] = [];
-        for (const hoursBack of [1, 0]) {
+        for (const hoursBack of [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]) {
           try {
             const hourStart = (Math.floor(Date.now() / 3600_000) - hoursBack) * 3600_000;
             const iso = new Date(hourStart).toISOString();

@@ -187,6 +187,13 @@ export type KalshiStrategySpec = {
   // or storms (vol cap). Crypto only - needs underlying spot history/stream.
   minVol1mBps: number;
   maxVol1mBps: number;
+  // Big-picture gate: the underlying's OWN multi-hour direction (spot now vs
+  // spot N hours ago). 0 = off. "with" only enters on the side matching that
+  // higher-timeframe trend; "against" only opposes it. Added because every
+  // other signal is window-myopic - the desk bled through rallies no rule
+  // could see. Crypto only (needs underlying history).
+  trendAlignHours: number;
+  trendAlignMode: "with" | "against";
   orderSize: number;
 };
 
@@ -255,8 +262,17 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     dowMaskEt: Math.round(clampNum(raw.dowMaskEt, 1, 127, 127)),
     minVol1mBps: clampNum(raw.minVol1mBps, 0, 500, 0),
     maxVol1mBps: clampNum(raw.maxVol1mBps, 0, 500, 0),
+    trendAlignHours: Math.round(clampNum(raw.trendAlignHours, 0, 8, 0)),
+    trendAlignMode: raw.trendAlignMode === "against" ? "against" : "with",
     orderSize: 10, // fixed so results stay comparable across candidates
   };
+}
+
+// Does the chosen side satisfy the higher-timeframe alignment gate?
+// upTrend = underlying rose over the trailing window; side "yes" bets up.
+export function trendAlignOk(side: "yes" | "no" | "YES" | "NO", upTrend: boolean, mode: "with" | "against"): boolean {
+  const sideUp = side === "yes" || side === "YES";
+  return mode === "with" ? sideUp === upTrend : sideUp !== upTrend;
 }
 
 export function volGateActive(spec: KalshiStrategySpec): boolean {
@@ -287,6 +303,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.sideFilter !== "both" ? [spec.sideFilter] : []),
     ...(spec.dowMaskEt > 0 && spec.dowMaskEt < 127 ? [spec.dowMaskEt] : []),
     ...(spec.minVol1mBps > 0 || spec.maxVol1mBps > 0 ? [spec.minVol1mBps.toFixed(1), spec.maxVol1mBps.toFixed(1)] : []),
+    ...(spec.trendAlignHours > 0 ? [spec.trendAlignHours, spec.trendAlignMode] : []),
   ].join("|");
 }
 
@@ -463,7 +480,8 @@ export async function fetchSettledMarketData(series: string, lookback: number): 
   // Coinbase proxy when it's unavailable.
   if (data.length > 0) {
     try {
-      const startSec = Math.min(...data.map((d) => Math.floor(d.closeMs / 1000))) - 3600;
+      // 9h of pre-history so multi-hour trend-alignment gates are testable.
+      const startSec = Math.min(...data.map((d) => Math.floor(d.closeMs / 1000))) - 9 * 3600;
       const endSec = Math.max(...data.map((d) => Math.floor(d.closeMs / 1000))) + 60;
       let lookup: ((tsSec: number) => number | null) | null = null;
       const cfSamples = await fetchCfHistoryRange(series, startSec, endSec);
@@ -558,6 +576,13 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
   if (!side) return null;
   if (spec.sideFilter === "yes_only" && side !== "YES") return null;
   if (spec.sideFilter === "no_only" && side !== "NO") return null;
+  if (spec.trendAlignHours > 0) {
+    if (!entry.spotValueAt) return null;
+    const spotNow = entry.spotValueAt(entryTs);
+    const spotThen = entry.spotValueAt(entryTs - spec.trendAlignHours * 3600);
+    if (spotNow == null || spotThen == null) return null;
+    if (!trendAlignOk(side, spotNow >= spotThen, spec.trendAlignMode)) return null;
+  }
 
   const entryPrice = side === "YES" ? yesAsk : 1 - yesBid;
   if (entryPrice < spec.minEntryPrice || entryPrice > spec.maxEntryPrice) return null;

@@ -10,6 +10,7 @@ import {
   hourInWindow,
   kalshiTradingFee,
   parseDollars,
+  trendAlignOk,
   valueModelProbUp,
   volGateActive,
   volInGate,
@@ -144,6 +145,16 @@ export async function decideLiveEntry(
   if (!side) return { ok: false, reason: "no side decision" };
   if (spec.sideFilter === "yes_only" && side !== "yes") return { ok: false, reason: "side filter (yes_only)" };
   if (spec.sideFilter === "no_only" && side !== "no") return { ok: false, reason: "side filter (no_only)" };
+  if (spec.trendAlignHours > 0) {
+    const spotNow = kalshiProdStream.getSpot(spec.series);
+    const spotThen = kalshiProdStream.getSpotAt(spec.series, nowMs - spec.trendAlignHours * 3600_000, 10 * 60_000);
+    if (!spotNow || spotThen == null) {
+      return { ok: false, reason: "trend-align gate set but underlying history unavailable" };
+    }
+    if (!trendAlignOk(side, spotNow.value >= spotThen, spec.trendAlignMode)) {
+      return { ok: false, reason: "side misaligned with higher-timeframe trend gate" };
+    }
+  }
 
   const entryPrice = side === "yes" ? yesAsk : 1 - yesBid;
   if (entryPrice < spec.minEntryPrice || entryPrice > spec.maxEntryPrice) {

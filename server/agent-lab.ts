@@ -25,6 +25,8 @@ import {
   type PerpStrategySpec,
 } from "./kalshi-perps";
 import type { CandidateStrategy } from "@shared/schema";
+import { kalshiProdStream } from "./kalshi-ws";
+import { volPerSqrtSecTo1mBps } from "./kalshi";
 
 // The Strategy Lab: a PM (Opus) directing a team of specialist agents (Haiku)
 // that invent, mutate, and stress-test parameterized Kalshi strategy specs.
@@ -53,6 +55,8 @@ const SpecProposalSchema = z.object({
   dowMaskEt: z.number(),
   minVol1mBps: z.number(),
   maxVol1mBps: z.number(),
+  trendAlignHours: z.number(),
+  trendAlignMode: z.enum(["with", "against"]),
   rationale: z.string(),
 });
 
@@ -96,6 +100,7 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - trendLookbackMinutes: 1-10 (trend rules only)
 - minSignal: 0-0.45 (minimum |price-0.5| for momentum/fade; minimum |price move| for trend rules; 0 = no filter)
 - sideFilter: "both" | "yes_only" | "no_only" - direction specialization. Live evidence: ALL real-money profit has come from down-closing windows; up windows bleed. The desk needs RALLY SPECIALISTS: yes_only variants of proven geometries with their own bands/timings/hours (up-moves may need tighter signals or different bands than down-moves). A yes_only spec only takes entries whose chosen side is YES; backtested like every other field.
+- trendAlignHours (0-8, 0=off) / trendAlignMode ("with"|"against"): BIG-PICTURE gate on the UNDERLYING's own multi-hour direction (spot now vs spot N hours ago). "with" only takes entries whose side matches that higher-timeframe trend; "against" only opposes it. Every other signal is window-myopic - the live book bled through rallies no rule could see. Combine with sideFilter for true rally specialists (e.g. yes_only + trendAlignHours 4 "with" = only bet up, only when BTC has actually been rising for hours). Crypto only; fully backtested.
 - minVol1mBps / maxVol1mBps: realized-volatility regime gate (your GRAMMAR REQUEST, granted). Only enter when the UNDERLYING's trailing 30-min realized vol - stddev of 1-minute log returns, in basis points - is inside the range; 0 disables a bound. Typical BTC/ETH: ~4-10 bps calm/chop, ~12-30 bps trending, 40+ storm. Use a FLOOR (e.g. minVol1mBps 8-12) to keep momentum/trend specs out of the chop where losses streak, a CAP to keep specs out of storms. CRYPTO ONLY (commodities have no underlying feed - leave both 0 there). Fully backtested; a gated spec skips windows where spot history can't verify the regime.
 - dowMaskEt: day-of-week bitmask in ET, bit 0=Sunday ... bit 6=Saturday; 127 = every day. Examples: 62 = Mon-Fri, 16 = Thursday only (EIA natgas storage), 8 = Wednesday only (EIA crude inventories), 40 = Wed+Thu. Granted per your GRAMMAR REQUEST so catalyst-driven specs target their days instead of diluting samples across dead days. Fully backtested like every field.
 - minHourEt / maxHourEt: 0-24, entries allowed only in this ET-hour window (0 and 24 = all day; minHourEt > maxHourEt wraps overnight). Fully backtested like every other field. Live forensics show strong time-of-day regime structure (overnight 0-8 ET underperforms daytime badly), so hour-banded variants of proven specs are fertile ground - but let the backtests decide, not the anecdote.
@@ -405,6 +410,7 @@ function buildResearchContext(fillStats: FillStats, liveStats: LiveExecStats, au
         : "",
       buildAuditionDigest(auditionStats),
       buildForensicsDigest(),
+      buildUnderlyingContext(),
       `Leaderboard (top by holdout net P&L, $10 stakes; 'execution' shows real fill rates where available):`,
       JSON.stringify(leaderboard.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
       `Recent cycles:`,
@@ -450,6 +456,27 @@ function buildForensicsDigest(): string {
     `Window closed UP: ${line(up)}; closed DOWN: ${line(down)}. ` +
     `Loss clustering: after a loss the next trade loses ${afterLoss > 0 ? Math.round(100 * lossAfterLoss / afterLoss) : 0}% vs ${afterWin > 0 ? Math.round(100 * lossAfterWin / afterWin) : 0}% after a win - losses streak (momentum fails in persistent chop). ` +
     `Use these patterns: hour-band winning specs away from losing sessions (minHourEt/maxHourEt), and prefer geometry that avoids the clusters - but validate every pattern through the backtests before trusting it.`;
+}
+
+// The entity being bet on: the underlying's own recent behavior, so the desk
+// is never proposing in a vacuum about what BTC/ETH are actually doing.
+function buildUnderlyingContext(): string {
+  const parts: string[] = [];
+  for (const series of ["KXBTC15M", "KXETH15M"]) {
+    const now = kalshiProdStream.getSpot(series, 60_000);
+    if (!now) continue;
+    const deltas: string[] = [];
+    for (const h of [1, 4, 8]) {
+      const then = kalshiProdStream.getSpotAt(series, Date.now() - h * 3600_000, 15 * 60_000);
+      if (then != null) deltas.push(`${h}h ${(100 * (now.value - then) / then).toFixed(2)}%`);
+    }
+    const vol = kalshiProdStream.getSpotVolPerSecond(series, 30);
+    const volBps = vol != null ? volPerSqrtSecTo1mBps(vol).toFixed(1) : "?";
+    parts.push(`${series.slice(2, 5)} ${now.value.toFixed(2)} (${deltas.join(", ") || "history warming"}; 30m vol ${volBps} bps/1m)`);
+  }
+  return parts.length > 0
+    ? `UNDERLYING CONTEXT (the entity being bet on, right now): ${parts.join(" | ")}. Specs are window-myopic by default - use trendAlignHours/trendAlignMode (and sideFilter) so entries respect how the underlying is actually moving.`
+    : "";
 }
 
 function buildAuditionDigest(auditionStats: AuditionStats): string {
