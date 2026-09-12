@@ -159,6 +159,17 @@ live_executor_enabled=true and live_kill_switch — use dedicated routes).
   only. Toggle switch on the dashboard live card (live_salvage_enabled).
   Rows: status 'salvaged' or blended partial via exit_* columns.
 
+## PM watch (autonomous grammar-request loop)
+
+A local Claude Code session on the user's Mac runs a 4-hourly "PM WATCH"
+cron: polls /api/agent-lab/runs for new PM commentary, implements SAFE
+grammar/context extensions autonomously (tsc clean, VERSION bump, push;
+never risk parameters, never box settings, never order/exit logic), and
+push-notifies the user on actions, red flags, or requests needing their
+decision. State: memory/pm-watch-state.json (lastRunId). Cron jobs are
+session-scoped and expire after 7 days - to re-arm, tell any local
+session: "re-arm the PM watch per CLAUDE.md".
+
 ## Parked / open threads
 
 - Streaming (WS) order path: build only when audition math justifies it.
