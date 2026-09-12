@@ -90,9 +90,12 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
   8-24), auto-stakes 4% of bankroll floored, $2 min / $10 cap
   (live_auto_stake / live_stake_fraction / live_max_order_size) — steps DOWN
   in drawdowns. Allowlist live_top_n=6, live_min_audition_trades=15.
-- A/B verdict so far: WS shadow fills 100% vs REST ~52-60%, REST wins ~5pts
-  more per trade; total P&L statistically tied. Streaming ORDER path not
-  built yet — build it only if the audition data says fills convert to money.
+- Transport: v1.15.0 added live_transport (rest|stream). Stream mode = ~2s
+  ticks, entries priced off the WS book with depth-confirmation before
+  firing (orders themselves always REST - Kalshi has no WS order channel);
+  auto-fallback to REST quotes when stream is stale, per-trade 'transport'
+  column records the path. Built after replaying all 140 REST misses: 73%
+  would-have-won (~+$31 left on table, ~2.4 sigma vs filled trades' 60%).
 - Loss clustering (P(loss|loss)=50% vs 30%) is railed as of v1.13.1: after
   3 consecutive live losses, no entries for 45 min (live_cooldown_losses /
   live_cooldown_minutes; 0 disables). Mirror applies it; audition exempt.
