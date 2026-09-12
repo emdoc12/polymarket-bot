@@ -50,6 +50,7 @@ const SpecProposalSchema = z.object({
   minHourEt: z.number(),
   maxHourEt: z.number(),
   sideFilter: z.enum(["both", "yes_only", "no_only"]),
+  dowMaskEt: z.number(),
   rationale: z.string(),
 });
 
@@ -93,6 +94,7 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - trendLookbackMinutes: 1-10 (trend rules only)
 - minSignal: 0-0.45 (minimum |price-0.5| for momentum/fade; minimum |price move| for trend rules; 0 = no filter)
 - sideFilter: "both" | "yes_only" | "no_only" - direction specialization. Live evidence: ALL real-money profit has come from down-closing windows; up windows bleed. The desk needs RALLY SPECIALISTS: yes_only variants of proven geometries with their own bands/timings/hours (up-moves may need tighter signals or different bands than down-moves). A yes_only spec only takes entries whose chosen side is YES; backtested like every other field.
+- dowMaskEt: day-of-week bitmask in ET, bit 0=Sunday ... bit 6=Saturday; 127 = every day. Examples: 62 = Mon-Fri, 16 = Thursday only (EIA natgas storage), 8 = Wednesday only (EIA crude inventories), 40 = Wed+Thu. Granted per your GRAMMAR REQUEST so catalyst-driven specs target their days instead of diluting samples across dead days. Fully backtested like every field.
 - minHourEt / maxHourEt: 0-24, entries allowed only in this ET-hour window (0 and 24 = all day; minHourEt > maxHourEt wraps overnight). Fully backtested like every other field. Live forensics show strong time-of-day regime structure (overnight 0-8 ET underperforms daytime badly), so hour-banded variants of proven specs are fertile ground - but let the backtests decide, not the anecdote.
 Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, signal thresholds, and trading hours.
 
@@ -182,7 +184,9 @@ The desk runs TWO strategy kinds, reviewed together:
 
 Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
 
-BLIND-SPOT DUTY: you can only act within the spec grammar you are given, and history shows the desk's worst losses came from patterns the grammar could not yet express (trading hours, direction). If you notice a recurring pattern in the forensics, real-money, or audition data that NO current spec field lets the team act on, say so explicitly in your commentary, prefixed "GRAMMAR REQUEST:" with what dimension you need and why. The humans read your commentary and extend the grammar - but only if you ask. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
+BLIND-SPOT DUTY: you can only act within the spec grammar you are given, and history shows the desk's worst losses came from patterns the grammar could not yet express (trading hours, direction). If you notice a recurring pattern in the forensics, real-money, or audition data that NO current spec field lets the team act on, say so explicitly in your commentary, prefixed "GRAMMAR REQUEST:" with what dimension you need and why. The humans read your commentary and extend the grammar - but only if you ask.
+
+GRAMMAR REQUESTS ANSWERED (do not re-request): dowMaskEt (day-of-week mask, ET) was granted 2026-09-12 per your request - use it for EIA-Thursday/Wednesday and print-day specs. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 

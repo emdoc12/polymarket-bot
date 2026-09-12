@@ -176,8 +176,22 @@ export type KalshiStrategySpec = {
   // down windows - one spec's geometry rarely suits both directions, so the
   // lab evolves direction specialists instead.
   sideFilter: "both" | "yes_only" | "no_only";
+  // Day-of-week mask (ET): bit 0=Sun .. bit 6=Sat; 127 = every day. Granted
+  // on the PM's GRAMMAR REQUEST so catalyst-driven specs (EIA Thursdays,
+  // 8:30 ET print days) can target their days instead of diluting samples.
+  dowMaskEt: number;
   orderSize: number;
 };
+
+const ET_DOW_FMT = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" });
+const DOW_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+export function dayOfWeekEt(ms: number): number {
+  return DOW_INDEX[ET_DOW_FMT.format(new Date(ms))] ?? 0;
+}
+export function dayAllowed(ms: number, dowMask: number): boolean {
+  if (!Number.isInteger(dowMask) || dowMask <= 0 || dowMask >= 127) return true;
+  return (dowMask & (1 << dayOfWeekEt(ms))) !== 0;
+}
 
 const ET_HOUR_FMT = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false });
 export function hourEt(ms: number): number {
@@ -231,6 +245,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     minHourEt: Math.round(clampNum(raw.minHourEt, 0, 24, 0)),
     maxHourEt: Math.round(clampNum(raw.maxHourEt, 0, 24, 24)),
     sideFilter: raw.sideFilter === "yes_only" || raw.sideFilter === "no_only" ? raw.sideFilter : "both",
+    dowMaskEt: Math.round(clampNum(raw.dowMaskEt, 1, 127, 127)),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -246,6 +261,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.minHourEt === spec.maxHourEt || (spec.minHourEt === 0 && spec.maxHourEt === 24)
       ? [] : [spec.minHourEt, spec.maxHourEt]),
     ...(spec.sideFilter !== "both" ? [spec.sideFilter] : []),
+    ...(spec.dowMaskEt > 0 && spec.dowMaskEt < 127 ? [spec.dowMaskEt] : []),
   ].join("|");
 }
 
@@ -446,6 +462,7 @@ type SpecTrade = { ticker: string; side: "YES" | "NO"; entryPrice: number; fee: 
 function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData): SpecTrade | null {
   const entryTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
   if (!hourInWindow(hourEt(entryTs * 1000), spec.minHourEt, spec.maxHourEt)) return null;
+  if (!dayAllowed(entryTs * 1000, spec.dowMaskEt)) return null;
   const sorted = [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
   const entryCandle = [...sorted].reverse().find((c) => c.end_period_ts <= entryTs);
   if (!entryCandle) return null;

@@ -5,6 +5,7 @@ import {
   getKalshiCandlesticks,
   getKalshiMarket,
   getKalshiMarkets,
+  dayAllowed,
   hourEt,
   hourInWindow,
   kalshiTradingFee,
@@ -76,6 +77,9 @@ export async function decideLiveEntry(
 ): Promise<LiveEntryDecision> {
   if (!hourInWindow(hourEt(nowMs), spec.minHourEt, spec.maxHourEt)) {
     return { ok: false, reason: "outside spec trading hours" };
+  }
+  if (!dayAllowed(nowMs, spec.dowMaskEt)) {
+    return { ok: false, reason: "outside spec trading days" };
   }
   const yesAsk = parseDollars(market.yes_ask_dollars);
   const yesBid = parseDollars(market.yes_bid_dollars);
