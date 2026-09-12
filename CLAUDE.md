@@ -93,9 +93,9 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
 - A/B verdict so far: WS shadow fills 100% vs REST ~52-60%, REST wins ~5pts
   more per trade; total P&L statistically tied. Streaming ORDER path not
   built yet — build it only if the audition data says fills convert to money.
-- Known pattern not yet railed: losses cluster (P(loss|loss)=50% vs 30%).
-  A cool-down rail (pause after 3 straight losses) was offered to the user,
-  not yet approved.
+- Loss clustering (P(loss|loss)=50% vs 30%) is railed as of v1.13.1: after
+  3 consecutive live losses, no entries for 45 min (live_cooldown_losses /
+  live_cooldown_minutes; 0 disables). Mirror applies it; audition exempt.
 
 ## Kalshi API facts (verified live)
 
@@ -150,7 +150,6 @@ live_executor_enabled=true and live_kill_switch — use dedicated routes).
 
 ## Parked / open threads
 
-- Loss cool-down rail: designed, offered, awaiting user yes.
 - Streaming (WS) order path: build only when audition math justifies it.
 - NFL scout desk: scoped and parked (divergence scanner vs sportsbook
   consensus, needs free the-odds-api.com key, paper ledger first).
