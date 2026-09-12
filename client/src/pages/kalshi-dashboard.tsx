@@ -66,6 +66,7 @@ type LiveStatus = {
   streamConnected?: boolean;
   salvage?: { enabled: boolean; edge: number; maxModelValue: number };
   recencyBenched?: string[];
+  trailing?: { hwm: number; pnl: number; drawdown: number; mode: "normal" | "defensive" | "paused"; pausedUntil: string | null };
   totalSettled: number;
   totalWins: number;
   totalNetPnl: number;
@@ -568,6 +569,16 @@ export default function KalshiDashboard() {
               {liveStatus?.cooldown?.active && (
                 <Badge className="text-[10px] bg-amber-500/15 text-amber-400 border-transparent">
                   cooling down{liveStatus.cooldown.untilMs ? ` until ${new Date(liveStatus.cooldown.untilMs).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : ""}
+                </Badge>
+              )}
+              {liveStatus?.trailing?.mode === "defensive" && (
+                <Badge className="text-[10px] bg-amber-500/15 text-amber-400 border-transparent">
+                  defensive · ½ stakes (−${liveStatus.trailing.drawdown.toFixed(0)} from peak)
+                </Badge>
+              )}
+              {liveStatus?.trailing?.mode === "paused" && (
+                <Badge variant="destructive" className="text-[10px]">
+                  trailing stop — backed off{liveStatus.trailing.pausedUntil ? ` until ${new Date(liveStatus.trailing.pausedUntil).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : ""}
                 </Badge>
               )}
             </div>

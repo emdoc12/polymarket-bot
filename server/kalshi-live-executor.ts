@@ -72,6 +72,70 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_salvage_max_model_value")) storage.setSetting("live_salvage_max_model_value", "0.35");
   if (!storage.getSetting("live_recency_bench_dollars")) storage.setSetting("live_recency_bench_dollars", "6");
   if (!storage.getSetting("live_recency_bench_trades")) storage.setSetting("live_recency_bench_trades", "15");
+  if (!storage.getSetting("live_trailing_soft")) storage.setSetting("live_trailing_soft", "12");
+  if (!storage.getSetting("live_trailing_hard")) storage.setSetting("live_trailing_hard", "20");
+  if (!storage.getSetting("live_trailing_pause_hours")) storage.setSetting("live_trailing_pause_hours", "6");
+}
+
+// Account-level trailing stop (user directive 2026-09-13: "an agentic desk
+// should know to back off when losing - a trailing stop on overall P&L").
+// Tracks the high-water mark of realized live P&L:
+//   drawdown >= soft ($12): DEFENSIVE - stakes halved.
+//   drawdown >= hard ($20): PAUSED - no new entries for pause_hours, then
+//   the high-water mark REBASES to the current P&L so trading restarts with
+//   a fresh trail (a pause that required recovery-to-resume would deadlock,
+//   since a paused book can't recover). Salvage and settlement always run.
+// State persists in settings as JSON so restarts don't forget the peak.
+type TrailingState = { hwm: number; pausedUntil: string | null };
+function readTrailingState(): TrailingState {
+  try {
+    const raw = storage.getSetting("live_trailing_state");
+    if (raw) return JSON.parse(raw) as TrailingState;
+  } catch { /* re-init below */ }
+  // First run: seed the high-water mark from the full ledger's path maximum.
+  const settled = storage.getLiveTrades(10000)
+    .filter((t) => t.netPnl != null && t.settledAt != null)
+    .sort((a, b) => (a.settledAt! < b.settledAt! ? -1 : 1));
+  let cum = 0, hwm = 0;
+  for (const t of settled) { cum += t.netPnl!; hwm = Math.max(hwm, cum); }
+  const state = { hwm, pausedUntil: null };
+  storage.setSetting("live_trailing_state", JSON.stringify(state));
+  return state;
+}
+
+export function trailingStatus(): { hwm: number; pnl: number; drawdown: number; mode: "normal" | "defensive" | "paused"; pausedUntil: string | null } {
+  const soft = Math.max(0, parseFloat(storage.getSetting("live_trailing_soft") || "12"));
+  const hard = Math.max(0, parseFloat(storage.getSetting("live_trailing_hard") || "20"));
+  const pauseHours = Math.max(1, parseFloat(storage.getSetting("live_trailing_pause_hours") || "6"));
+  const state = readTrailingState();
+  const pnl = liveTotalNetPnl();
+
+  if (state.pausedUntil) {
+    if (Date.now() < new Date(state.pausedUntil).getTime()) {
+      return { hwm: state.hwm, pnl, drawdown: state.hwm - pnl, mode: "paused", pausedUntil: state.pausedUntil };
+    }
+    // Pause expired: rebase the trail to here and resume.
+    const rebased = { hwm: pnl, pausedUntil: null };
+    storage.setSetting("live_trailing_state", JSON.stringify(rebased));
+    console.log(`${new Date().toISOString()} [live-executor] trailing stop pause ended - HWM rebased to ${pnl.toFixed(2)}`);
+    return { hwm: pnl, pnl, drawdown: 0, mode: "normal", pausedUntil: null };
+  }
+
+  if (pnl > state.hwm) {
+    storage.setSetting("live_trailing_state", JSON.stringify({ hwm: pnl, pausedUntil: null }));
+    return { hwm: pnl, pnl, drawdown: 0, mode: "normal", pausedUntil: null };
+  }
+  const drawdown = state.hwm - pnl;
+  if (hard > 0 && drawdown >= hard) {
+    const pausedUntil = new Date(Date.now() + pauseHours * 3600_000).toISOString();
+    storage.setSetting("live_trailing_state", JSON.stringify({ hwm: state.hwm, pausedUntil }));
+    console.log(`${new Date().toISOString()} [live-executor] TRAILING STOP: drawdown ${drawdown.toFixed(2)} from peak ${state.hwm.toFixed(2)} - entries paused ${pauseHours}h`);
+    return { hwm: state.hwm, pnl, drawdown, mode: "paused", pausedUntil };
+  }
+  if (soft > 0 && drawdown >= soft) {
+    return { hwm: state.hwm, pnl, drawdown, mode: "defensive", pausedUntil: null };
+  }
+  return { hwm: state.hwm, pnl, drawdown, mode: "normal", pausedUntil: null };
 }
 
 // Order transport. "stream": decisions price off the live websocket book
@@ -126,7 +190,10 @@ export async function computeLiveStake(): Promise<number> {
       const openCost = storage.getUnsettledLiveTrades().reduce((sum, t) => sum + t.cost, 0);
       bankrollCache = { at: Date.now(), dollars: freeCash + openCost };
     }
-    return Math.min(cap, Math.max(floorStake, Math.floor(bankrollCache.dollars * fraction)));
+    const base = Math.min(cap, Math.max(floorStake, Math.floor(bankrollCache.dollars * fraction)));
+    // Defensive mode (trailing drawdown past the soft line): halve stakes.
+    if (trailingStatus().mode === "defensive") return Math.max(1, Math.floor(base / 2));
+    return base;
   } catch {
     return floorStake;
   }
@@ -569,6 +636,7 @@ async function runLiveTick() {
   if (!liveEnabled()) return;
   if (!withinLiveTradingHours()) return;
   if (liveCooldown().active) return; // holding fire after a losing streak
+  if (trailingStatus().mode === "paused") return; // trailing stop: backed off
   if (!getKalshiAuthStatusEnv("prod").configured) return;
 
   const armed = getLiveArmedStrategies();
@@ -670,6 +738,7 @@ export function registerLiveExecutorRoutes(app: Express) {
       transport: liveTransport(),
       streamConnected: kalshiProdStream.isConnected(),
       recencyBenched: getRecencyBenched(),
+      trailing: trailingStatus(),
       salvage: {
         enabled: storage.getSetting("live_salvage_enabled") === "true",
         edge: parseFloat(storage.getSetting("live_salvage_edge") || "0.06"),
