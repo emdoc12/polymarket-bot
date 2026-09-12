@@ -60,6 +60,7 @@ type LiveStatus = {
   maxTradesPerDay: number;
   orderSize: number;
   autoStake: boolean;
+  cooldown?: { active: boolean; consecutiveLosses: number; untilMs: number | null };
   totalSettled: number;
   totalWins: number;
   totalNetPnl: number;
@@ -550,6 +551,11 @@ export default function KalshiDashboard() {
               )}
               {liveStatus?.killSwitch === "tripped" && (
                 <Badge variant="destructive" className="text-[10px]">KILL SWITCH</Badge>
+              )}
+              {liveStatus?.cooldown?.active && (
+                <Badge className="text-[10px] bg-amber-500/15 text-amber-400 border-transparent">
+                  cooling down{liveStatus.cooldown.untilMs ? ` until ${new Date(liveStatus.cooldown.untilMs).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : ""}
+                </Badge>
               )}
             </div>
             <CardDescription className="text-xs">

@@ -61,6 +61,8 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_min_audition_trades")) storage.setSetting("live_min_audition_trades", "15");
   if (!storage.getSetting("live_trading_hours_et")) storage.setSetting("live_trading_hours_et", "0-24");
   if (!storage.getSetting("live_auto_stake")) storage.setSetting("live_auto_stake", "true");
+  if (!storage.getSetting("live_cooldown_losses")) storage.setSetting("live_cooldown_losses", "3");
+  if (!storage.getSetting("live_cooldown_minutes")) storage.setSetting("live_cooldown_minutes", "45");
   if (!storage.getSetting("live_stake_fraction")) storage.setSetting("live_stake_fraction", "0.04");
   if (!storage.getSetting("live_max_order_size")) storage.setSetting("live_max_order_size", "10");
 }
@@ -88,6 +90,35 @@ export async function computeLiveStake(): Promise<number> {
   } catch {
     return floorStake;
   }
+}
+
+// Loss cool-down: live forensics show losses cluster (P(loss | prev loss)
+// ~50% vs ~30% after a win) - chop regimes persist across windows and the
+// trade right after a losing streak is roughly a coin flip, which is
+// negative EV at these entry prices. After N consecutive losses, hold fire
+// for M minutes from the last loss's settlement. live_cooldown_losses=0
+// disables. Shared with the shadow mirror so the A/B keeps identical rules.
+export function computeCooldown(
+  settled: { netPnl: number | null; settledAt: string | null }[],
+): { active: boolean; consecutiveLosses: number; untilMs: number | null } {
+  const lossesNeeded = Math.max(0, parseInt(storage.getSetting("live_cooldown_losses") || "3", 10));
+  const minutes = Math.max(1, parseInt(storage.getSetting("live_cooldown_minutes") || "45", 10));
+  if (lossesNeeded === 0) return { active: false, consecutiveLosses: 0, untilMs: null };
+  const rows = settled
+    .filter((t) => t.netPnl != null && t.settledAt != null)
+    .sort((a, b) => (b.settledAt! < a.settledAt! ? -1 : 1));
+  let streak = 0;
+  for (const t of rows) {
+    if ((t.netPnl ?? 0) <= 0) streak += 1;
+    else break;
+  }
+  if (streak < lossesNeeded || rows.length === 0) return { active: false, consecutiveLosses: streak, untilMs: null };
+  const untilMs = new Date(rows[0].settledAt!).getTime() + minutes * 60_000;
+  return { active: Date.now() < untilMs, consecutiveLosses: streak, untilMs };
+}
+
+export function liveCooldown() {
+  return computeCooldown(storage.getLiveTrades(30));
 }
 
 // Executor-level trading-hours curfew ("8-24" = only 8am-midnight ET;
@@ -324,6 +355,7 @@ async function runLiveTick() {
 
   if (!liveEnabled()) return;
   if (!withinLiveTradingHours()) return;
+  if (liveCooldown().active) return; // holding fire after a losing streak
   if (!getKalshiAuthStatusEnv("prod").configured) return;
 
   const armed = getLiveArmedStrategies();
@@ -416,6 +448,7 @@ export function registerLiveExecutorRoutes(app: Express) {
       maxTotalLoss: parseFloat(storage.getSetting("live_max_total_loss") || "25"),
       maxEntryPrice: parseFloat(storage.getSetting("live_max_entry_price") || "0.80"),
       tradingHoursEt: storage.getSetting("live_trading_hours_et") || "0-24",
+      cooldown: liveCooldown(),
       totalSettled: settled.length,
       totalWins: settled.filter((t) => (t.netPnl ?? 0) > 0).length,
       totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),

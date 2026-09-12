@@ -10,7 +10,7 @@ import {
   type KalshiStrategySpec,
 } from "./kalshi";
 import { decideLiveEntry } from "./kalshi-executor";
-import { computeLiveStake, getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
+import { computeCooldown, computeLiveStake, getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
 import { kalshiProdStream } from "./kalshi-ws";
 import { fetchCfPassthrough } from "./kalshi-trading";
 import type { CandidateStrategy } from "@shared/schema";
@@ -203,7 +203,11 @@ async function runShadowTick() {
 
       const isMirror = armedIds.has(candidate.id);
       if (isMirror) {
-        // Mirror the live executor's shared rails exactly so the A/B is fair.
+        // Mirror the live executor's shared rails exactly so the A/B is fair
+        // (including the loss cool-down, computed from the mirror's own
+        // ledger). Audition rows stay exempt - they exist to gather
+        // per-strategy evidence, not to manage a portfolio.
+        if (computeCooldown(storage.getWsShadowTrades(60).filter((t) => !t.audition)).active) continue;
         if (storage.getWsShadowTrades(100).some((t) => !t.audition && t.ticker === active.market.ticker)) continue;
         if (storage.getUnsettledWsShadowTrades().filter((t) => !t.audition && t.status === "would_fill").length >= maxOpen) continue;
       }
