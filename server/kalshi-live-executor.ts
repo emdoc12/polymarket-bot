@@ -70,6 +70,8 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_salvage_enabled")) storage.setSetting("live_salvage_enabled", "true");
   if (!storage.getSetting("live_salvage_edge")) storage.setSetting("live_salvage_edge", "0.06");
   if (!storage.getSetting("live_salvage_max_model_value")) storage.setSetting("live_salvage_max_model_value", "0.35");
+  if (!storage.getSetting("live_recency_bench_dollars")) storage.setSetting("live_recency_bench_dollars", "6");
+  if (!storage.getSetting("live_recency_bench_trades")) storage.setSetting("live_recency_bench_trades", "15");
 }
 
 // Order transport. "stream": decisions price off the live websocket book
@@ -235,7 +237,42 @@ export function getLiveArmedStrategies(): CandidateStrategy[] {
     liveByCandidate.set(t.candidateId, s);
   }
 
-  return storage.getCandidateStrategies("promoted")
+  // Recency bench (user directive 2026-09-13: "don't keep doing the same
+  // thing when it's losing time after time - don't give back all the gains"):
+  // a strategy whose LAST-N settled record is decisively net-negative sits
+  // out, regardless of a positive lifetime. Self-healing: the rolling window
+  // re-admits it the moment recent results recover. Judged on the freshest
+  // real-book evidence available (live trades when the sample is adequate,
+  // else the strategy's own audition rows). NET P&L only - never win counts,
+  // or the 45%-win low-band engines would be culled for breathing.
+  const benchN = Math.max(5, parseInt(storage.getSetting("live_recency_bench_trades") || "15", 10));
+  const benchDollars = Math.max(0, parseFloat(storage.getSetting("live_recency_bench_dollars") || "6"));
+  const recentLive = new Map<number, number[]>();
+  for (const t of storage.getLiveTrades(2000)) {
+    if (t.candidateId == null || t.netPnl == null) continue;
+    const arr = recentLive.get(t.candidateId) ?? [];
+    if (arr.length < benchN) arr.push(t.netPnl);
+    recentLive.set(t.candidateId, arr);
+  }
+  const recentAudition = new Map<number, number[]>();
+  for (const t of storage.getWsShadowTrades(5000)) {
+    if (t.candidateId == null || t.netPnl == null) continue;
+    const arr = recentAudition.get(t.candidateId) ?? [];
+    if (arr.length < benchN) arr.push(t.netPnl);
+    recentAudition.set(t.candidateId, arr);
+  }
+  const recencyBenchedNames: string[] = [];
+  const isRecencyBenched = (c: CandidateStrategy): boolean => {
+    if (benchDollars === 0) return false;
+    const liveArr = recentLive.get(c.id) ?? [];
+    const audArr = recentAudition.get(c.id) ?? [];
+    const arr = liveArr.length >= 8 ? liveArr : audArr;
+    if (arr.length < 8) return false; // not enough fresh evidence to convict
+    const net = arr.reduce((a, b) => a + b, 0);
+    return net <= -benchDollars;
+  };
+
+  const armed = storage.getCandidateStrategies("promoted")
     .filter((c) => c.kind !== "perp")
     .map((c) => {
       const audition = auditionByCandidate.get(c.id);
@@ -243,7 +280,9 @@ export function getLiveArmedStrategies(): CandidateStrategy[] {
       const auditionOk = audition != null && audition.settled >= minAudition && audition.netPnl > 0;
       const demoOk = (c.demoTrades ?? 0) >= minDemo && (c.demoNetPnl ?? 0) > 0;
       const liveBenched = live != null && live.settled >= 25 && live.netPnl < -10;
-      const eligible = (auditionOk || demoOk) && (!liveBenched || auditionOk);
+      const recencyBenched = isRecencyBenched(c);
+      if (recencyBenched && (auditionOk || demoOk)) recencyBenchedNames.push(c.name);
+      const eligible = (auditionOk || demoOk) && (!liveBenched || auditionOk) && !recencyBenched;
       // Audition-qualified specs sort above demo-only ones regardless of size.
       const score = auditionOk ? 1_000_000 + audition!.netPnl : (c.demoNetPnl ?? 0);
       return { c, eligible, score };
@@ -252,6 +291,14 @@ export function getLiveArmedStrategies(): CandidateStrategy[] {
     .sort((a, b) => b.score - a.score)
     .slice(0, topN === 0 ? undefined : topN)
     .map((entry) => entry.c);
+  lastRecencyBenched = recencyBenchedNames;
+  return armed;
+}
+
+// Visibility: who is currently sitting out on the recency bench.
+let lastRecencyBenched: string[] = [];
+export function getRecencyBenched(): string[] {
+  return lastRecencyBenched;
 }
 
 function tripKillSwitch(reason: string) {
@@ -622,6 +669,7 @@ export function registerLiveExecutorRoutes(app: Express) {
       cooldown: liveCooldown(),
       transport: liveTransport(),
       streamConnected: kalshiProdStream.isConnected(),
+      recencyBenched: getRecencyBenched(),
       salvage: {
         enabled: storage.getSetting("live_salvage_enabled") === "true",
         edge: parseFloat(storage.getSetting("live_salvage_edge") || "0.06"),

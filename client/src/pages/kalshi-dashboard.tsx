@@ -65,6 +65,7 @@ type LiveStatus = {
   transport?: "rest" | "stream";
   streamConnected?: boolean;
   salvage?: { enabled: boolean; edge: number; maxModelValue: number };
+  recencyBenched?: string[];
   totalSettled: number;
   totalWins: number;
   totalNetPnl: number;
@@ -617,6 +618,11 @@ export default function KalshiDashboard() {
               <div>
                 <p className="text-xs text-muted-foreground">Allowlisted strategies</p>
                 <p className="text-base font-semibold font-mono">{liveStatus?.armedStrategies.length ?? "—"}</p>
+                {(liveStatus?.recencyBenched?.length ?? 0) > 0 && (
+                  <p className="text-[11px] text-amber-400">
+                    {liveStatus!.recencyBenched!.length} benched (recent losses) — auto-return on recovery
+                  </p>
+                )}
               </div>
             </div>
 
