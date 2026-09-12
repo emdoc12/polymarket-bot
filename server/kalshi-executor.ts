@@ -11,6 +11,9 @@ import {
   kalshiTradingFee,
   parseDollars,
   valueModelProbUp,
+  volGateActive,
+  volInGate,
+  volPerSqrtSecTo1mBps,
   type KalshiMarket,
   type KalshiStrategySpec,
 } from "./kalshi";
@@ -80,6 +83,13 @@ export async function decideLiveEntry(
   }
   if (!dayAllowed(nowMs, spec.dowMaskEt)) {
     return { ok: false, reason: "outside spec trading days" };
+  }
+  if (volGateActive(spec)) {
+    const volPerSqrtSec = kalshiProdStream.getSpotVolPerSecond(spec.series, 30);
+    if (volPerSqrtSec == null) return { ok: false, reason: "vol gate set but spot stream unavailable" };
+    if (!volInGate(volPerSqrtSecTo1mBps(volPerSqrtSec), spec)) {
+      return { ok: false, reason: "realized vol outside spec regime gate" };
+    }
   }
   const yesAsk = parseDollars(market.yes_ask_dollars);
   const yesBid = parseDollars(market.yes_bid_dollars);

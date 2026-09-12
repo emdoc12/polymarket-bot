@@ -180,6 +180,13 @@ export type KalshiStrategySpec = {
   // on the PM's GRAMMAR REQUEST so catalyst-driven specs (EIA Thursdays,
   // 8:30 ET print days) can target their days instead of diluting samples.
   dowMaskEt: number;
+  // Realized-volatility regime gate (PM GRAMMAR REQUEST, 2026-09-12): only
+  // enter when the underlying's trailing 30-min realized vol (stddev of
+  // 1-minute log returns, in basis points) is inside [minVol1mBps,
+  // maxVol1mBps]. 0 disables that bound. Lets specs avoid chop (vol floor)
+  // or storms (vol cap). Crypto only - needs underlying spot history/stream.
+  minVol1mBps: number;
+  maxVol1mBps: number;
   orderSize: number;
 };
 
@@ -246,8 +253,25 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     maxHourEt: Math.round(clampNum(raw.maxHourEt, 0, 24, 24)),
     sideFilter: raw.sideFilter === "yes_only" || raw.sideFilter === "no_only" ? raw.sideFilter : "both",
     dowMaskEt: Math.round(clampNum(raw.dowMaskEt, 1, 127, 127)),
+    minVol1mBps: clampNum(raw.minVol1mBps, 0, 500, 0),
+    maxVol1mBps: clampNum(raw.maxVol1mBps, 0, 500, 0),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
+}
+
+export function volGateActive(spec: KalshiStrategySpec): boolean {
+  return spec.minVol1mBps > 0 || spec.maxVol1mBps > 0;
+}
+
+export function volInGate(vol1mBps: number, spec: KalshiStrategySpec): boolean {
+  if (spec.minVol1mBps > 0 && vol1mBps < spec.minVol1mBps) return false;
+  if (spec.maxVol1mBps > 0 && vol1mBps > spec.maxVol1mBps) return false;
+  return true;
+}
+
+// Per-sqrt-second log-return vol -> 1-minute vol in basis points.
+export function volPerSqrtSecTo1mBps(volPerSqrtSec: number): number {
+  return volPerSqrtSec * Math.sqrt(60) * 10000;
 }
 
 // Behavior-defining fields only — name/rationale don't affect results.
@@ -262,6 +286,7 @@ export function specHash(spec: KalshiStrategySpec) {
       ? [] : [spec.minHourEt, spec.maxHourEt]),
     ...(spec.sideFilter !== "both" ? [spec.sideFilter] : []),
     ...(spec.dowMaskEt > 0 && spec.dowMaskEt < 127 ? [spec.dowMaskEt] : []),
+    ...(spec.minVol1mBps > 0 || spec.maxVol1mBps > 0 ? [spec.minVol1mBps.toFixed(1), spec.maxVol1mBps.toFixed(1)] : []),
   ].join("|");
 }
 
@@ -463,6 +488,22 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
   const entryTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
   if (!hourInWindow(hourEt(entryTs * 1000), spec.minHourEt, spec.maxHourEt)) return null;
   if (!dayAllowed(entryTs * 1000, spec.dowMaskEt)) return null;
+  if (volGateActive(spec)) {
+    // Trailing 30-min realized vol from the underlying spot history; a spec
+    // with a vol gate skips windows where the regime can't be verified.
+    if (!entry.spotValueAt) return null;
+    const rets: number[] = [];
+    let prev: number | null = null;
+    for (let k = 30; k >= 0; k--) {
+      const v = entry.spotValueAt(entryTs - k * 60);
+      if (v != null && prev != null) rets.push(Math.log(v / prev));
+      if (v != null) prev = v;
+    }
+    if (rets.length < 15) return null;
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const vol1mBps = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) * 10000;
+    if (!volInGate(vol1mBps, spec)) return null;
+  }
   const sorted = [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
   const entryCandle = [...sorted].reverse().find((c) => c.end_period_ts <= entryTs);
   if (!entryCandle) return null;
