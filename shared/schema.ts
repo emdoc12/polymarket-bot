@@ -200,6 +200,12 @@ export const liveTrades = sqliteTable("live_trades", {
   // "stream" (websocket book + depth confirmation). Lets the transport
   // switch be A/B'd on the live ledger itself.
   transport: text("transport"),
+  // Salvage exit (mid-window sale of a dying position when the crowd bids
+  // more than the fair-value model says it's worth). Partial IOC fills leave
+  // the row open with these set; settlement blends salvage proceeds + payout.
+  exitPrice: real("exit_price"),
+  exitedContracts: integer("exited_contracts"),
+  exitFee: real("exit_fee"),
   placedAt: text("placed_at").notNull(),
   marketCloseAt: text("market_close_at").notNull(),
   settledAt: text("settled_at"),

@@ -7,6 +7,7 @@ import {
   hourEt,
   hourInWindow,
   kalshiTradingFee,
+  valueModelProbUp,
   type KalshiMarket,
   type KalshiStrategySpec,
 } from "./kalshi";
@@ -66,6 +67,9 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_stake_fraction")) storage.setSetting("live_stake_fraction", "0.04");
   if (!storage.getSetting("live_max_order_size")) storage.setSetting("live_max_order_size", "10");
   if (!storage.getSetting("live_transport")) storage.setSetting("live_transport", "rest");
+  if (!storage.getSetting("live_salvage_enabled")) storage.setSetting("live_salvage_enabled", "true");
+  if (!storage.getSetting("live_salvage_edge")) storage.setSetting("live_salvage_edge", "0.06");
+  if (!storage.getSetting("live_salvage_max_model_value")) storage.setSetting("live_salvage_max_model_value", "0.35");
 }
 
 // Order transport. "stream": decisions price off the live websocket book
@@ -267,22 +271,114 @@ async function settleLiveTrades() {
       if (result !== "yes" && result !== "no") continue;
 
       const won = trade.side === result;
-      const payout = won ? trade.contracts : 0;
-      const netPnl = payout - trade.cost - trade.fee;
+      // Blend any partial salvage: exited contracts realized exitPrice each
+      // (minus exit fee); the remainder rides to settlement.
+      const exited = trade.exitedContracts ?? 0;
+      const remaining = Math.max(0, trade.contracts - exited);
+      const salvageProceeds = exited > 0 ? exited * (trade.exitPrice ?? 0) - (trade.exitFee ?? 0) : 0;
+      const payout = won ? remaining : 0;
+      const netPnl = payout + salvageProceeds - trade.cost - trade.fee;
       storage.updateLiveTrade(trade.id, {
         status: won ? "settled_won" : "settled_lost",
         result,
         netPnl,
         settledAt: new Date().toISOString(),
       });
-
-      const maxLoss = parseFloat(storage.getSetting("live_max_total_loss") || "25");
-      const total = liveTotalNetPnl();
-      if (Number.isFinite(maxLoss) && total <= -Math.abs(maxLoss)) {
-        tripKillSwitch(`cumulative live net P&L ${total.toFixed(2)} breached -$${Math.abs(maxLoss).toFixed(2)} limit`);
-      }
+      checkKillSwitch();
     } catch {
       continue;
+    }
+  }
+}
+
+function checkKillSwitch() {
+  const maxLoss = parseFloat(storage.getSetting("live_max_total_loss") || "25");
+  const total = liveTotalNetPnl();
+  if (Number.isFinite(maxLoss) && total <= -Math.abs(maxLoss)) {
+    tripKillSwitch(`cumulative live net P&L ${total.toFixed(2)} breached -$${Math.abs(maxLoss).toFixed(2)} limit`);
+  }
+}
+
+// Salvage exits: mid-window, if the fair-value model (settlement index vs
+// strike, time left, realized vol) says our position is dying but the crowd
+// still bids meaningfully more than model value, sell them the hope.
+// Backtested 2026-09-12 across a full threshold grid: every configuration
+// beat hold-to-settlement; 6c edge + 0.35 dying gate recovered ~$12 net per
+// ~$20 of drawdown with only ~$4 forfeited on eventual winners. Mechanics:
+// selling our side = buying the opposite side at the complement (Kalshi
+// auto-nets offsetting positions), so the proven buy path does the exit.
+// Runs even while disarmed/curfewed/cooling (closing risk is always allowed);
+// needs the stream (model + depth), so it's a stream-transport feature.
+async function runSalvageSweep() {
+  if (storage.getSetting("live_salvage_enabled") !== "true") return;
+  if (liveTransport() !== "stream") return;
+  const edge = Math.min(0.30, Math.max(0.02, parseFloat(storage.getSetting("live_salvage_edge") || "0.06")));
+  const dyingCap = Math.min(0.9, Math.max(0.05, parseFloat(storage.getSetting("live_salvage_max_model_value") || "0.35")));
+
+  for (const trade of storage.getUnsettledLiveTrades()) {
+    if ((trade.exitedContracts ?? 0) > 0) continue; // one salvage per position
+    if (trade.contracts <= 0 || trade.spotStrike == null) continue;
+    const closeMs = new Date(trade.marketCloseAt).getTime();
+    const remainMs = closeMs - Date.now();
+    if (!Number.isFinite(remainMs) || remainMs < 50_000 || remainMs > 16 * 60_000) continue;
+
+    const quote = kalshiProdStream.getQuote(trade.ticker, 8_000);
+    const spot = kalshiProdStream.getSpot(trade.series);
+    const vol = kalshiProdStream.getSpotVolPerSecond(trade.series, 30);
+    if (!quote || quote.yesBid == null || quote.yesAsk == null || !spot || vol == null) continue;
+
+    const pUp = valueModelProbUp(spot.value, trade.spotStrike, vol, remainMs / 1000);
+    const modelMine = trade.side === "yes" ? pUp : 1 - pUp;
+    const exitBid = trade.side === "yes" ? quote.yesBid : 1 - quote.yesAsk;
+    const depth = trade.side === "yes" ? quote.yesBidDepth : quote.yesAskDepth;
+    if (exitBid <= 0.02 || exitBid >= 0.99) continue;
+    if (modelMine > dyingCap || exitBid - modelMine < edge) continue;
+    if (depth < trade.contracts) continue;
+
+    try {
+      const exchangeIndex = await getMarketExchangeIndexEnv("prod", trade.ticker);
+      if (exchangeIndex == null) continue;
+      const oppSide = trade.side === "yes" ? "no" : "yes";
+      const oppCents = Math.min(99, Math.max(1, Math.round((1 - exitBid) * 100)));
+      await ensureShardFundsEnv("prod", exchangeIndex, trade.contracts * (1 - exitBid) + 1);
+      const placed = await placeKalshiOrderEnv("prod", {
+        ticker: trade.ticker,
+        side: oppSide,
+        action: "buy",
+        count: trade.contracts,
+        type: "limit",
+        yesPriceCents: oppSide === "yes" ? oppCents : undefined,
+        noPriceCents: oppSide === "no" ? oppCents : undefined,
+        exchangeIndex,
+      });
+      if (placed.dryRun || placed.fillCount <= 0) continue;
+      const exited = Math.min(trade.contracts, placed.fillCount);
+      // average_fill_price is YES-leg. Buying NO at yes-leg a nets us a per
+      // contract (pay 1-a, matched pair redeems 1); buying YES at a nets 1-a.
+      const realized = placed.averageFillPriceYesLeg != null
+        ? (trade.side === "yes" ? placed.averageFillPriceYesLeg : 1 - placed.averageFillPriceYesLeg)
+        : exitBid;
+      const exitFee = placed.averageFeePaid != null
+        ? placed.averageFeePaid * exited
+        : kalshiTradingFee(exited, realized);
+      if (exited >= trade.contracts) {
+        const netPnl = exited * realized - exitFee - trade.cost - trade.fee;
+        storage.updateLiveTrade(trade.id, {
+          status: "salvaged",
+          exitPrice: realized,
+          exitedContracts: exited,
+          exitFee,
+          netPnl,
+          settledAt: new Date().toISOString(),
+        });
+        checkKillSwitch();
+        console.log(`${new Date().toISOString()} [live-executor] SALVAGED ${trade.ticker} ${trade.side} x${exited} at ${realized.toFixed(2)} (model ${modelMine.toFixed(2)}) net ${netPnl.toFixed(2)}`);
+      } else {
+        storage.updateLiveTrade(trade.id, { exitPrice: realized, exitedContracts: exited, exitFee });
+        console.log(`${new Date().toISOString()} [live-executor] partial salvage ${trade.ticker} ${exited}/${trade.contracts} at ${realized.toFixed(2)}`);
+      }
+    } catch (err) {
+      console.error(`${new Date().toISOString()} [error] [live-executor] salvage failed for trade ${trade.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
@@ -419,6 +515,9 @@ async function runLiveTick() {
   // Stream mode ticks every ~2s; settlement checks stay on a ~16s cadence.
   const streaming = liveTransport() === "stream";
   if (!streaming || settleCounter++ % 8 === 0) await settleLiveTrades();
+  // Salvage runs before the entry gates: closing risk is always allowed,
+  // even while disarmed, curfewed, or cooling down.
+  await runSalvageSweep();
 
   if (!liveEnabled()) return;
   if (!withinLiveTradingHours()) return;
@@ -523,6 +622,11 @@ export function registerLiveExecutorRoutes(app: Express) {
       cooldown: liveCooldown(),
       transport: liveTransport(),
       streamConnected: kalshiProdStream.isConnected(),
+      salvage: {
+        enabled: storage.getSetting("live_salvage_enabled") === "true",
+        edge: parseFloat(storage.getSetting("live_salvage_edge") || "0.06"),
+        maxModelValue: parseFloat(storage.getSetting("live_salvage_max_model_value") || "0.35"),
+      },
       totalSettled: settled.length,
       totalWins: settled.filter((t) => (t.netPnl ?? 0) > 0).length,
       totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),

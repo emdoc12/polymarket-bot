@@ -2,6 +2,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
@@ -63,6 +64,7 @@ type LiveStatus = {
   cooldown?: { active: boolean; consecutiveLosses: number; untilMs: number | null };
   transport?: "rest" | "stream";
   streamConnected?: boolean;
+  salvage?: { enabled: boolean; edge: number; maxModelValue: number };
   totalSettled: number;
   totalWins: number;
   totalNetPnl: number;
@@ -249,6 +251,14 @@ export default function KalshiDashboard() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/ws-shadow/status"] });
+    },
+  });
+  const salvageToggleMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await apiRequest("POST", "/api/settings", { key: "live_salvage_enabled", value: String(enabled) });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/live/status"] });
     },
   });
 
@@ -609,6 +619,21 @@ export default function KalshiDashboard() {
                 <p className="text-base font-semibold font-mono">{liveStatus?.armedStrategies.length ?? "—"}</p>
               </div>
             </div>
+
+            {liveStatus?.salvage && (
+              <div className="flex items-center gap-2.5">
+                <Switch
+                  checked={liveStatus.salvage.enabled}
+                  onCheckedChange={(v) => salvageToggleMutation.mutate(v)}
+                  disabled={salvageToggleMutation.isPending}
+                />
+                <p className="text-xs text-muted-foreground">
+                  <span className="text-foreground/90 font-medium">Salvage exits</span>
+                  {" — "}sell dying positions when the crowd bids ≥{Math.round(liveStatus.salvage.edge * 100)}¢ over model value
+                  {liveStatus.transport !== "stream" && <span className="text-amber-400"> (needs stream transport)</span>}
+                </p>
+              </div>
+            )}
 
             {liveSeries.length >= 2 && (
               <div className="h-44">

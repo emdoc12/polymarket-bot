@@ -249,6 +249,9 @@ function runMigrations() {
   if (!liveColNames.has("spot_at_entry")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_at_entry REAL;");
   if (!liveColNames.has("spot_strike")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_strike REAL;");
   if (!liveColNames.has("transport")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN transport TEXT;");
+  if (!liveColNames.has("exit_price")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN exit_price REAL;");
+  if (!liveColNames.has("exited_contracts")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN exited_contracts INTEGER;");
+  if (!liveColNames.has("exit_fee")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN exit_fee REAL;");
 
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
