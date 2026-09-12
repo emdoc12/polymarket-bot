@@ -171,6 +171,11 @@ export type KalshiStrategySpec = {
   // strategy dimension rather than an executor hack.
   minHourEt: number;
   maxHourEt: number;
+  // Direction specialization: "yes_only" takes only up-side entries,
+  // "no_only" only down-side. Live forensics showed ALL profit coming from
+  // down windows - one spec's geometry rarely suits both directions, so the
+  // lab evolves direction specialists instead.
+  sideFilter: "both" | "yes_only" | "no_only";
   orderSize: number;
 };
 
@@ -225,6 +230,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     minSignal: clampNum(raw.minSignal, 0, 0.45, 0),
     minHourEt: Math.round(clampNum(raw.minHourEt, 0, 24, 0)),
     maxHourEt: Math.round(clampNum(raw.maxHourEt, 0, 24, 24)),
+    sideFilter: raw.sideFilter === "yes_only" || raw.sideFilter === "no_only" ? raw.sideFilter : "both",
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -235,10 +241,11 @@ export function specHash(spec: KalshiStrategySpec) {
     spec.series, spec.sideRule, spec.entrySecondsBeforeClose,
     spec.minEntryPrice.toFixed(3), spec.maxEntryPrice.toFixed(3),
     spec.trendLookbackMinutes, spec.minSignal.toFixed(3),
-    // Hour band joins the hash only when restrictive, so every pre-existing
-    // stored hash (implicitly all-day) stays valid and still dedupes.
+    // Hour band / side filter join the hash only when restrictive, so every
+    // pre-existing stored hash stays valid and still dedupes.
     ...(spec.minHourEt === spec.maxHourEt || (spec.minHourEt === 0 && spec.maxHourEt === 24)
       ? [] : [spec.minHourEt, spec.maxHourEt]),
+    ...(spec.sideFilter !== "both" ? [spec.sideFilter] : []),
   ].join("|");
 }
 
@@ -491,6 +498,8 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
     side = spec.sideRule === "trend_follow" ? trendSide : trendSide === "YES" ? "NO" : "YES";
   }
   if (!side) return null;
+  if (spec.sideFilter === "yes_only" && side !== "YES") return null;
+  if (spec.sideFilter === "no_only" && side !== "NO") return null;
 
   const entryPrice = side === "YES" ? yesAsk : 1 - yesBid;
   if (entryPrice < spec.minEntryPrice || entryPrice > spec.maxEntryPrice) return null;

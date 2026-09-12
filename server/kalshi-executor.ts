@@ -128,6 +128,8 @@ export async function decideLiveEntry(
     side = spec.sideRule === "trend_follow" ? trendSide : trendSide === "yes" ? "no" : "yes";
   }
   if (!side) return { ok: false, reason: "no side decision" };
+  if (spec.sideFilter === "yes_only" && side !== "yes") return { ok: false, reason: "side filter (yes_only)" };
+  if (spec.sideFilter === "no_only" && side !== "no") return { ok: false, reason: "side filter (no_only)" };
 
   const entryPrice = side === "yes" ? yesAsk : 1 - yesBid;
   if (entryPrice < spec.minEntryPrice || entryPrice > spec.maxEntryPrice) {

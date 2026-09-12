@@ -49,6 +49,7 @@ const SpecProposalSchema = z.object({
   minSignal: z.number(),
   minHourEt: z.number(),
   maxHourEt: z.number(),
+  sideFilter: z.enum(["both", "yes_only", "no_only"]),
   rationale: z.string(),
 });
 
@@ -91,6 +92,7 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - minEntryPrice / maxEntryPrice: 0.03-0.97 (only enter if the executable price of the chosen side is inside this band)
 - trendLookbackMinutes: 1-10 (trend rules only)
 - minSignal: 0-0.45 (minimum |price-0.5| for momentum/fade; minimum |price move| for trend rules; 0 = no filter)
+- sideFilter: "both" | "yes_only" | "no_only" - direction specialization. Live evidence: ALL real-money profit has come from down-closing windows; up windows bleed. The desk needs RALLY SPECIALISTS: yes_only variants of proven geometries with their own bands/timings/hours (up-moves may need tighter signals or different bands than down-moves). A yes_only spec only takes entries whose chosen side is YES; backtested like every other field.
 - minHourEt / maxHourEt: 0-24, entries allowed only in this ET-hour window (0 and 24 = all day; minHourEt > maxHourEt wraps overnight). Fully backtested like every other field. Live forensics show strong time-of-day regime structure (overnight 0-8 ET underperforms daytime badly), so hour-banded variants of proven specs are fertile ground - but let the backtests decide, not the anecdote.
 Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, signal thresholds, and trading hours.
 
@@ -170,6 +172,7 @@ const PM_SYSTEM = `You are the Portfolio Manager of a quant research desk huntin
 Decision rules:
 - promote: only when live (walk-forward) results show positive net P&L on >= 15 live trades AND the discovery results point the same way. Be stingy - promotion means this spec is a candidate for real demo-account trading. For binary specs, weigh the 'execution' fill rate heavily: a spec whose entries rarely fill on the live exchange earns nothing no matter how good its replays look, so prefer specs in price bands that actually fill.
 - REAL MONEY: candidates with a 'realMoney' field are trading the production account with actual dollars against real crowds (demo counterparties are seeded market makers, so demo can flatter a spec). Real-money evidence outranks demo evidence at equal sample size. If a strategy's real-money record diverges badly from its demo record (win rate collapsing, a price band losing consistently), say so explicitly in your commentary and steer the research focus toward specs that work where real money trades - the REAL-MONEY RESULTS digest in the context shows which entry bands are actually paying.
+- DIRECTIONAL BALANCE MANDATE: the live book currently earns ONLY in down-closing windows (all profit from down moves; up windows bleed) - a regime bet that dies in a rally. Treat up-window profitability as a first-class goal: candidates' realMoney shows upWindows/downWindows P&L; prefer promoting specs that earn in up windows or are direction-neutral, and direct workers to evolve yes_only rally specialists (the sideFilter field) with their own bands/hours rather than assuming one geometry suits both directions. The "value" family is direction-neutral by construction - weight its evidence accordingly.
 - PROD AUDITION: candidates with a 'prodAudition' field have been rehearsed risk-free against REAL production orderbooks (streamed quotes, actual resting depth). It is the strongest available predictor of live transfer for candidates without real-money history: evidence quality ranks realMoney > prodAudition > demo execution > walk-forward > discovery. A spec that shines on demo but flunks its prod audition should not be trusted with real money; say so and prefer audition-proven specs when reasoning about what belongs closest to the live account.
 - reject: live net P&L clearly negative on >= 15 live trades, or discovery results hopeless on a decent sample (>= 10 combined train+holdout trades), or a duplicate-in-spirit of a rejected idea. Do NOT reject on tiny samples (fewer than 10 total trades) - that is noise, not evidence; keep_testing instead. Keep the testing pool focused: if it grows past ~30 candidates, aggressively reject the weakest ADEQUATELY-SAMPLED ones so evidence concentrates on the contenders.
 - keep_testing: genuinely promising but still under-sampled on live evidence, or any candidate with fewer than 10 total trades.
@@ -177,7 +180,9 @@ The desk runs TWO strategy kinds, reviewed together:
 - kind "binary": event-contract specs on 15-min up/down markets (see the binary spec doc below).
 - kind "perp": perpetual-futures long/short specs. ${PERP_SPEC_DOC.split("\n")[0]} Same promotion discipline applies: >= 15 profitable live (walk-forward) trades with discovery agreement.
 
-Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
+Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
+
+BLIND-SPOT DUTY: you can only act within the spec grammar you are given, and history shows the desk's worst losses came from patterns the grammar could not yet express (trading hours, direction). If you notice a recurring pattern in the forensics, real-money, or audition data that NO current spec field lets the team act on, say so explicitly in your commentary, prefixed "GRAMMAR REQUEST:" with what dimension you need and why. The humans read your commentary and extend the grammar - but only if you ask. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 
@@ -217,7 +222,10 @@ type FillStats = Map<number, { attempts: number; filled: number; unfilled: numbe
 // Real-money (production account) execution record per candidate. Only
 // allowlisted promoted strategies ever trade live, so most candidates have
 // no entry here - but for those that do, this is the ground truth.
-type LiveExecStats = Map<number, { attempts: number; filled: number; unfilled: number; wins: number; losses: number; netPnl: number }>;
+type LiveExecStats = Map<number, {
+  attempts: number; filled: number; unfilled: number; wins: number; losses: number; netPnl: number;
+  upPnl: number; upSettled: number; downPnl: number; downSettled: number;
+}>;
 
 // Prod-audition record per candidate: would-be results on REAL production
 // orderbooks from the streaming shadow. Covers every promoted strategy, not
@@ -245,7 +253,8 @@ function buildLiveExecStats(): LiveExecStats {
   const map: LiveExecStats = new Map();
   for (const t of storage.getLiveTrades(10000)) {
     if (t.candidateId == null || t.status === "failed") continue;
-    const s = map.get(t.candidateId) ?? { attempts: 0, filled: 0, unfilled: 0, wins: 0, losses: 0, netPnl: 0 };
+    const s = map.get(t.candidateId)
+      ?? { attempts: 0, filled: 0, unfilled: 0, wins: 0, losses: 0, netPnl: 0, upPnl: 0, upSettled: 0, downPnl: 0, downSettled: 0 };
     s.attempts += 1;
     if (t.status === "unfilled") s.unfilled += 1;
     else s.filled += 1;
@@ -253,6 +262,9 @@ function buildLiveExecStats(): LiveExecStats {
       s.netPnl += t.netPnl;
       if (t.netPnl > 0) s.wins += 1;
       else s.losses += 1;
+      // Direction attribution: which way the window actually closed.
+      if (t.result === "yes") { s.upPnl += t.netPnl; s.upSettled += 1; }
+      else if (t.result === "no") { s.downPnl += t.netPnl; s.downSettled += 1; }
     }
     map.set(t.candidateId, s);
   }
@@ -290,6 +302,11 @@ function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, 
           wins: real.wins,
           losses: real.losses,
           netPnl: Number(real.netPnl.toFixed(2)),
+          // P&L split by actual window direction - exposes one-directional
+          // strategies (a spec that only earns in down windows is a regime
+          // bet, not an edge).
+          upWindows: { settled: real.upSettled, netPnl: Number(real.upPnl.toFixed(2)) },
+          downWindows: { settled: real.downSettled, netPnl: Number(real.downPnl.toFixed(2)) },
         }
       : null,
     // Would-be record on REAL production orderbooks (streaming shadow).
