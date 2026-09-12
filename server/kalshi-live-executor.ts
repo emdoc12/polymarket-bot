@@ -206,7 +206,11 @@ function liveTotalNetPnl() {
 //   3. DEMO record (transitional fallback while audition data accumulates):
 //      >= live_min_demo_trades settled demo fills with positive net P&L.
 export function getLiveArmedStrategies(): CandidateStrategy[] {
-  const topN = Math.max(1, parseInt(storage.getSetting("live_top_n") || "3", 10));
+  // live_top_n = 0 means UNLIMITED: every qualified strategy trades. Safe
+  // because risk is bounded per trade (bankroll-fraction stakes), per window
+  // (one position), per moment (max open), and per strategy (the live bench
+  // rule evicts anything ~$10 negative) - breadth is self-pruning.
+  const topN = Math.max(0, parseInt(storage.getSetting("live_top_n") || "3", 10));
   const minDemo = Math.max(1, parseInt(storage.getSetting("live_min_demo_trades") || "20", 10));
   const minAudition = Math.max(1, parseInt(storage.getSetting("live_min_audition_trades") || "15", 10));
 
@@ -242,7 +246,7 @@ export function getLiveArmedStrategies(): CandidateStrategy[] {
     })
     .filter((entry) => entry.eligible)
     .sort((a, b) => b.score - a.score)
-    .slice(0, topN)
+    .slice(0, topN === 0 ? undefined : topN)
     .map((entry) => entry.c);
 }
 
