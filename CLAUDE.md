@@ -43,7 +43,11 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
 
 - `kalshi.ts` — public market data client (prod hosts), strategy spec grammar
   (`KalshiStrategySpec`: series, sideRule, entrySecondsBeforeClose, price band,
-  trendLookbackMinutes, minSignal, minHourEt/maxHourEt ET hour window),
+  trendLookbackMinutes, minSignal, minHourEt/maxHourEt ET hour window,
+  sideFilter both|yes_only|no_only, dowMaskEt day mask, minVol1mBps/
+  maxVol1mBps realized-vol regime gate, trendAlignHours/trendAlignMode
+  multi-hour underlying-trend gate - all backtested, crypto-context gates
+  auto-skip where no underlying feed),
   clampSpec/specHash, real-settled-market backtester (`evaluateSpecOnData`),
   candlestick fetch w/ 10s cache, normalCdf/valueModelProbUp fair-value model,
   CF-Benchmarks true-index history for backtests (fetchCfHistoryRange, HOUR
