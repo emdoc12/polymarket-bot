@@ -61,6 +61,8 @@ type LiveStatus = {
   orderSize: number;
   autoStake: boolean;
   cooldown?: { active: boolean; consecutiveLosses: number; untilMs: number | null };
+  transport?: "rest" | "stream";
+  streamConnected?: boolean;
   totalSettled: number;
   totalWins: number;
   totalNetPnl: number;
@@ -592,6 +594,11 @@ export default function KalshiDashboard() {
                 {liveStatus?.orderSize != null && (
                   <p className="text-[11px] text-muted-foreground">
                     ${liveStatus.orderSize.toFixed(0)} stakes{liveStatus.autoStake ? " · auto-scaling" : ""}
+                    {liveStatus.transport === "stream" && (
+                      <span className={liveStatus.streamConnected ? "text-emerald-400" : "text-destructive"}>
+                        {liveStatus.streamConnected ? " · stream orders" : " · stream DOWN (REST fallback)"}
+                      </span>
+                    )}
                   </p>
                 )}
                 <p className="hidden">{/* structure keeps tile heights aligned */}

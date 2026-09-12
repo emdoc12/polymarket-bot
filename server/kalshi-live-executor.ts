@@ -65,6 +65,40 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_cooldown_minutes")) storage.setSetting("live_cooldown_minutes", "45");
   if (!storage.getSetting("live_stake_fraction")) storage.setSetting("live_stake_fraction", "0.04");
   if (!storage.getSetting("live_max_order_size")) storage.setSetting("live_max_order_size", "10");
+  if (!storage.getSetting("live_transport")) storage.setSetting("live_transport", "rest");
+}
+
+// Order transport. "stream": decisions price off the live websocket book
+// (~2s evaluation, quotes ms-fresh) and orders fire only after the book
+// confirms enough resting depth for our size - built after replaying all
+// 140 REST misses showed 73% would-have-won (~$31 left on the table).
+// Orders themselves always go over REST (Kalshi has no WS order channel).
+// If the stream is down or stale, entries fall back to REST quotes and are
+// tagged accordingly - the executor never goes blind.
+export function liveTransport(): "rest" | "stream" {
+  return storage.getSetting("live_transport") === "stream" ? "stream" : "rest";
+}
+
+// Active-window discovery cache: stream mode ticks every ~2s and must not
+// hammer the REST markets endpoint (close times only change once per window).
+const activeMarketCache = new Map<string, { at: number; active: { market: KalshiMarket; closeMs: number } | null }>();
+async function activeMarketFor(series: string, nowMs: number): Promise<{ market: KalshiMarket; closeMs: number } | null> {
+  const cached = activeMarketCache.get(series);
+  if (cached && nowMs - cached.at < 12_000 && (cached.active == null || cached.active.closeMs > nowMs)) {
+    return cached.active;
+  }
+  let active: { market: KalshiMarket; closeMs: number } | null = null;
+  try {
+    const { markets } = await getKalshiMarkets({ seriesTicker: series, status: "open", limit: 10 });
+    active = markets
+      .map((market) => ({ market, closeMs: market.close_time ? new Date(market.close_time).getTime() : NaN }))
+      .filter((entry) => Number.isFinite(entry.closeMs) && entry.closeMs > nowMs)
+      .sort((a, b) => a.closeMs - b.closeMs)[0] ?? null;
+  } catch {
+    active = cached?.active ?? null;
+  }
+  activeMarketCache.set(series, { at: nowMs, active });
+  return active;
 }
 
 // Bankroll-proportional stakes: 4% of (free cash + open-position cost),
@@ -249,13 +283,36 @@ async function settleLiveTrades() {
   }
 }
 
+// In stream mode, overlay the websocket book's top onto the market object so
+// decideLiveEntry prices off ms-fresh quotes; expose resting depth for the
+// pre-fire confirmation. Falls back to the REST market object when the
+// stream is stale/down (fresh=false).
+function streamOverlay(market: KalshiMarket): { m: KalshiMarket; depthFor: (side: "yes" | "no") => number; fresh: boolean } {
+  if (liveTransport() !== "stream") return { m: market, depthFor: () => Infinity, fresh: false };
+  const quote = kalshiProdStream.getQuote(market.ticker, 10_000);
+  if (!quote || quote.yesAsk == null || quote.yesBid == null) {
+    return { m: market, depthFor: () => Infinity, fresh: false };
+  }
+  return {
+    m: { ...market, yes_ask_dollars: quote.yesAsk.toFixed(4), yes_bid_dollars: quote.yesBid.toFixed(4) },
+    depthFor: (side) => (side === "yes" ? quote.yesAskDepth : quote.yesBidDepth),
+    fresh: true,
+  };
+}
+
 async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySpec, market: KalshiMarket, nowMs: number) {
-  let decision = await decideLiveEntry(spec, market, nowMs);
+  let overlay = streamOverlay(market);
+  let decision = await decideLiveEntry(spec, overlay.m, nowMs);
   if (!decision.ok) return;
   if (!passesLivePriceGuards(decision.entryPrice)) return;
 
   const orderSize = await computeLiveStake();
   let contracts = Math.max(1, Math.floor(orderSize / decision.entryPrice));
+
+  // Depth confirmation (stream mode, fresh book only): if the level can't
+  // absorb our size, don't fire a doomed IOC - the ~2s tick retries while
+  // the entry window is still open, no row recorded.
+  if (overlay.fresh && overlay.depthFor(decision.side) < contracts) return;
   let entryPrice = decision.entryPrice;
   let cost = contracts * entryPrice;
   let fee = kalshiTradingFee(contracts, entryPrice);
@@ -300,8 +357,10 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
         cost = 0;
         fee = 0;
         if (attempt < MAX_ATTEMPTS) {
-          const requote = await decideLiveEntry(spec, market, Date.now());
-          if (requote.ok && requote.side === decision.side && passesLivePriceGuards(requote.entryPrice)) {
+          overlay = streamOverlay(market);
+          const requote = await decideLiveEntry(spec, overlay.m, Date.now());
+          if (requote.ok && requote.side === decision.side && passesLivePriceGuards(requote.entryPrice)
+            && (!overlay.fresh || overlay.depthFor(requote.side) >= Math.max(1, Math.floor(orderSize / requote.entryPrice)))) {
             decision = requote;
             continue;
           }
@@ -344,14 +403,18 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
     spotStrike: market.open_time
       ? kalshiProdStream.getSpotAt(spec.series, new Date(market.open_time).getTime())
       : null,
+    transport: overlay.fresh ? "stream" : "rest",
     placedAt: new Date().toISOString(),
     marketCloseAt: market.close_time ?? new Date(nowMs).toISOString(),
     settledAt: null,
   });
 }
 
+let settleCounter = 0;
 async function runLiveTick() {
-  await settleLiveTrades();
+  // Stream mode ticks every ~2s; settlement checks stay on a ~16s cadence.
+  const streaming = liveTransport() === "stream";
+  if (!streaming || settleCounter++ % 8 === 0) await settleLiveTrades();
 
   if (!liveEnabled()) return;
   if (!withinLiveTradingHours()) return;
@@ -372,19 +435,22 @@ async function runLiveTick() {
   const seriesNeeded = [...new Set(specs.map((s) => s.spec.series))];
   const nowMs = Date.now();
 
+  const actives: { series: string; market: KalshiMarket; closeMs: number }[] = [];
   for (const series of seriesNeeded) {
-    let markets: KalshiMarket[] = [];
-    try {
-      markets = (await getKalshiMarkets({ seriesTicker: series, status: "open", limit: 10 })).markets;
-    } catch {
-      continue;
-    }
-    const active = markets
-      .map((market) => ({ market, closeMs: market.close_time ? new Date(market.close_time).getTime() : NaN }))
-      .filter((entry) => Number.isFinite(entry.closeMs) && entry.closeMs > nowMs)
-      .sort((a, b) => a.closeMs - b.closeMs)[0];
-    if (!active) continue;
+    const active = await activeMarketFor(series, nowMs);
+    if (active) actives.push({ series, ...active });
+  }
+  if (streaming) {
+    // Keep the book stream pointed at our windows (union with the shadow's
+    // own subscriptions via the owner key).
+    kalshiProdStream.start();
+    kalshiProdStream.setMarkets(actives.map((a) => a.market.ticker), "live");
+  } else {
+    kalshiProdStream.setMarkets([], "live");
+  }
 
+  for (const active of actives) {
+    const series = active.series;
     const secondsToClose = (active.closeMs - nowMs) / 1000;
     for (const { candidate, spec } of specs) {
       if (spec.series !== series) continue;
@@ -406,7 +472,9 @@ async function runLiveTick() {
 
 let liveTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleLiveExecutor() {
-  const intervalSec = Math.max(10, parseInt(storage.getSetting("live_poll_seconds") || "15", 10));
+  const intervalSec = liveTransport() === "stream"
+    ? 2
+    : Math.max(10, parseInt(storage.getSetting("live_poll_seconds") || "15", 10));
   liveTimer = setTimeout(async () => {
     try {
       await runLiveTick();
@@ -449,6 +517,8 @@ export function registerLiveExecutorRoutes(app: Express) {
       maxEntryPrice: parseFloat(storage.getSetting("live_max_entry_price") || "0.80"),
       tradingHoursEt: storage.getSetting("live_trading_hours_et") || "0-24",
       cooldown: liveCooldown(),
+      transport: liveTransport(),
+      streamConnected: kalshiProdStream.isConnected(),
       totalSettled: settled.length,
       totalWins: settled.filter((t) => (t.netPnl ?? 0) > 0).length,
       totalNetPnl: settled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),

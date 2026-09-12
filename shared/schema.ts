@@ -196,6 +196,10 @@ export const liveTrades = sqliteTable("live_trades", {
   // fair-value model: was the crowd's price justified by the underlying?).
   spotAtEntry: real("spot_at_entry"),
   spotStrike: real("spot_strike"),
+  // Which quote/decision path produced the order: "rest" (15s polling) or
+  // "stream" (websocket book + depth confirmation). Lets the transport
+  // switch be A/B'd on the live ledger itself.
+  transport: text("transport"),
   placedAt: text("placed_at").notNull(),
   marketCloseAt: text("market_close_at").notNull(),
   settledAt: text("settled_at"),

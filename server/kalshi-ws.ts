@@ -66,6 +66,9 @@ const SPOT_BUFFER_MS = 40 * 60 * 1000;
 class KalshiMarketStream {
   private ws: WebSocket | null = null;
   private books = new Map<string, MarketBook>();
+  // Multiple consumers (shadow, live executor) declare interest separately;
+  // the subscription is the union so neither clobbers the other.
+  private wantedByOwner = new Map<string, Set<string>>();
   private wanted = new Set<string>();
   private subscribed = new Set<string>();
   private sid: number | null = null;
@@ -165,9 +168,14 @@ class KalshiMarketStream {
     return Math.sqrt(variance);
   }
 
-  // Declare which markets we care about; subscriptions follow.
-  setMarkets(tickers: string[]) {
-    this.wanted = new Set(tickers);
+  // Declare which markets an owner cares about; the subscription follows the
+  // union across owners.
+  setMarkets(tickers: string[], owner = "shadow") {
+    this.wantedByOwner.set(owner, new Set(tickers));
+    this.wanted = new Set<string>();
+    for (const set of this.wantedByOwner.values()) {
+      for (const t of set) this.wanted.add(t);
+    }
     for (const t of [...this.books.keys()]) {
       if (!this.wanted.has(t)) this.books.delete(t);
     }

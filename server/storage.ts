@@ -248,6 +248,7 @@ function runMigrations() {
   const liveColNames = new Set(liveCols.map((c) => c.name));
   if (!liveColNames.has("spot_at_entry")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_at_entry REAL;");
   if (!liveColNames.has("spot_strike")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_strike REAL;");
+  if (!liveColNames.has("transport")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN transport TEXT;");
 
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
