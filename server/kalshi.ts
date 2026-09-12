@@ -433,14 +433,19 @@ function makeTickLookup(samples: { ts: number; value: number }[]): (tsSec: numbe
 }
 
 function makeSpotLookup(closes: { ts: number; close: number }[]): (tsSec: number) => number | null {
+  // closes are sorted ascending; binary search for the latest bucket whose
+  // close is causally known (bucket start + 60 <= ts). Linear scan here was
+  // a measurable event-loop hog at ~30 calls per market per gated spec.
   return (tsSec: number) => {
-    // Latest minute close at or before ts (candle ts = bucket start, so the
-    // close is known at ts+60; use the bucket covering ts-60 for causality).
-    let best: { ts: number; close: number } | null = null;
-    for (const c of closes) {
-      if (c.ts + 60 <= tsSec + 1 && (!best || c.ts > best.ts)) best = c;
+    const target = tsSec + 1 - 60;
+    let lo = 0, hi = closes.length - 1, best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (closes[mid].ts <= target) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
     }
-    return best && tsSec - best.ts < 15 * 60 ? best.close : null;
+    if (best < 0) return null;
+    return tsSec - closes[best].ts < 15 * 60 ? closes[best].close : null;
   };
 }
 

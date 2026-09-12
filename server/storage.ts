@@ -13,7 +13,7 @@ import {
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc, inArray, isNull } from "drizzle-orm";
 
 import path from "path";
 const dbPath = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, "data.db") : "data.db";
@@ -244,6 +244,10 @@ function runMigrations() {
   if (!wsShadowColNames.has("audition")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN audition INTEGER NOT NULL DEFAULT 0;");
   if (!wsShadowColNames.has("spot_at_entry")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN spot_at_entry REAL;");
   if (!wsShadowColNames.has("spot_strike")) sqlite.exec("ALTER TABLE ws_shadow_trades ADD COLUMN spot_strike REAL;");
+  // Hot-path indexes: these lookups run every 1-2s tick.
+  sqlite.exec("CREATE INDEX IF NOT EXISTS idx_ws_shadow_cand_ticker ON ws_shadow_trades(candidate_id, ticker);");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS idx_ws_shadow_settled ON ws_shadow_trades(settled_at);");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS idx_live_cand_ticker ON live_trades(candidate_id, ticker);");
   const liveCols = sqlite.pragma("table_info(live_trades)") as { name: string }[];
   const liveColNames = new Set(liveCols.map((c) => c.name));
   if (!liveColNames.has("spot_at_entry")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN spot_at_entry REAL;");
@@ -647,13 +651,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   getUnsettledLiveTrades(): LiveTrade[] {
-    return db.select().from(liveTrades).orderBy(desc(liveTrades.id)).all()
-      .filter((trade) => trade.status === "open");
+    return db.select().from(liveTrades).where(eq(liveTrades.status, "open")).orderBy(desc(liveTrades.id)).all();
   }
 
   hasLiveTradeFor(candidateId: number, ticker: string): boolean {
-    return db.select().from(liveTrades).all()
-      .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
+    return db.select({ id: liveTrades.id }).from(liveTrades)
+      .where(and(eq(liveTrades.candidateId, candidateId), eq(liveTrades.ticker, ticker)))
+      .limit(1).all().length > 0;
   }
 
   // WebSocket shadow trades (streaming-quote rehearsal)
@@ -670,14 +674,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   getUnsettledWsShadowTrades(): WsShadowTrade[] {
-    return db.select().from(wsShadowTrades).orderBy(desc(wsShadowTrades.id)).all()
-      .filter((trade) => trade.settledAt == null
-        && (trade.status === "would_fill" || trade.status === "no_depth"));
+    return db.select().from(wsShadowTrades)
+      .where(and(isNull(wsShadowTrades.settledAt), inArray(wsShadowTrades.status, ["would_fill", "no_depth"])))
+      .orderBy(desc(wsShadowTrades.id)).all();
   }
 
   hasWsShadowTradeFor(candidateId: number, ticker: string): boolean {
-    return db.select().from(wsShadowTrades).all()
-      .some((trade) => trade.candidateId === candidateId && trade.ticker === ticker);
+    return db.select({ id: wsShadowTrades.id }).from(wsShadowTrades)
+      .where(and(eq(wsShadowTrades.candidateId, candidateId), eq(wsShadowTrades.ticker, ticker)))
+      .limit(1).all().length > 0;
   }
 
   clearWsShadowTrades(): number {

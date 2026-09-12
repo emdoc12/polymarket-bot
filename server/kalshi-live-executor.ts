@@ -278,7 +278,17 @@ function liveTotalNetPnl() {
 //      and audition-qualified specs always outrank demo-only ones.
 //   3. DEMO record (transitional fallback while audition data accumulates):
 //      >= live_min_demo_trades settled demo fills with positive net P&L.
+// Memoized 5s: this runs from 1-2s ticks in two executors and rebuilds
+// recent-trade maps; per-second recomputation was an event-loop hog.
+let armedCache: { at: number; armed: CandidateStrategy[] } | null = null;
 export function getLiveArmedStrategies(): CandidateStrategy[] {
+  if (armedCache && Date.now() - armedCache.at < 5_000) return armedCache.armed;
+  const armedResult = computeLiveArmedStrategies();
+  armedCache = { at: Date.now(), armed: armedResult };
+  return armedResult;
+}
+
+function computeLiveArmedStrategies(): CandidateStrategy[] {
   // live_top_n = 0 means UNLIMITED: every qualified strategy trades. Safe
   // because risk is bounded per trade (bankroll-fraction stakes), per window
   // (one position), per moment (max open), and per strategy (the live bench

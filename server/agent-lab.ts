@@ -717,7 +717,11 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     // evaluation. Evidence accumulates cycle over cycle - this is the sample
     // that promotion decisions rest on, and it cannot be curve-fit.
     let walkForwardUpdates = 0;
+    let evalCount = 0;
     for (const candidate of survivors) {
+      // Walk-forward replay is pure sync CPU; yield the event loop every few
+      // candidates so HTTP requests don't stall 20s+ behind a cycle.
+      if (++evalCount % 4 === 0) await new Promise((r) => setImmediate(r));
       const spec = clampSpec(JSON.parse(candidate.spec));
       const data = dataBySeries.get(spec.series) ?? [];
       const sinceMs = candidate.lastEvalCloseMs ?? Date.parse(candidate.createdAt);
