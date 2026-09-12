@@ -190,6 +190,8 @@ The desk runs TWO strategy kinds, reviewed together:
 - kind "binary": event-contract specs on 15-min up/down markets (see the binary spec doc below).
 - kind "perp": perpetual-futures long/short specs. ${PERP_SPEC_DOC.split("\n")[0]} Same promotion discipline applies: >= 15 profitable live (walk-forward) trades with discovery agreement.
 
+DECAY DETECTION: lifetime aggregates hide strategies that recently broke. Candidates carry 'realMoneyRecent15' (last 15 settled real-money trades). A strategy whose lifetime is positive but whose recent window has flipped decisively negative deserves suspicion in your commentary and, on sufficient evidence, demotion - but remember the low-band engines are ~45% win rate BY DESIGN (small losses, big wins): judge recent windows on NET P&L, never on win count, or you will cull the engine that built the book.
+
 Weigh the Skeptic's overfitting notes seriously. Set a specific, actionable research focus for the next cycle.
 
 BLIND-SPOT DUTY: you can only act within the spec grammar you are given, and history shows the desk's worst losses came from patterns the grammar could not yet express (trading hours, direction). If you notice a recurring pattern in the forensics, real-money, or audition data that NO current spec field lets the team act on, say so explicitly in your commentary, prefixed "GRAMMAR REQUEST:" with what dimension you need and why. The humans read your commentary and extend the grammar - but only if you ask.
@@ -321,6 +323,16 @@ function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, 
           downWindows: { settled: real.downSettled, netPnl: Number(real.downPnl.toFixed(2)) },
         }
       : null,
+    // Decay detection: lifetime aggregates hide a strategy that recently
+    // broke. recent15 = the last 15 settled real-money trades.
+    realMoneyRecent15: (() => {
+      const mine = storage.getLiveTrades(2000)
+        .filter((t) => t.candidateId === candidate.id && t.netPnl != null)
+        .slice(0, 15);
+      if (mine.length === 0) return null;
+      const wins = mine.filter((t) => (t.netPnl ?? 0) > 0).length;
+      return { settled: mine.length, wins, losses: mine.length - wins, netPnl: Number(mine.reduce((a, t) => a + (t.netPnl ?? 0), 0).toFixed(2)) };
+    })(),
     // Would-be record on REAL production orderbooks (streaming shadow).
     // The best predictor of live transfer for candidates without a
     // real-money history - measured on the venue live money actually trades.
