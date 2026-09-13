@@ -10,24 +10,21 @@ import {
   type KalshiStrategySpec,
 } from "./kalshi";
 import { decideLiveEntry } from "./kalshi-executor";
-import { computeCooldown, computeLiveStake, getLiveArmedStrategies, passesLivePriceGuards, withinLiveTradingHours } from "./kalshi-live-executor";
+import { computeLiveStake, passesLivePriceGuards } from "./kalshi-live-executor";
 import { kalshiProdStream } from "./kalshi-ws";
 import { fetchCfPassthrough } from "./kalshi-trading";
 import type { CandidateStrategy } from "@shared/schema";
 
-// The WebSocket SHADOW executor: an A/B experiment against the REST live
-// executor, run on the same production account's market data.
+// The PROD AUDITION engine: every promoted strategy rehearses risk-free on
+// the real production orderbooks, 24/7 - streamed quotes, depth-confirmed
+// would-fills, settled into would-be P&L. Audition records gate the live
+// allowlist and feed the PM (evidence rank: realMoney > prodAudition > demo).
 //
-//   Same allowlist. Same entry logic (decideLiveEntry). Same guards, sizing,
-//   and one-position-per-window rule. The ONLY differences: quotes come from
-//   the streamed orderbook instead of 15s REST polls, evaluation runs every
-//   second, and NOTHING is ever sent to the exchange. Entries are recorded to
-//   ws_shadow_trades with the streamed price, the depth resting at that
-//   price (the fill proxy), and quote age; they settle against real market
-//   results so a would-be P&L accumulates.
-//
-// Comparing ws_shadow_trades to live_trades window-by-window answers: how
-// many fills and how much P&L is the 15s polling transport costing us?
+// History: this began life as a WS-vs-REST transport A/B ("mirror" rows,
+// audition=0). Verdict delivered 2026-09-12 (100% vs ~60% fills, 73% of
+// misses were winners) and live switched to the stream; the user retired
+// the mirror 2026-09-13. All rows are audition rows now; old mirror rows
+// remain in the ledger as history.
 
 const ENTRY_TOLERANCE_SEC = 75;
 const MARKET_REFRESH_MS = 20_000;
@@ -157,21 +154,10 @@ async function runShadowTick() {
     kalshiProdStream.setMarkets([]);
     return;
   }
-  // Curfew parity applies ONLY to mirror rows (the live A/B). Audition rows
-  // keep running 24/7: the curfew's own evidence base is 27 stale weekday
-  // trades, and if the audition sleeps during the disputed hours, overnight
-  // strategies can never earn their way back - a self-sealing rule. The
-  // 9/13 weekend proved the cost: +$105 of demo P&L landed in hours the
-  // evidence engine wasn't even watching.
-
-  // Two tiers share the stream:
-  //  - MIRROR (audition=0): the allowlisted strategies under the live
-  //    executor's exact shared rails - the strict A/B vs REST polling.
-  //  - AUDITION (audition=1): EVERY other promoted binary strategy, each
-  //    earning a would-be record on real prod books before any real money.
-  //    Free trades, so no shared caps - only one entry per candidate per
-  //    window and the live price guards (so the record predicts live rules).
-  const armedIds = new Set(getLiveArmedStrategies().map((c) => c.id));
+  // Every promoted binary strategy auditions - allowlisted or not - one
+  // entry per candidate per window, under the live price guards (so records
+  // predict live rules), around the clock (curfew evidence must keep
+  // accumulating during the disputed hours or it can never be revisited).
   const promoted = storage.getCandidateStrategies("promoted").filter((c) => c.kind !== "perp");
   if (promoted.length === 0) {
     kalshiProdStream.setMarkets([]);
@@ -191,8 +177,6 @@ async function runShadowTick() {
   }
   kalshiProdStream.setMarkets(actives.map((a) => a.market.ticker));
 
-  const maxOpen = Math.max(1, parseInt(storage.getSetting("live_max_open_trades") || "2", 10));
-
   for (const active of actives) {
     const secondsToClose = (active.closeMs - nowMs) / 1000;
     for (const { candidate, spec } of specs) {
@@ -204,19 +188,8 @@ async function runShadowTick() {
       if (spec.sideRule.startsWith("trend") && !dueForEval(candidate.id, active.market.ticker, 10_000)) continue;
       if (storage.hasWsShadowTradeFor(candidate.id, active.market.ticker)) continue;
 
-      const isMirror = armedIds.has(candidate.id);
-      if (isMirror && !withinLiveTradingHours()) continue; // mirror keeps live's curfew
-      if (isMirror) {
-        // Mirror the live executor's shared rails exactly so the A/B is fair
-        // (including the loss cool-down, computed from the mirror's own
-        // ledger). Audition rows stay exempt - they exist to gather
-        // per-strategy evidence, not to manage a portfolio.
-        if (computeCooldown(storage.getWsShadowTrades(60).filter((t) => !t.audition)).active) continue;
-        if (storage.getWsShadowTrades(100).some((t) => !t.audition && t.ticker === active.market.ticker)) continue;
-        if (storage.getUnsettledWsShadowTrades().filter((t) => !t.audition && t.status === "would_fill").length >= maxOpen) continue;
-      }
       try {
-        await tryShadowEntry(candidate, spec, active.market, nowMs, !isMirror);
+        await tryShadowEntry(candidate, spec, active.market, nowMs, true);
       } catch (err) {
         console.error(`${new Date().toISOString()} [error] [ws-shadow] entry failed for candidate ${candidate.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -246,68 +219,6 @@ function scheduleShadow() {
     }
     scheduleShadow();
   }, 1000);
-}
-
-// Window-by-window comparison against the REST live executor. A "window" is
-// one market ticker; both executors saw the same books and windows, so any
-// divergence is transport.
-function buildComparison() {
-  // Only MIRROR rows belong in the A/B - audition strategies enter windows
-  // the REST executor never attempts, which would poison the summary.
-  const shadow = storage.getWsShadowTrades(1000).filter((t) => !t.audition);
-  // Fair summary: only count REST trades from the period the shadow was also
-  // watching (rows come newest-first, so the oldest shadow row is last).
-  const shadowStart = shadow.length > 0 ? shadow[shadow.length - 1].placedAt : null;
-  const live = storage.getLiveTrades(500)
-    .filter((t) => shadowStart == null || t.placedAt >= shadowStart);
-  const liveByTicker = new Map(live.map((t) => [t.ticker, t] as const));
-  const rows = shadow
-    .slice(0, 60)
-    .map((s) => {
-      const l = liveByTicker.get(s.ticker);
-      return {
-        ticker: s.ticker,
-        side: s.side,
-        placedAt: s.placedAt,
-        ws: {
-          entryPrice: s.entryPrice,
-          wouldFill: s.wouldFill,
-          depth: s.depthAtEntry,
-          status: s.status,
-          netPnl: s.netPnl,
-        },
-        rest: l
-          ? { entryPrice: l.entryPrice, status: l.status, filled: l.status !== "unfilled" && l.status !== "failed", netPnl: l.netPnl }
-          : null,
-      };
-    });
-
-  const shadowSettled = shadow.filter((t) => t.netPnl != null);
-  const shadowAttempts = shadow.length;
-  const shadowFills = shadow.filter((t) => t.wouldFill).length;
-  const liveAttempts = live.filter((t) => t.status !== "failed").length;
-  const liveFills = live.filter((t) => t.status !== "failed" && t.status !== "unfilled").length;
-  return {
-    summary: {
-      ws: {
-        attempts: shadowAttempts,
-        wouldFill: shadowFills,
-        fillRate: shadowAttempts > 0 ? shadowFills / shadowAttempts : null,
-        settled: shadowSettled.length,
-        wins: shadowSettled.filter((t) => (t.netPnl ?? 0) > 0).length,
-        netPnl: shadowSettled.reduce((sum, t) => sum + (t.netPnl ?? 0), 0),
-      },
-      rest: {
-        attempts: liveAttempts,
-        filled: liveFills,
-        fillRate: liveAttempts > 0 ? liveFills / liveAttempts : null,
-        settled: live.filter((t) => t.netPnl != null).length,
-        wins: live.filter((t) => (t.netPnl ?? 0) > 0 && t.netPnl != null).length,
-        netPnl: live.filter((t) => t.netPnl != null).reduce((sum, t) => sum + (t.netPnl ?? 0), 0),
-      },
-    },
-    rows,
-  };
 }
 
 // Prod-audition leaderboard: every promoted strategy's would-be record on
@@ -349,10 +260,6 @@ export function registerWsShadowRoutes(app: Express) {
   app.get("/api/ws-shadow/trades", (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt((req.query.limit as string) || "100", 10)));
     res.json({ trades: storage.getWsShadowTrades(limit) });
-  });
-
-  app.get("/api/ws-shadow/compare", (_req, res) => {
-    res.json(buildComparison());
   });
 
   app.get("/api/ws-shadow/audition", (_req, res) => {

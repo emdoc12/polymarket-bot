@@ -73,10 +73,13 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
   settlement index (BRTI/ETHUSD_RTI), spot buffers + strike capture +
   realized vol, history backfill on boot (CF history lags ≤15 min → second
   pass at +12 min).
-- `kalshi-ws-shadow.ts` — shadow executor: mirror rows (strict A/B vs REST
-  live executor) + audition rows (EVERY promoted strategy rehearsed on real
-  books, `audition=1`). Never places orders. Routes /api/ws-shadow/*,
-  /api/spot/*.
+- `kalshi-ws-shadow.ts` — prod audition engine: EVERY promoted strategy
+  rehearses risk-free on real prod orderbooks 24/7 (`audition=1` rows;
+  depth-confirmed would-fills, settled would-be P&L). Gates the live
+  allowlist. Never places orders. Routes /api/ws-shadow/*, /api/spot/*.
+  (Began as a WS-vs-REST transport A/B with "mirror" rows; verdict landed,
+  live moved to stream transport, and the mirror was retired v1.23.0 —
+  old audition=0 rows are history only.)
 - `kalshi-perps.ts`, `kalshi-perp-executor.ts` — perps desk (conclusive
   verdict: no edge in 1-min price action vs costs; PM keeps it unfunded).
 - `storage.ts` — SQLite + migrations. Ledgers: executor_trades (demo),
@@ -102,7 +105,8 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
   would-have-won (~+$31 left on table, ~2.4 sigma vs filled trades' 60%).
 - Loss clustering (P(loss|loss)=50% vs 30%) is railed as of v1.13.1: after
   3 consecutive live losses, no entries for 45 min (live_cooldown_losses /
-  live_cooldown_minutes; 0 disables). Mirror applies it; audition exempt.
+  live_cooldown_minutes; 0 disables). Audition rows are exempt — they gather
+  per-strategy evidence, not portfolio risk.
 
 ## Kalshi API facts (verified live)
 
@@ -129,7 +133,7 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
 ## Useful endpoints (LAN only: http://192.168.1.101:5000)
 
 /api/version · /api/live/status|trades|pnl-series · /api/live/arm|disarm|
-reset-kill-switch · /api/ws-shadow/status|compare|audition|reset ·
+reset-kill-switch · /api/ws-shadow/status|trades|audition|reset|toggle ·
 /api/spot/status|history-probe · /api/agent-lab/status|candidates|runs|run ·
 /api/executor/status|pnl-series · POST /api/settings {key,value} (rejects
 live_executor_enabled=true and live_kill_switch — use dedicated routes).
@@ -185,7 +189,9 @@ session: "re-arm the PM watch per CLAUDE.md".
 
 ## Parked / open threads
 
-- Streaming (WS) order path: build only when audition math justifies it.
+- (Resolved) WS-vs-REST transport A/B: verdict was ~100% vs ~60-74% fill
+  rates with similar win rates; live_transport=stream shipped v1.15.0 and
+  the mirror/comparison was retired as noise in v1.23.0.
 - NFL scout desk: scoped and parked (divergence scanner vs sportsbook
   consensus, needs free the-odds-api.com key, paper ledger first).
 - Perps: unfunded pending a fee-modeled backtest ≥50 scored trades/split.

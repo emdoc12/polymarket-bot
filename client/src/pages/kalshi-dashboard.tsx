@@ -100,20 +100,6 @@ type WsShadowStatus = {
   openShadows: number;
 };
 
-type WsCompare = {
-  summary: {
-    ws: { attempts: number; wouldFill: number; fillRate: number | null; settled: number; wins: number; netPnl: number };
-    rest: { attempts: number; filled: number; fillRate: number | null; settled: number; wins: number; netPnl: number };
-  };
-  rows: {
-    ticker: string;
-    side: string;
-    placedAt: string;
-    ws: { entryPrice: number; wouldFill: boolean; depth: number | null; status: string; netPnl: number | null };
-    rest: { entryPrice: number; status: string; filled: boolean; netPnl: number | null } | null;
-  }[];
-};
-
 type AuditionRow = {
   candidateId: number;
   name: string;
@@ -231,11 +217,6 @@ export default function KalshiDashboard() {
   const { data: wsStatus } = useQuery<WsShadowStatus>({
     queryKey: ["/api/ws-shadow/status"],
     refetchInterval: 15000,
-    retry: false,
-  });
-  const { data: wsCompare } = useQuery<WsCompare>({
-    queryKey: ["/api/ws-shadow/compare"],
-    refetchInterval: 20000,
     retry: false,
   });
   const { data: auditionData } = useQuery<{ board: AuditionRow[] }>({
@@ -386,12 +367,12 @@ export default function KalshiDashboard() {
         </Card>
       </div>
 
-      {/* WebSocket shadow — streaming-quote rehearsal vs REST live executor */}
+      {/* Prod audition — every promoted strategy rehearses on real orderbooks */}
       {showLive && (
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2 flex-wrap">
-              <CardTitle className="text-sm font-medium">Streaming shadow (WebSocket) — rehearsal</CardTitle>
+              <CardTitle className="text-sm font-medium">Prod audition — earning a shot at real money</CardTitle>
               {wsStatus?.enabled ? (
                 <Badge variant="secondary" className="text-[10px]">recording</Badge>
               ) : (
@@ -409,144 +390,50 @@ export default function KalshiDashboard() {
                 onClick={() => wsToggleMutation.mutate(!wsStatus?.enabled)}
                 disabled={wsToggleMutation.isPending}
               >
-                {wsStatus?.enabled ? "Pause shadow" : "Start shadow"}
+                {wsStatus?.enabled ? "Pause audition" : "Start audition"}
               </Button>
             </div>
             <CardDescription className="text-xs">
-              Same account, strategies, sizing, and entry logic as the live executor — but priced off
-              streamed orderbook quotes, evaluated every second, and never sent to the exchange.
-              Head-to-head on identical windows: is 15s polling costing us fills?
+              Every promoted strategy rehearses risk-free on the real production orderbooks, 24/7 —
+              streamed quotes, depth-confirmed would-fills, settled against real results. A positive
+              record over 15+ settled auditions qualifies for the live allowlist, ahead of any demo record.
               {wsStatus?.enabled && !wsStatus.stream.connected && wsStatus.stream.lastError && (
                 <span className="text-destructive"> Stream error: {wsStatus.stream.lastError}</span>
               )}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            {wsCompare && wsCompare.summary.ws.attempts + wsCompare.summary.rest.attempts > 0 ? (
-              <>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-md border border-border/60 p-3">
-                    <p className="text-[11px] text-muted-foreground mb-1">WebSocket (would-be)</p>
-                    <p className="text-sm font-mono">
-                      {wsCompare.summary.ws.wouldFill}/{wsCompare.summary.ws.attempts} fillable
-                      {wsCompare.summary.ws.fillRate != null && ` (${Math.round(wsCompare.summary.ws.fillRate * 100)}%)`}
-                    </p>
-                    <p className="text-xs mt-0.5">
-                      {wsCompare.summary.ws.settled > 0
-                        ? <>{wsCompare.summary.ws.wins}W/{wsCompare.summary.ws.settled - wsCompare.summary.ws.wins}L ({Math.round((wsCompare.summary.ws.wins / wsCompare.summary.ws.settled) * 100)}% win) · <PnlText value={wsCompare.summary.ws.netPnl} /></>
-                        : <span className="text-muted-foreground">no settlements yet</span>}
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-border/60 p-3">
-                    <p className="text-[11px] text-muted-foreground mb-1">REST polling (real)</p>
-                    <p className="text-sm font-mono">
-                      {wsCompare.summary.rest.filled}/{wsCompare.summary.rest.attempts} filled
-                      {wsCompare.summary.rest.fillRate != null && ` (${Math.round(wsCompare.summary.rest.fillRate * 100)}%)`}
-                    </p>
-                    <p className="text-xs mt-0.5">
-                      {wsCompare.summary.rest.settled > 0
-                        ? <>{wsCompare.summary.rest.wins}W/{wsCompare.summary.rest.settled - wsCompare.summary.rest.wins}L ({Math.round((wsCompare.summary.rest.wins / wsCompare.summary.rest.settled) * 100)}% win) · <PnlText value={wsCompare.summary.rest.netPnl} /></>
-                        : <span className="text-muted-foreground">no settlements yet</span>}
-                    </p>
-                  </div>
-                </div>
-
-                {wsCompare.rows.length > 0 && (
-                  <table className="w-full text-sm table-fixed sm:table-auto">
-                    <thead>
-                      <tr className="text-[11px] text-muted-foreground border-b border-border">
-                        <th className="text-left font-medium py-2 pr-2">Window</th>
-                        <th className="text-right font-medium px-2 py-2">WS saw</th>
-                        <th className="text-left font-medium px-2 py-2 w-[4.2rem] sm:w-auto">WS</th>
-                        <th className="text-right font-medium px-2 py-2 hidden sm:table-cell">REST got</th>
-                        <th className="text-left font-medium px-2 py-2 w-[4.2rem] sm:w-auto">REST</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {wsCompare.rows.slice(0, 10).map((r) => (
-                        <tr key={`${r.ticker}-${r.placedAt}`} className="border-b border-border/50">
-                          <td className="py-2 pr-2 overflow-hidden">
-                            <p className="text-xs font-medium whitespace-nowrap">
-                              {r.ticker.replace("KX", "").replace("15M", "").split("-")[0]} {r.side.toUpperCase()}
-                              <span className="text-muted-foreground font-normal text-[10px]">
-                                {" "}
-                                {new Date(r.placedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }).replace(/\s/g, "").toLowerCase()}
-                              </span>
-                            </p>
-                            <p className="text-[10px] text-muted-foreground truncate font-mono">{r.ticker}</p>
-                          </td>
-                          <td className="px-2 py-2 text-right text-xs font-mono whitespace-nowrap">
-                            {(r.ws.entryPrice * 100).toFixed(0)}¢
-                          </td>
-                          <td className="px-2 py-2 text-xs">
-                            <Badge
-                              variant={r.ws.status === "settled_won" ? "default" : r.ws.status === "settled_lost" ? "destructive" : r.ws.wouldFill ? "secondary" : "outline"}
-                              className="text-[10px]"
-                            >
-                              {r.ws.status === "would_fill" ? "fillable" : r.ws.status === "no_depth" ? "no depth" : r.ws.status.replace("settled_", "")}
-                            </Badge>
-                          </td>
-                          <td className="px-2 py-2 text-right text-xs font-mono hidden sm:table-cell">
-                            {r.rest ? `${(r.rest.entryPrice * 100).toFixed(0)}¢` : "—"}
-                          </td>
-                          <td className="px-2 py-2 text-xs">
-                            {r.rest ? (
-                              <Badge
-                                variant={r.rest.status === "settled_won" ? "default" : r.rest.status === "settled_lost" || r.rest.status === "failed" ? "destructive" : "secondary"}
-                                className="text-[10px]"
-                              >
-                                {r.rest.status === "unfilled" ? "unfilled" : r.rest.status.replace("settled_", "")}
-                              </Badge>
-                            ) : (
-                              <span className="text-[10px] text-muted-foreground">no entry</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </>
+          <CardContent>
+            {(auditionData?.board?.length ?? 0) > 0 ? (
+              <table className="w-full text-sm table-fixed sm:table-auto">
+                <thead>
+                  <tr className="text-[11px] text-muted-foreground border-b border-border">
+                    <th className="text-left font-medium py-1.5 pr-2">Strategy</th>
+                    <th className="text-right font-medium px-2 py-1.5 w-16 sm:w-auto">Fillable</th>
+                    <th className="text-right font-medium px-2 py-1.5 w-14 sm:w-auto">W/L</th>
+                    <th className="text-right font-medium pl-2 py-1.5 w-16 sm:w-auto">Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {auditionData!.board.slice(0, 8).map((row) => (
+                    <tr key={row.candidateId} className="border-b border-border/40">
+                      <td className="py-1.5 pr-2 overflow-hidden">
+                        <p className="text-[11px] truncate">{row.name}</p>
+                      </td>
+                      <td className="px-2 py-1.5 text-right text-xs font-mono">{row.fillable}/{row.attempts}</td>
+                      <td className="px-2 py-1.5 text-right text-xs font-mono text-muted-foreground">
+                        {row.settled > 0 ? `${row.wins}/${row.settled - row.wins}` : "—"}
+                      </td>
+                      <td className="pl-2 py-1.5 text-right text-xs"><PnlText value={row.settled > 0 ? row.netPnl : null} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             ) : (
               <p className="text-xs text-muted-foreground">
                 {wsStatus?.enabled
-                  ? "Collecting — shadow entries appear as the next windows hit their entry timing."
-                  : "Shadow paused."}
+                  ? "Collecting — audition entries appear as the next windows hit their entry timing."
+                  : "Audition paused."}
               </p>
-            )}
-
-            {(auditionData?.board?.length ?? 0) > 0 && (
-              <div className="border-t pt-3">
-                <p className="text-xs font-medium mb-0.5">Prod audition — earning a shot at real money</p>
-                <p className="text-[11px] text-muted-foreground mb-2">
-                  Every promoted strategy rehearses risk-free on the real production books. A positive
-                  record over 15+ settled auditions qualifies for the live allowlist — ahead of any demo record.
-                </p>
-                <table className="w-full text-sm table-fixed sm:table-auto">
-                  <thead>
-                    <tr className="text-[11px] text-muted-foreground border-b border-border">
-                      <th className="text-left font-medium py-1.5 pr-2">Strategy</th>
-                      <th className="text-right font-medium px-2 py-1.5 w-16 sm:w-auto">Fillable</th>
-                      <th className="text-right font-medium px-2 py-1.5 w-14 sm:w-auto">W/L</th>
-                      <th className="text-right font-medium pl-2 py-1.5 w-16 sm:w-auto">Net</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {auditionData!.board.slice(0, 6).map((row) => (
-                      <tr key={row.candidateId} className="border-b border-border/40">
-                        <td className="py-1.5 pr-2 overflow-hidden">
-                          <p className="text-[11px] truncate">{row.name}</p>
-                        </td>
-                        <td className="px-2 py-1.5 text-right text-xs font-mono">{row.fillable}/{row.attempts}</td>
-                        <td className="px-2 py-1.5 text-right text-xs font-mono text-muted-foreground">
-                          {row.settled > 0 ? `${row.wins}/${row.settled - row.wins}` : "—"}
-                        </td>
-                        <td className="pl-2 py-1.5 text-right text-xs"><PnlText value={row.settled > 0 ? row.netPnl : null} /></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
             )}
           </CardContent>
         </Card>
