@@ -197,7 +197,7 @@ export default function KalshiDashboard() {
     refetchInterval: 30000,
   });
   const { data: candidatesData } = useQuery<{ candidates: Candidate[] }>({
-    queryKey: ["/api/agent-lab/candidates"],
+    queryKey: ["/api/agent-lab/candidates?status=promoted"],
     refetchInterval: 15000,
   });
   const { data: labStatus } = useQuery<LabStatus>({

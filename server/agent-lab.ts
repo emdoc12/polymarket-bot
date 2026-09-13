@@ -243,6 +243,7 @@ type FillStats = Map<number, { attempts: number; filled: number; unfilled: numbe
 type LiveExecStats = Map<number, {
   attempts: number; filled: number; unfilled: number; wins: number; losses: number; netPnl: number;
   upPnl: number; upSettled: number; downPnl: number; downSettled: number;
+  recentPnls: number[]; // newest-first, capped at 15 - powers realMoneyRecent15
 }>;
 
 // Prod-audition record per candidate: would-be results on REAL production
@@ -272,7 +273,7 @@ function buildLiveExecStats(): LiveExecStats {
   for (const t of storage.getLiveTrades(10000)) {
     if (t.candidateId == null || t.status === "failed") continue;
     const s = map.get(t.candidateId)
-      ?? { attempts: 0, filled: 0, unfilled: 0, wins: 0, losses: 0, netPnl: 0, upPnl: 0, upSettled: 0, downPnl: 0, downSettled: 0 };
+      ?? { attempts: 0, filled: 0, unfilled: 0, wins: 0, losses: 0, netPnl: 0, upPnl: 0, upSettled: 0, downPnl: 0, downSettled: 0, recentPnls: [] };
     s.attempts += 1;
     if (t.status === "unfilled") s.unfilled += 1;
     else s.filled += 1;
@@ -280,6 +281,7 @@ function buildLiveExecStats(): LiveExecStats {
       s.netPnl += t.netPnl;
       if (t.netPnl > 0) s.wins += 1;
       else s.losses += 1;
+      if (s.recentPnls.length < 15) s.recentPnls.push(t.netPnl); // rows arrive newest-first
       // Direction attribution: which way the window actually closed.
       if (t.result === "yes") { s.upPnl += t.netPnl; s.upSettled += 1; }
       else if (t.result === "no") { s.downPnl += t.netPnl; s.downSettled += 1; }
@@ -329,14 +331,14 @@ function describeCandidate(candidate: CandidateStrategy, fillStats?: FillStats, 
       : null,
     // Decay detection: lifetime aggregates hide a strategy that recently
     // broke. recent15 = the last 15 settled real-money trades.
-    realMoneyRecent15: (() => {
-      const mine = storage.getLiveTrades(2000)
-        .filter((t) => t.candidateId === candidate.id && t.netPnl != null)
-        .slice(0, 15);
-      if (mine.length === 0) return null;
-      const wins = mine.filter((t) => (t.netPnl ?? 0) > 0).length;
-      return { settled: mine.length, wins, losses: mine.length - wins, netPnl: Number(mine.reduce((a, t) => a + (t.netPnl ?? 0), 0).toFixed(2)) };
-    })(),
+    realMoneyRecent15: real && real.recentPnls.length > 0
+      ? {
+          settled: real.recentPnls.length,
+          wins: real.recentPnls.filter((x) => x > 0).length,
+          losses: real.recentPnls.filter((x) => x <= 0).length,
+          netPnl: Number(real.recentPnls.reduce((a, b) => a + b, 0).toFixed(2)),
+        }
+      : null,
     // Would-be record on REAL production orderbooks (streaming shadow).
     // The best predictor of live transfer for candidates without a
     // real-money history - measured on the venue live money actually trades.
@@ -1013,13 +1015,22 @@ export function registerAgentLabRoutes(app: Express) {
     }
   });
 
+  const candidatesCache = new Map<string, { at: number; body: string }>();
   app.get("/api/agent-lab/candidates", (req, res) => {
-    const status = req.query.status as string | undefined;
+    const status = (req.query.status as string | undefined) ?? "";
+    const cached = candidatesCache.get(status);
+    if (cached && Date.now() - cached.at < 10_000) {
+      res.type("application/json").send(cached.body);
+      return;
+    }
     const fillStats = storage.getExecutorFillStats();
     const liveStats = buildLiveExecStats();
     const auditionStats = buildAuditionStats();
-    const candidates = storage.getCandidateStrategies(status).map((c) => describeCandidate(c, fillStats, liveStats, auditionStats));
-    res.json({ candidates });
+    const candidates = storage.getCandidateStrategies(status || undefined).map((c) => describeCandidate(c, fillStats, liveStats, auditionStats));
+    const body = JSON.stringify({ candidates });
+    if (candidatesCache.size > 8) candidatesCache.clear();
+    candidatesCache.set(status, { at: Date.now(), body });
+    res.type("application/json").send(body);
   });
 
   app.get("/api/agent-lab/runs", (_req, res) => {
