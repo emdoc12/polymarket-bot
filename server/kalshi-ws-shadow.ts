@@ -157,9 +157,12 @@ async function runShadowTick() {
     kalshiProdStream.setMarkets([]);
     return;
   }
-  // The curfew applies to shadow rows too, so their records keep predicting
-  // what live would have done under the same rules.
-  if (!withinLiveTradingHours()) return;
+  // Curfew parity applies ONLY to mirror rows (the live A/B). Audition rows
+  // keep running 24/7: the curfew's own evidence base is 27 stale weekday
+  // trades, and if the audition sleeps during the disputed hours, overnight
+  // strategies can never earn their way back - a self-sealing rule. The
+  // 9/13 weekend proved the cost: +$105 of demo P&L landed in hours the
+  // evidence engine wasn't even watching.
 
   // Two tiers share the stream:
   //  - MIRROR (audition=0): the allowlisted strategies under the live
@@ -202,6 +205,7 @@ async function runShadowTick() {
       if (storage.hasWsShadowTradeFor(candidate.id, active.market.ticker)) continue;
 
       const isMirror = armedIds.has(candidate.id);
+      if (isMirror && !withinLiveTradingHours()) continue; // mirror keeps live's curfew
       if (isMirror) {
         // Mirror the live executor's shared rails exactly so the A/B is fair
         // (including the loss cool-down, computed from the mirror's own
