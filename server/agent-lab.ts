@@ -59,6 +59,7 @@ const SpecProposalSchema = z.object({
   trendAlignMode: z.enum(["with", "against"]),
   catalystMode: z.enum(["off", "require", "avoid"]),
   catalystMinutes: z.number(),
+  maxSpreadCents: z.number(),
   rationale: z.string(),
 });
 
@@ -76,6 +77,9 @@ const PerpSpecProposalSchema = z.object({
   takeProfitPct: z.number(),
   stopLossPct: z.number(),
   maxHoldMinutes: z.number(),
+  minHourEt: z.number(),
+  maxHourEt: z.number(),
+  sideBias: z.enum(["both", "long_only", "short_only"]),
   rationale: z.string(),
 });
 
@@ -107,6 +111,7 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - minVol1mBps / maxVol1mBps: realized-volatility regime gate (your GRAMMAR REQUEST, granted). Only enter when the UNDERLYING's trailing 30-min realized vol - stddev of 1-minute log returns, in basis points - is inside the range; 0 disables a bound. Typical BTC/ETH: ~4-10 bps calm/chop, ~12-30 bps trending, 40+ storm. Use a FLOOR (e.g. minVol1mBps 8-12) to keep momentum/trend specs out of the chop where losses streak, a CAP to keep specs out of storms. CRYPTO ONLY (commodities have no underlying feed - leave both 0 there). Fully backtested; a gated spec skips windows where spot history can't verify the regime.
 - dowMaskEt: day-of-week bitmask in ET, bit 0=Sunday ... bit 6=Saturday; 127 = every day. Examples: 62 = Mon-Fri, 16 = Thursday only (EIA natgas storage), 8 = Wednesday only (EIA crude inventories), 40 = Wed+Thu. Granted per your GRAMMAR REQUEST so catalyst-driven specs target their days instead of diluting samples across dead days. Fully backtested like every field.
 - minHourEt / maxHourEt: 0-24, entries allowed only in this ET-hour window (0 and 24 = all day; minHourEt > maxHourEt wraps overnight). Fully backtested like every other field. Live forensics show strong time-of-day regime structure (overnight 0-8 ET underperforms daytime badly), so hour-banded variants of proven specs are fertile ground - but let the backtests decide, not the anecdote.
+- maxSpreadCents: 0-30, 0 = off (your GRAMMAR REQUEST, granted): refuse entry when the quoted YES spread (ask - bid) is wider than this many cents. Built for the thin commodity venues (GOLD/WTI/SILVER and the thinner metals) where the real book is often two market-maker quotes wide and a backtest fill is fiction - a commodity spec without this gate is trusting quotes nobody may honor. Backtested from candle bid/ask; enforced live on the same quotes the entry uses. Sensible values: 3-6c strict, 8-12c permissive. Resting-depth was NOT granted as a spec field (no historical depth data to backtest against) - the prod audition's depth-confirmed would-fill records remain the depth check, so read audition fillable rates before trusting any thin-venue spec.
 Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, signal thresholds, and trading hours.
 
 Output discipline: keep every rationale, note, and reason to one or two sentences. Structured output that exceeds the token limit is truncated and the whole response is lost - compact and complete always beats detailed and cut off.`;
@@ -163,6 +168,8 @@ const PERP_SPEC_DOC = `Perp strategy spec fields (Kalshi perpetual futures, $50 
 - entryThresholdPct: 0.02-2 (minimum |%| move over the lookback to trigger an entry)
 - takeProfitPct / stopLossPct: 0.05-3 (% from entry; longs enter at the ask, exit at the bid - the spread is a real cost your TP must clear)
 - maxHoldMinutes: 5-180 (time stop)
+- minHourEt / maxHourEt: 0-24, entries only in this ET-hour window (0/24 = all day; min > max wraps overnight) - granted 2026-09-13 so hour mandates are a spec field, not prose
+- sideBias: "both" | "long_only" | "short_only" - only take entries on that side after the direction rule picks it (granted 2026-09-13; a long_only trend_follow only enters on upward moves)
 Both round-trip fees (~0.24% total) and the bid/ask spread come out of every trade - edges below ~0.3%/trade are noise.
 
 Output discipline: keep every rationale, note, and reason to one or two sentences.`;
@@ -203,7 +210,7 @@ RAIL PROPOSALS (bounded self-tuning): the executor's protective rails have tunab
 
 RAIL PROPOSALS ADJUDICATED (do not re-propose without NEW evidence): live_cooldown_minutes 45->60 REJECTED 2026-09-13 - ledger replay of the marginal window (trades placed 45-60min after a 3-loss streak) showed 7W/2L +$6.51: that quarter-hour contains recovery trades, not continuation losses, so extending the pause would have cost money. Your aggregate post-loss stat is correct but does not localize to that window.
 
-GRAMMAR REQUESTS ANSWERED (do not re-request): catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
+GRAMMAR REQUESTS ANSWERED (do not re-request): commodity liquidity gate granted 2026-09-13 as maxSpreadCents (max quoted YES spread in cents, backtested + live-enforced; the resting-depth half was declined - no historical depth exists to backtest, and the prod audition's depth-confirmed would-fills already measure it - so judge thin venues by audition fillable rates). Perp minHourEt/maxHourEt + sideBias granted 2026-09-13 (both perp workers' hour/direction mandates are now spec fields). catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 

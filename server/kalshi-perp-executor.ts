@@ -2,6 +2,7 @@ import type { Express } from "express";
 import crypto from "crypto";
 import { storage } from "./storage";
 import type { CandidateStrategy, PerpTrade } from "@shared/schema";
+import { hourEt, hourInWindow } from "./kalshi";
 import {
   clampPerpSpec,
   getPerpCandles,
@@ -259,6 +260,9 @@ async function tryPerpEntry(
 
   const trendSide: "long" | "short" = movePct >= 0 ? "long" : "short";
   const side = spec.direction === "trend_follow" ? trendSide : trendSide === "long" ? "short" : "long";
+  if (!hourInWindow(hourEt(Date.now()), spec.minHourEt, spec.maxHourEt)) return;
+  if (spec.sideBias === "long_only" && side !== "long") return;
+  if (spec.sideBias === "short_only" && side !== "short") return;
 
   if (!bookCache.has(spec.market)) {
     bookCache.set(spec.market, await getPerpTopOfBook(spec.market));

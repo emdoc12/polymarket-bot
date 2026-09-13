@@ -102,6 +102,9 @@ export async function decideLiveEntry(
   if (yesAsk == null || yesBid == null || marketPrice == null || yesAsk <= 0 || yesAsk >= 1) {
     return { ok: false, reason: "no usable live quotes" };
   }
+  if (spec.maxSpreadCents > 0 && (yesAsk - yesBid) * 100 > spec.maxSpreadCents + 1e-9) {
+    return { ok: false, reason: "quoted spread wider than spec liquidity gate" };
+  }
 
   let side: "yes" | "no" | null = null;
   if (spec.sideRule === "always_yes") side = "yes";

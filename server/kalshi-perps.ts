@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { storage } from "./storage";
+import { hourEt, hourInWindow } from "./kalshi";
 
 // Kalshi perpetual futures ("margin") data client, strategy grammar, and
 // real-candle backtester. Perps are the one crypto venue where the DEMO
@@ -118,6 +119,12 @@ export type PerpStrategySpec = {
   takeProfitPct: number;       // exit at +/- percent from entry
   stopLossPct: number;
   maxHoldMinutes: number;      // time stop (kept short: funding not modeled)
+  // Entry-hour window in ET (0/24 = all day; min > max wraps overnight) and
+  // direction bias - granted 2026-09-13 so the PM's 16-24 ET / long-side
+  // mandates are expressible in the spec itself instead of prose.
+  minHourEt: number;
+  maxHourEt: number;
+  sideBias: "both" | "long_only" | "short_only";
   notional: number;            // fixed $ notional per trade for comparability
 };
 
@@ -138,6 +145,9 @@ export function clampPerpSpec(raw: Record<string, unknown>): PerpStrategySpec {
     takeProfitPct: clampNum(raw.takeProfitPct, 0.05, 3, 0.4),
     stopLossPct: clampNum(raw.stopLossPct, 0.05, 3, 0.3),
     maxHoldMinutes: Math.round(clampNum(raw.maxHoldMinutes, 5, 180, 60)),
+    minHourEt: Math.round(clampNum(raw.minHourEt, 0, 24, 0)),
+    maxHourEt: Math.round(clampNum(raw.maxHourEt, 0, 24, 24)),
+    sideBias: raw.sideBias === "long_only" || raw.sideBias === "short_only" ? raw.sideBias : "both",
     notional: 50,
   };
 }
@@ -147,6 +157,10 @@ export function perpSpecHash(spec: PerpStrategySpec) {
     "perp", spec.market, spec.direction, spec.lookbackMinutes,
     spec.entryThresholdPct.toFixed(3), spec.takeProfitPct.toFixed(3),
     spec.stopLossPct.toFixed(3), spec.maxHoldMinutes,
+    // Only when restrictive, so pre-existing hashes stay valid and dedupe.
+    ...(spec.minHourEt === spec.maxHourEt || (spec.minHourEt === 0 && spec.maxHourEt === 24)
+      ? [] : [spec.minHourEt, spec.maxHourEt]),
+    ...(spec.sideBias !== "both" ? [spec.sideBias] : []),
   ].join("|");
 }
 
@@ -236,6 +250,7 @@ export function runPerpTradesOnCandles(spec: PerpStrategySpec, candles: PerpCand
       continue;
     }
 
+    if (!hourInWindow(hourEt(bar.ts * 1000), spec.minHourEt, spec.maxHourEt)) continue;
     const past = px[i - spec.lookbackMinutes];
     if (past?.close == null || past.close <= 0) continue;
     const movePct = ((bar.close - past.close) / past.close) * 100;
@@ -243,6 +258,8 @@ export function runPerpTradesOnCandles(spec: PerpStrategySpec, candles: PerpCand
 
     const trendSide: "long" | "short" = movePct >= 0 ? "long" : "short";
     const side = spec.direction === "trend_follow" ? trendSide : trendSide === "long" ? "short" : "long";
+    if (spec.sideBias === "long_only" && side !== "long") continue;
+    if (spec.sideBias === "short_only" && side !== "short") continue;
     const entry = side === "long" ? bar.askClose : bar.bidClose;
     if (entry == null || entry <= 0) continue;
     pos = { side, entry, entryTs: bar.ts, entryIndex: i, contracts: spec.notional / entry };

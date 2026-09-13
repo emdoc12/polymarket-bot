@@ -200,6 +200,13 @@ export type KalshiStrategySpec = {
   // within +/- catalystMinutes of a catalyst; "avoid" = never enter there.
   catalystMode: "off" | "require" | "avoid";
   catalystMinutes: number;
+  // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
+  // window when the quoted YES spread (ask - bid) is wider than this many
+  // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
+  // backtest can assume a fill the two-quote-wide real book never offers.
+  // Backtested from candle yes_bid/yes_ask; live/audition use the same
+  // quotes the entry itself uses (streamed when transport=stream).
+  maxSpreadCents: number;
   orderSize: number;
 };
 
@@ -292,6 +299,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     trendAlignMode: raw.trendAlignMode === "against" ? "against" : "with",
     catalystMode: raw.catalystMode === "require" || raw.catalystMode === "avoid" ? raw.catalystMode : "off",
     catalystMinutes: Math.round(clampNum(raw.catalystMinutes, 5, 120, 30)),
+    maxSpreadCents: Math.round(clampNum(raw.maxSpreadCents, 0, 30, 0)),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -333,6 +341,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.minVol1mBps > 0 || spec.maxVol1mBps > 0 ? [spec.minVol1mBps.toFixed(1), spec.maxVol1mBps.toFixed(1)] : []),
     ...(spec.trendAlignHours > 0 ? [spec.trendAlignHours, spec.trendAlignMode] : []),
     ...(spec.catalystMode !== "off" ? [spec.catalystMode, spec.catalystMinutes] : []),
+    ...(spec.maxSpreadCents > 0 ? [`sprd${spec.maxSpreadCents}`] : []),
   ].join("|");
 }
 
@@ -565,6 +574,7 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
   const yesBid = parseDollars(entryCandle.yes_bid?.close_dollars);
   const marketPrice = parseDollars(entryCandle.price?.close_dollars) ?? yesAsk;
   if (yesAsk == null || yesBid == null || marketPrice == null) return null;
+  if (spec.maxSpreadCents > 0 && (yesAsk - yesBid) * 100 > spec.maxSpreadCents + 1e-9) return null;
 
   let side: "YES" | "NO" | null = null;
   if (spec.sideRule === "always_yes") side = "YES";
