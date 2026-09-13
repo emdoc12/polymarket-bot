@@ -5,6 +5,7 @@ import {
   getKalshiCandlesticks,
   getKalshiMarket,
   getKalshiMarkets,
+  catalystGateOk,
   dayAllowed,
   hourEt,
   hourInWindow,
@@ -84,6 +85,9 @@ export async function decideLiveEntry(
   }
   if (!dayAllowed(nowMs, spec.dowMaskEt)) {
     return { ok: false, reason: "outside spec trading days" };
+  }
+  if (!catalystGateOk(nowMs, spec)) {
+    return { ok: false, reason: "catalyst-proximity gate" };
   }
   if (volGateActive(spec)) {
     const volPerSqrtSec = kalshiProdStream.getSpotVolPerSecond(spec.series, 30);

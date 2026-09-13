@@ -194,8 +194,34 @@ export type KalshiStrategySpec = {
   // could see. Crypto only (needs underlying history).
   trendAlignHours: number;
   trendAlignMode: "with" | "against";
+  // Scheduled-catalyst proximity gate (PM GRAMMAR REQUEST x22, granted
+  // 2026-09-13). Built-in ET calendar: 8:30 US economic prints (weekdays),
+  // EIA crude Wed 10:30, EIA natgas Thu 10:30. "require" = only enter
+  // within +/- catalystMinutes of a catalyst; "avoid" = never enter there.
+  catalystMode: "off" | "require" | "avoid";
+  catalystMinutes: number;
   orderSize: number;
 };
+
+const ET_HM_FMT = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false });
+// Minutes to the nearest same-day scheduled catalyst, or null if none applies.
+export function minutesToCatalyst(ms: number): number | null {
+  const dow = dayOfWeekEt(ms);
+  if (dow === 0 || dow === 6) return null; // weekend: no scheduled prints
+  const [hh, mm] = ET_HM_FMT.format(new Date(ms)).split(":").map((x) => parseInt(x, 10));
+  const nowMin = (hh % 24) * 60 + mm;
+  const catalysts = [8 * 60 + 30]; // 8:30 ET prints every weekday
+  if (dow === 3) catalysts.push(10 * 60 + 30); // Wed: EIA crude
+  if (dow === 4) catalysts.push(10 * 60 + 30); // Thu: EIA natgas storage
+  return Math.min(...catalysts.map((c) => Math.abs(nowMin - c)));
+}
+
+export function catalystGateOk(ms: number, spec: KalshiStrategySpec): boolean {
+  if (spec.catalystMode === "off") return true;
+  const dist = minutesToCatalyst(ms);
+  if (spec.catalystMode === "require") return dist != null && dist <= spec.catalystMinutes;
+  return !(dist != null && dist <= spec.catalystMinutes); // avoid
+}
 
 const ET_DOW_FMT = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" });
 const DOW_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
@@ -264,6 +290,8 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     maxVol1mBps: clampNum(raw.maxVol1mBps, 0, 500, 0),
     trendAlignHours: Math.round(clampNum(raw.trendAlignHours, 0, 8, 0)),
     trendAlignMode: raw.trendAlignMode === "against" ? "against" : "with",
+    catalystMode: raw.catalystMode === "require" || raw.catalystMode === "avoid" ? raw.catalystMode : "off",
+    catalystMinutes: Math.round(clampNum(raw.catalystMinutes, 5, 120, 30)),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -304,6 +332,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.dowMaskEt > 0 && spec.dowMaskEt < 127 ? [spec.dowMaskEt] : []),
     ...(spec.minVol1mBps > 0 || spec.maxVol1mBps > 0 ? [spec.minVol1mBps.toFixed(1), spec.maxVol1mBps.toFixed(1)] : []),
     ...(spec.trendAlignHours > 0 ? [spec.trendAlignHours, spec.trendAlignMode] : []),
+    ...(spec.catalystMode !== "off" ? [spec.catalystMode, spec.catalystMinutes] : []),
   ].join("|");
 }
 
@@ -511,6 +540,7 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
   const entryTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
   if (!hourInWindow(hourEt(entryTs * 1000), spec.minHourEt, spec.maxHourEt)) return null;
   if (!dayAllowed(entryTs * 1000, spec.dowMaskEt)) return null;
+  if (!catalystGateOk(entryTs * 1000, spec)) return null;
   if (volGateActive(spec)) {
     // Trailing 30-min realized vol from the underlying spot history; a spec
     // with a vol gate skips windows where the regime can't be verified.
