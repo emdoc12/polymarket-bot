@@ -61,9 +61,11 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
   activated only when glm_api_key is saved in Settings; guests propose into
   the same pool via clampSpec/specHash and createdBy carries the glm_ prefix
   so the evidence pipeline referees house vs guest), Opus PM review,
-  walk-forward scoring, per-asset-class pool budgets (crypto<300,
-  commodities<150, perps<150) with frontier carve-out (zero-candidate venues
-  always open), PM context digests: fill rates, REAL-MONEY by band, PROD
+  walk-forward scoring, UNLIMITED research (user directive 2026-09-14: the
+  old per-class pool budgets paused workers on saturation and produced
+  three sealed-desk bugs — removed in v1.26.0; throughput is governed by
+  the per-cycle proposal cap, daily cycle cap, spec-hash dedupe, and PM
+  culling), PM context digests: fill rates, REAL-MONEY by band, PROD
   AUDITION board, LIVE FORENSICS (hour/direction/streaks).
 - `kalshi-executor.ts` — demo-account executor ($10 stakes). Exports
   `decideLiveEntry` — THE shared entry logic (all executors use it).

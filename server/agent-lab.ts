@@ -675,51 +675,35 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     const auditionStats = buildAuditionStats();
     const { contextText } = buildResearchContext(fillStats, liveStats, auditionStats);
 
-    // Self-regulating research intensity: when the testing pool is saturated,
-    // stop proposing and let walk-forward + culls drain it; resume when there
-    // is room to give new ideas a fair trial.
-    // Saturation budgets are PER ASSET CLASS: a bloated crypto pool paused
-    // all binary proposing for days and silently sealed off the commodity
-    // launch (and would have re-sealed it the moment commodities stopped
-    // counting as "unexplored"). Each class now has its own budget.
-    const isCommoditySeries = (s: string) => s.startsWith("KX") && !s.startsWith("KXBTC") && !s.startsWith("KXETH");
-    const testingBinaries = storage.getCandidateStrategies("testing").filter((c) => c.kind !== "perp");
+    // Research is UNLIMITED (user directive 2026-09-14: "should be no limit
+    // on research"). The old per-class saturation budgets (crypto<300,
+    // commodities<150, perps<150) paused workers when the testing pool grew -
+    // and produced three sealed-desk bugs in a row (the commodity launch,
+    // its re-sealing, the GLM guest desk). Throughput is governed by the
+    // real cost knobs instead: the per-cycle proposal cap
+    // (agent_lab_max_candidates_per_cycle), the daily cycle cap, spec-hash
+    // dedupe, and the PM's culling. Walk-forward scales with the testing
+    // pool, so its loop yields to the event loop and the PM is expected to
+    // keep evicting losers - but nothing is ever paused for being too curious.
     const seriesOf = (c: CandidateStrategy) => {
       try { return String(JSON.parse(c.spec).series); } catch { return ""; }
     };
-    const testingCryptoCount = testingBinaries.filter((c) => !isCommoditySeries(seriesOf(c))).length;
-    const testingCommodityCount = testingBinaries.filter((c) => isCommoditySeries(seriesOf(c))).length;
-    const testingPerpCount = storage.getCandidateStrategies("testing").filter((c) => c.kind === "perp").length;
-    const cryptoPoolOpen = testingCryptoCount < 300;
-    const commodityPoolOpen = testingCommodityCount < 150;
-    const perpPoolOpen = testingPerpCount < 150;
-    const poolOpenFor = (series: string) => (isCommoditySeries(series) ? commodityPoolOpen : cryptoPoolOpen);
 
-    // Frontier carve-out: a venue with ZERO candidates ever is always open.
+    // Frontier note: a venue with ZERO candidates ever still deserves aim.
     const exploredSeries = new Set<string>();
     for (const c of storage.getCandidateStrategies()) {
       if (c.kind !== "perp") exploredSeries.add(seriesOf(c));
     }
     const unexploredSeries = SPEC_SERIES.filter((s) => !exploredSeries.has(s));
-    const runBinaryWorkers = cryptoPoolOpen || commodityPoolOpen || unexploredSeries.length > 0;
-    const frontierNote = [
-      unexploredSeries.length > 0
-        ? `\nUNEXPLORED VENUES: ${unexploredSeries.join(", ")} have ZERO candidates ever - newly launched markets, potentially the softest prices on the exchange. Aim proposals there. A research focus never overrides frontier exploration.`
-        : "",
-      !cryptoPoolOpen ? `\nNOTE: the CRYPTO testing pool is saturated (${testingCryptoCount}); crypto proposals will be rejected this cycle. Commodity proposals ${commodityPoolOpen ? "remain open" : "are also closed"}.` : "",
-    ].join("");
+    const frontierNote = unexploredSeries.length > 0
+      ? `\nUNEXPLORED VENUES: ${unexploredSeries.join(", ")} have ZERO candidates ever - newly launched markets, potentially the softest prices on the exchange. Aim proposals there. A research focus never overrides frontier exploration.`
+      : "";
     const workerContext = contextText + frontierNote;
 
     // 1. Specialist agents propose in parallel (structured outputs -> validated
     // JSON). Each worker is individually fault-isolated: a truncated or failed
     // response costs that worker's proposals, never the whole cycle.
-    // Commodities desk runs whenever its own pool has room (or the venue is
-    // still unexplored) - independent of crypto saturation.
-    const runCommodityWorkers = commodityPoolOpen || unexploredSeries.some((s) => isCommoditySeries(s));
-    const activeWorkerRoles = [
-      ...(runBinaryWorkers ? WORKER_ROLES : []),
-      ...(runCommodityWorkers ? COMMODITY_WORKER_ROLES : []),
-    ];
+    const activeWorkerRoles = [...WORKER_ROLES, ...COMMODITY_WORKER_ROLES];
     const workerResults = await Promise.all(activeWorkerRoles.map(async (role) => {
       try {
         const response = await client.messages.parse({
@@ -740,8 +724,8 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       }
     }));
 
-    // 1a-guest. GLM desk: runs only when a GLM key is saved; same pool gates,
-    // same fault isolation - a slow or broken GLM cycle costs only its own
+    // 1a-guest. GLM desk: runs whenever a GLM key is saved, with the same
+    // fault isolation - a slow or broken GLM cycle costs only its own
     // proposals. Loose JSON extraction; clampSpec repairs field drift.
     const glmWorkerResults = !getGlmApiKey() ? [] : await Promise.all(GLM_WORKER_ROLES.map(async (role) => {
       try {
@@ -757,7 +741,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
 
     // 1b. Perps desk specialists (same fault isolation, perp grammar).
     const perpsEnabled = storage.getSetting("agent_lab_perps_enabled") !== "false";
-    const perpWorkerResults = (!perpsEnabled || !perpPoolOpen) ? [] : await Promise.all(PERP_WORKER_ROLES.map(async (role) => {
+    const perpWorkerResults = !perpsEnabled ? [] : await Promise.all(PERP_WORKER_ROLES.map(async (role) => {
       try {
         const response = await client.messages.parse({
           model: workerModel,
@@ -787,8 +771,6 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         proposalCount += 1;
         if (fresh.length >= maxCandidates) continue;
         const spec = clampSpec(proposal);
-        // Class-budget gate: a saturated class only admits frontier proposals.
-        if (!poolOpenFor(spec.series) && !unexploredSeries.includes(spec.series as (typeof SPEC_SERIES)[number])) continue;
         const hash = specHash(spec);
         if (storage.getCandidateBySpecHash(hash)) continue;
         const candidate = storage.createCandidateStrategy({
