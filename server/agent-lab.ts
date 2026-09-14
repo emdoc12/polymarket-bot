@@ -743,7 +743,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     // 1a-guest. GLM desk: runs only when a GLM key is saved; same pool gates,
     // same fault isolation - a slow or broken GLM cycle costs only its own
     // proposals. Loose JSON extraction; clampSpec repairs field drift.
-    const glmWorkerResults = (!getGlmApiKey() || !runBinaryWorkers) ? [] : await Promise.all(GLM_WORKER_ROLES.map(async (role) => {
+    const glmWorkerResults = !getGlmApiKey() ? [] : await Promise.all(GLM_WORKER_ROLES.map(async (role) => {
       try {
         const raw = await callGlmJson(role.system, role.buildTask(workerContext));
         const { proposals, notes } = extractGlmProposals(raw);
@@ -805,12 +805,21 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       }
     }
 
+    // Guest-desk admission runs on its OWN small quota, not the house cycle
+    // cap or pool budgets: v1.25.0 gated guests on runBinaryWorkers and the
+    // shared cap, and saturated pools sealed the guest desk out before it
+    // ever proposed once - the same self-sealing failure as the audition
+    // curfew. The quota (3/cycle) IS the guest budget: bounded intake, PM
+    // culls the losers like everyone else's.
+    const GLM_CYCLE_QUOTA = 3;
+    let glmAdmitted = 0;
+    const glmOutcome: { role: string; proposals: number; admitted: number; note: string }[] = [];
     for (const worker of glmWorkerResults) {
+      let admitted = 0;
       for (const proposal of worker.proposals) {
         proposalCount += 1;
-        if (fresh.length >= maxCandidates) continue;
+        if (glmAdmitted >= GLM_CYCLE_QUOTA) continue;
         const spec = clampSpec(proposal);
-        if (!poolOpenFor(spec.series) && !unexploredSeries.includes(spec.series as (typeof SPEC_SERIES)[number])) continue;
         const hash = specHash(spec);
         if (storage.getCandidateBySpecHash(hash)) continue;
         const candidate = storage.createCandidateStrategy({
@@ -824,7 +833,13 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
           createdAt: new Date().toISOString(),
         });
         fresh.push({ candidate, spec });
+        glmAdmitted += 1;
+        admitted += 1;
       }
+      glmOutcome.push({ role: worker.role, proposals: worker.proposals.length, admitted, note: worker.notes.slice(0, 160) });
+    }
+    if (glmWorkerResults.length > 0) {
+      storage.setSetting("glm_last_cycle", JSON.stringify({ at: new Date().toISOString(), outcome: glmOutcome }));
     }
 
     const freshPerp: { candidate: CandidateStrategy; spec: PerpStrategySpec }[] = [];
@@ -1125,6 +1140,7 @@ export function registerAgentLabRoutes(app: Express) {
       workerModel: storage.getSetting("agent_lab_worker_model") || DEFAULT_WORKER_MODEL,
       glmConfigured: Boolean(getGlmApiKey()),
       glmWorkerModel: getGlmWorkerModel(),
+      glmLastCycle: (() => { try { return JSON.parse(storage.getSetting("glm_last_cycle") || "null"); } catch { return null; } })(),
       candidates: {
         testing: storage.getCandidateStrategies("testing").length,
         promoted: storage.getCandidateStrategies("promoted").length,
