@@ -989,6 +989,18 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
             content: [
               workerContext,
               `\nSpecialist notes from this cycle:\n${skepticNotes}`,
+              // Guest-desk visibility: fresh, heavily-gated guest candidates
+              // accrue walk-forward samples slowly and may not rank into the
+              // review list for days - without this digest the PM concluded
+              // "zero guest candidates" while 18 sat in testing.
+              (() => {
+                const guests = storage.getCandidateStrategies().filter((c) => c.createdBy?.startsWith("glm"));
+                if (guests.length === 0) return "";
+                const byStatus: Record<string, number> = {};
+                for (const g of guests) byStatus[g.status] = (byStatus[g.status] ?? 0) + 1;
+                const newest = guests.slice(-5).map((g) => `#${g.id} ${g.name.slice(0, 55)} [${g.status}]`).join("; ");
+                return `\nGUEST DESK STATUS (glm_): ${guests.length} candidates filed (${Object.entries(byStatus).map(([k, v]) => `${v} ${k}`).join(", ")}). Newest: ${newest}. Fresh gated specs need days of walk-forward windows before they rank into your review list - "not yet reviewed" is NOT "not producing". Judge the guest desk on settled evidence when it arrives.`;
+              })(),
               `\nCandidates currently under review (decide each by candidateId):`,
               JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
             ].join("\n"),
