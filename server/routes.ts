@@ -2825,6 +2825,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   const SECRET_SETTING_KEYS = new Set([
     "kalshi_private_key_pem",
     "anthropic_api_key",
+    "glm_api_key",
     "kalshi_prod_api_key_id",
     "kalshi_prod_private_key_pem",
   ]);

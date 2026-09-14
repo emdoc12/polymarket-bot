@@ -211,6 +211,8 @@ RAIL PROPOSALS (bounded self-tuning): the executor's protective rails have tunab
 
 RAIL PROPOSALS ADJUDICATED (do not re-propose without NEW evidence): live_cooldown_minutes 45->60 REJECTED 2026-09-13 - ledger replay of the marginal window (trades placed 45-60min after a 3-loss streak) showed 7W/2L +$6.51: that quarter-hour contains recovery trades, not continuation losses, so extending the pause would have cost money. Your aggregate post-loss stat is correct but does not localize to that window.
 
+GUEST DESK: proposals whose creator starts with "glm_" come from a guest research team (GLM, a different AI vendor) invited to test whether independent minds find edges the incumbent desk misses. Judge them by evidence exactly like every other candidate - no deference, no prejudice - but DO note in commentary when the guest desk's candidates meaningfully outperform or underperform the house desk's, because the human is explicitly evaluating whether the guest adds value.
+
 GRAMMAR REQUESTS ANSWERED (do not re-request): maxPriceOverMidCents (per-spec entry limit-offset) ANSWERED 2026-09-13 as already expressible: with top-of-book quotes the executable price sits exactly HALF THE QUOTED SPREAD over mid on either side (yes pays ask - mid = spread/2; no pays mid - bid = spread/2), so your pay-up gate IS maxSpreadCents - set maxSpreadCents to twice the offset you want (e.g. 2c over mid = maxSpreadCents 4) on CRYPTO specs too, it was never commodity-only. If the real concern is absolute entry richness rather than pay-up vs mid, that is what a tighter maxEntryPrice ceiling expresses (real money already shows where: sub-60c pays, 60c+ bleeds). commodity liquidity gate granted 2026-09-13 as maxSpreadCents (max quoted YES spread in cents, backtested + live-enforced; the resting-depth half was declined - no historical depth exists to backtest, and the prod audition's depth-confirmed would-fills already measure it - so judge thin venues by audition fillable rates). Perp minHourEt/maxHourEt + sideBias granted 2026-09-13 (both perp workers' hour/direction mandates are now spec fields). catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
@@ -219,6 +221,86 @@ ${SPEC_SPACE_DOC}`;
 
 // Settings-page key wins over the container env var; the cached client is
 // keyed by the value so pasting a new key takes effect without a restart.
+// ---------------------------------------------------------------------------
+// GLM guest desk (2026-09-13, user request: "bring in GLM to see if it's able
+// to add anything to the table"). A second research team from a different
+// vendor proposes into the SAME candidate pool through the same clampSpec /
+// specHash / backtest gauntlet - the evidence pipeline referees. createdBy
+// carries the glm_ prefix so per-team records stay comparable. GLM never
+// touches money paths: guest workers propose specs, nothing else. Enabled
+// simply by saving a GLM API key in Settings; absent a key, nothing runs.
+// ---------------------------------------------------------------------------
+
+function getGlmApiKey(): string | null {
+  return storage.getSetting("glm_api_key") || process.env.GLM_API_KEY || null;
+}
+function getGlmBaseUrl(): string {
+  // Zhipu's OpenAI-compatible endpoint (international). Mainland alternative:
+  // https://open.bigmodel.cn/api/paas/v4 - overridable without a deploy.
+  return (storage.getSetting("glm_base_url") || "https://api.z.ai/api/paas/v4").replace(/\/+$/, "");
+}
+function getGlmWorkerModel(): string {
+  return storage.getSetting("glm_worker_model") || "glm-4.6";
+}
+
+// One OpenAI-compatible chat call that must return a JSON object. No vendor
+// SDK: plain fetch, 90s timeout, and the response is parsed defensively
+// (fence-stripping) because json_object mode is a request, not a guarantee.
+async function callGlmJson(system: string, task: string): Promise<Record<string, unknown>> {
+  const key = getGlmApiKey();
+  if (!key) throw new Error("no GLM API key configured");
+  const resp = await fetch(`${getGlmBaseUrl()}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      model: getGlmWorkerModel(),
+      max_tokens: 6000,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: task },
+      ],
+    }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  if (!resp.ok) {
+    const body = (await resp.text().catch(() => "")).slice(0, 200);
+    throw new Error(`GLM HTTP ${resp.status}: ${body}`);
+  }
+  const data: any = await resp.json();
+  let text: string = data?.choices?.[0]?.message?.content ?? "";
+  text = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("GLM returned no JSON object");
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+// Loose extraction: GLM has no structured-outputs contract, so accept any
+// {proposals:[{...}], notes} shape - clampSpec fills/repairs every spec field
+// downstream, exactly as it does for slightly-off Claude proposals.
+function extractGlmProposals(raw: Record<string, unknown>): { proposals: Record<string, unknown>[]; notes: string } {
+  const proposals = Array.isArray(raw.proposals)
+    ? raw.proposals.filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x))
+    : [];
+  return { proposals, notes: typeof raw.notes === "string" ? raw.notes : "" };
+}
+
+const GLM_JSON_RULES = `\n\nOUTPUT FORMAT (strict): reply with ONLY a JSON object {"proposals": [...], "notes": "..."} - no prose outside it. Each proposal is an object with the spec fields described above plus a one-sentence "rationale" string. Include every field you have an opinion on; out-of-range values are clamped, unknown fields ignored.`;
+
+const GLM_WORKER_ROLES: { key: string; system: string; buildTask: (context: string) => string }[] = [
+  {
+    key: "glm_explorer",
+    system: `You are the Explorer on a GUEST research desk (GLM) invited onto a quant team for Kalshi 15-minute up/down markets. The incumbent desk skews toward mid-band momentum clones; your value is proposing what they would not - different gate combinations, unloved series, contrarian geometry. Diversity beats depth.\n\n${SPEC_SPACE_DOC}${GLM_JSON_RULES}`,
+    buildTask: (context: string) => `Desk context (identical to what the incumbent team sees):\n\n${context}\n\nPropose up to 4 NOVEL specs the incumbent desk's leaderboard suggests they would never write. Use the granted gates (sideFilter, trendAlignHours, catalystMode, dowMaskEt, vol, maxSpreadCents, hour bands) wherever the forensics support them.`,
+  },
+  {
+    key: "glm_skeptic",
+    system: `You are the Skeptic on a GUEST research desk (GLM) invited onto a quant team for Kalshi 15-minute up/down markets. Your value is independent adversarial review: find what the incumbent desk's leaders are overfitting to, and propose control specs that would expose it (same geometry on the other series, shifted timing, inverted direction, gated variants).\n\n${SPEC_SPACE_DOC}${GLM_JSON_RULES}`,
+    buildTask: (context: string) => `Desk context (identical to what the incumbent team sees):\n\n${context}\n\nPropose up to 4 control/stress specs that test whether the current leaders are real. In "notes", state plainly which leaderboard results look like curve-fitting and why.`,
+  },
+];
+
 let anthropic: Anthropic | null = null;
 let anthropicClientKey: string | null = null;
 export function getAnthropicApiKey(): string | null {
@@ -635,6 +717,21 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       }
     }));
 
+    // 1a-guest. GLM desk: runs only when a GLM key is saved; same pool gates,
+    // same fault isolation - a slow or broken GLM cycle costs only its own
+    // proposals. Loose JSON extraction; clampSpec repairs field drift.
+    const glmWorkerResults = (!getGlmApiKey() || !runBinaryWorkers) ? [] : await Promise.all(GLM_WORKER_ROLES.map(async (role) => {
+      try {
+        const raw = await callGlmJson(role.system, role.buildTask(workerContext));
+        const { proposals, notes } = extractGlmProposals(raw);
+        return { role: role.key, proposals, notes: notes || `(${role.key} returned no notes)` };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`${new Date().toISOString()} [error] [agent-lab] guest worker ${role.key} failed: ${message}`);
+        return { role: role.key, proposals: [] as Record<string, unknown>[], notes: `(${role.key} call failed: ${message.slice(0, 120)})` };
+      }
+    }));
+
     // 1b. Perps desk specialists (same fault isolation, perp grammar).
     const perpsEnabled = storage.getSetting("agent_lab_perps_enabled") !== "false";
     const perpWorkerResults = (!perpsEnabled || !perpPoolOpen) ? [] : await Promise.all(PERP_WORKER_ROLES.map(async (role) => {
@@ -658,7 +755,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     }));
 
     // 2. Clamp, dedupe against everything ever tested, cap per cycle.
-    const skepticNotes = [...workerResults, ...perpWorkerResults].map((w) => `${w.role}: ${w.notes}`).join("\n");
+    const skepticNotes = [...workerResults, ...glmWorkerResults, ...perpWorkerResults].map((w) => `${w.role}: ${w.notes}`).join("\n");
     const generation = storage.getAgentLabRuns(1)[0]?.id ?? 1;
     const fresh: { candidate: CandidateStrategy; spec: KalshiStrategySpec }[] = [];
     let proposalCount = 0;
@@ -678,6 +775,28 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
           status: "testing",
           createdBy: worker.role,
           rationale: proposal.rationale,
+          generation,
+          createdAt: new Date().toISOString(),
+        });
+        fresh.push({ candidate, spec });
+      }
+    }
+
+    for (const worker of glmWorkerResults) {
+      for (const proposal of worker.proposals) {
+        proposalCount += 1;
+        if (fresh.length >= maxCandidates) continue;
+        const spec = clampSpec(proposal);
+        if (!poolOpenFor(spec.series) && !unexploredSeries.includes(spec.series as (typeof SPEC_SERIES)[number])) continue;
+        const hash = specHash(spec);
+        if (storage.getCandidateBySpecHash(hash)) continue;
+        const candidate = storage.createCandidateStrategy({
+          name: spec.name,
+          spec: JSON.stringify(spec),
+          specHash: hash,
+          status: "testing",
+          createdBy: worker.role,
+          rationale: typeof proposal.rationale === "string" ? proposal.rationale : "",
           generation,
           createdAt: new Date().toISOString(),
         });
@@ -981,6 +1100,8 @@ export function registerAgentLabRoutes(app: Express) {
       cycleInFlight,
       pmModel: storage.getSetting("agent_lab_pm_model") || DEFAULT_PM_MODEL,
       workerModel: storage.getSetting("agent_lab_worker_model") || DEFAULT_WORKER_MODEL,
+      glmConfigured: Boolean(getGlmApiKey()),
+      glmWorkerModel: getGlmWorkerModel(),
       candidates: {
         testing: storage.getCandidateStrategies("testing").length,
         promoted: storage.getCandidateStrategies("promoted").length,
@@ -1015,6 +1136,24 @@ export function registerAgentLabRoutes(app: Express) {
         ? "Anthropic rejected the key (401) - check for typos or a revoked key"
         : e?.message || String(e);
       res.status(502).json({ ok: false, error: message });
+    }
+  });
+
+  // Cheap end-to-end GLM key check: one tiny JSON call to the guest desk.
+  app.post("/api/agent-lab/test-glm", async (_req, res) => {
+    if (!getGlmApiKey()) {
+      res.status(400).json({ ok: false, error: "No GLM API key configured - paste one in Settings first" });
+      return;
+    }
+    try {
+      const started = Date.now();
+      const raw = await callGlmJson(
+        "You are a connectivity check. Reply with ONLY a JSON object.",
+        'Reply with exactly {"status":"OK"}',
+      );
+      res.json({ ok: true, model: getGlmWorkerModel(), latencyMs: Date.now() - started, reply: JSON.stringify(raw).slice(0, 40) });
+    } catch (e: any) {
+      res.status(502).json({ ok: false, error: e?.message || String(e) });
     }
   });
 

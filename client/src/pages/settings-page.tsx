@@ -42,8 +42,10 @@ export default function SettingsPage() {
   const [kalshiKeyId, setKalshiKeyId] = useState("");
   const [kalshiPem, setKalshiPem] = useState("");
   const [anthropicKey, setAnthropicKey] = useState("");
+  const [glmKey, setGlmKey] = useState("");
   const kalshiPemConfigured = getVal("kalshi_private_key_pem") === "__secret_set__";
   const anthropicKeyConfigured = getVal("anthropic_api_key") === "__secret_set__";
+  const glmKeyConfigured = getVal("glm_api_key") === "__secret_set__";
 
   // Live (real-money) production credentials - fully separate from demo.
   const [prodKeyId, setProdKeyId] = useState("");
@@ -89,6 +91,7 @@ export default function SettingsPage() {
       if (kalshiKeyId.trim()) pairs.push(["kalshi_api_key_id", kalshiKeyId.trim()]);
       if (kalshiPem.trim()) pairs.push(["kalshi_private_key_pem", kalshiPem.trim()]);
       if (anthropicKey.trim()) pairs.push(["anthropic_api_key", anthropicKey.trim()]);
+      if (glmKey.trim()) pairs.push(["glm_api_key", glmKey.trim()]);
       if (pairs.length === 0) throw new Error("Nothing to save - enter at least one key");
       for (const [key, value] of pairs) {
         await apiRequest("POST", "/api/settings", { key, value });
@@ -97,6 +100,7 @@ export default function SettingsPage() {
     onSuccess: () => {
       setKalshiPem("");
       setAnthropicKey("");
+      setGlmKey("");
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       toast({ title: "API keys saved" });
     },
@@ -119,6 +123,23 @@ export default function SettingsPage() {
     },
     onError: (e: Error) => {
       toast({ title: "Anthropic test failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testGlmMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/agent-lab/test-glm", {});
+      return res.json();
+    },
+    onSuccess: (data: { ok: boolean; model?: string; latencyMs?: number; error?: string }) => {
+      if (data.ok) {
+        toast({ title: "GLM connected", description: `${data.model} replied in ${data.latencyMs}ms` });
+      } else {
+        toast({ title: "GLM test failed", description: data.error, variant: "destructive" });
+      }
+    },
+    onError: (e: Error) => {
+      toast({ title: "GLM test failed", description: e.message, variant: "destructive" });
     },
   });
 
@@ -341,6 +362,19 @@ export default function SettingsPage() {
               className="font-mono text-xs"
             />
           </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs">GLM API Key (guest research desk)</Label>
+              {glmKeyConfigured && <Badge variant="secondary" className="text-[10px]">configured</Badge>}
+            </div>
+            <Input
+              type="password"
+              value={glmKey}
+              onChange={(e) => setGlmKey(e.target.value)}
+              placeholder={glmKeyConfigured ? "A key is already saved. Paste here only to replace it." : "Zhipu key from z.ai — saving it adds 2 GLM guest workers to the Strategy Lab"}
+              className="font-mono text-xs"
+            />
+          </div>
           <div className="flex items-center gap-2">
             <Button
               size="sm"
@@ -364,6 +398,14 @@ export default function SettingsPage() {
               disabled={testAnthropicMutation.isPending}
             >
               {testAnthropicMutation.isPending ? "Testing..." : "Test Anthropic Connection"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => testGlmMutation.mutate()}
+              disabled={testGlmMutation.isPending}
+            >
+              {testGlmMutation.isPending ? "Testing..." : "Test GLM Connection"}
             </Button>
           </div>
         </CardContent>

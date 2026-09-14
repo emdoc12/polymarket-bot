@@ -56,7 +56,11 @@ Local (Mac) sessions CAN reach the box — use `curl http://192.168.1.101:5000/a
   demo|prod (`KalshiEnv`), order placement (CreateOrder V2, IOC), shard
   collateral management, `fetchCfPassthrough` (CF Benchmarks REST passthrough).
 - `agent-lab.ts` — the Strategy Lab: worker roles (Explorer/Optimizer/Skeptic,
-  dedicated Commodities Explorer/Optimizer, 2 perp workers), Opus PM review,
+  dedicated Commodities Explorer/Optimizer, 2 perp workers, plus a 2-worker
+  GLM GUEST DESK — different AI vendor, OpenAI-compatible fetch adapter,
+  activated only when glm_api_key is saved in Settings; guests propose into
+  the same pool via clampSpec/specHash and createdBy carries the glm_ prefix
+  so the evidence pipeline referees house vs guest), Opus PM review,
   walk-forward scoring, per-asset-class pool budgets (crypto<300,
   commodities<150, perps<150) with frontier carve-out (zero-candidate venues
   always open), PM context digests: fill rates, REAL-MONEY by band, PROD
