@@ -6,6 +6,8 @@ import { hourEt, hourInWindow } from "./kalshi";
 import {
   clampPerpSpec,
   getPerpCandles,
+  perpVol1mBps,
+  perpVolGateOk,
   getPerpTakerFeeRate,
   getPerpTopOfBook,
   parsePerpDollars,
@@ -243,7 +245,10 @@ async function tryPerpEntry(
 ) {
   if (!candleCache.has(spec.market)) {
     const endTs = Math.floor(Date.now() / 1000);
-    const candles = await getPerpCandles(spec.market, endTs - (spec.lookbackMinutes + 10) * 60, endTs, 1);
+    // Window covers the deepest gate any spec might carry (8h trend-align +
+    // 30-min vol + slack) - the cache is shared across candidates per market,
+    // so it must serve the hungriest one.
+    const candles = await getPerpCandles(spec.market, endTs - (8 * 60 + 45) * 60, endTs, 1);
     candleCache.set(spec.market, candles
       .map((c) => ({ ts: c.end_period_ts, close: parsePerpDollars(c.price?.close) ?? 0 }))
       .filter((c) => c.close > 0)
@@ -263,6 +268,14 @@ async function tryPerpEntry(
   if (!hourInWindow(hourEt(Date.now()), spec.minHourEt, spec.maxHourEt)) return;
   if (spec.sideBias === "long_only" && side !== "long") return;
   if (spec.sideBias === "short_only" && side !== "short") return;
+  if (!perpVolGateOk(spec, perpVol1mBps(closes, closes.length - 1))) return;
+  if (spec.trendAlignHours > 0) {
+    const alignTarget = now.ts - spec.trendAlignHours * 3600;
+    const alignPast = [...closes].reverse().find((c) => c.ts <= alignTarget);
+    if (!alignPast) return; // gate set but history unverifiable -> no entry
+    const upTrend = now.close >= alignPast.close;
+    if (spec.trendAlignMode === "with" ? (side === "long") !== upTrend : (side === "long") === upTrend) return;
+  }
 
   if (!bookCache.has(spec.market)) {
     bookCache.set(spec.market, await getPerpTopOfBook(spec.market));

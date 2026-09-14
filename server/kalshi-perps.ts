@@ -125,6 +125,18 @@ export type PerpStrategySpec = {
   minHourEt: number;
   maxHourEt: number;
   sideBias: "both" | "long_only" | "short_only";
+  // Regime gates (PM GRAMMAR REQUEST, granted 2026-09-14). The perp price IS
+  // the scaled underlying index, so both gates compute from the perp's own
+  // 1-min candle closes - identically in backtest and executor. Vol gate:
+  // trailing 30-min realized vol of 1-minute log returns, in bps (0 = off).
+  // trendAlign: perp price now vs N hours ago; "with" only enters on the
+  // side matching that higher-timeframe direction, "against" opposes it.
+  // Together they express the PM's mandate: "go long only when BTC is
+  // actually trending up out of chop."
+  minVol1mBps: number;
+  maxVol1mBps: number;
+  trendAlignHours: number;
+  trendAlignMode: "with" | "against";
   notional: number;            // fixed $ notional per trade for comparability
 };
 
@@ -148,6 +160,10 @@ export function clampPerpSpec(raw: Record<string, unknown>): PerpStrategySpec {
     minHourEt: Math.round(clampNum(raw.minHourEt, 0, 24, 0)),
     maxHourEt: Math.round(clampNum(raw.maxHourEt, 0, 24, 24)),
     sideBias: raw.sideBias === "long_only" || raw.sideBias === "short_only" ? raw.sideBias : "both",
+    minVol1mBps: clampNum(raw.minVol1mBps, 0, 500, 0),
+    maxVol1mBps: clampNum(raw.maxVol1mBps, 0, 500, 0),
+    trendAlignHours: Math.round(clampNum(raw.trendAlignHours, 0, 8, 0)),
+    trendAlignMode: raw.trendAlignMode === "against" ? "against" : "with",
     notional: 50,
   };
 }
@@ -161,7 +177,32 @@ export function perpSpecHash(spec: PerpStrategySpec) {
     ...(spec.minHourEt === spec.maxHourEt || (spec.minHourEt === 0 && spec.maxHourEt === 24)
       ? [] : [spec.minHourEt, spec.maxHourEt]),
     ...(spec.sideBias !== "both" ? [spec.sideBias] : []),
+    ...(spec.minVol1mBps > 0 || spec.maxVol1mBps > 0 ? [spec.minVol1mBps.toFixed(1), spec.maxVol1mBps.toFixed(1)] : []),
+    ...(spec.trendAlignHours > 0 ? [spec.trendAlignHours, spec.trendAlignMode] : []),
   ].join("|");
+}
+
+// Trailing 30-min realized vol in 1-minute bps from a closes series ending at
+// index i (exclusive of gaps: needs >=15 usable returns, mirroring the binary
+// vol gate's verification rule). Returns null when the regime can't be verified.
+export function perpVol1mBps(closes: { close: number | null }[], i: number): number | null {
+  const rets: number[] = [];
+  for (let k = Math.max(1, i - 30); k <= i; k++) {
+    const a = closes[k - 1]?.close;
+    const b = closes[k]?.close;
+    if (a != null && b != null && a > 0 && b > 0) rets.push(Math.log(b / a));
+  }
+  if (rets.length < 15) return null;
+  const mean = rets.reduce((x, y) => x + y, 0) / rets.length;
+  return Math.sqrt(rets.reduce((x, r) => x + (r - mean) ** 2, 0) / rets.length) * 10000;
+}
+
+export function perpVolGateOk(spec: PerpStrategySpec, vol: number | null): boolean {
+  if (spec.minVol1mBps <= 0 && spec.maxVol1mBps <= 0) return true;
+  if (vol == null) return false; // gate set but unverifiable -> no entry
+  if (spec.minVol1mBps > 0 && vol < spec.minVol1mBps) return false;
+  if (spec.maxVol1mBps > 0 && vol > spec.maxVol1mBps) return false;
+  return true;
 }
 
 export function getPerpTakerFeeRate() {
@@ -251,6 +292,7 @@ export function runPerpTradesOnCandles(spec: PerpStrategySpec, candles: PerpCand
     }
 
     if (!hourInWindow(hourEt(bar.ts * 1000), spec.minHourEt, spec.maxHourEt)) continue;
+    if (!perpVolGateOk(spec, perpVol1mBps(px, i))) continue;
     const past = px[i - spec.lookbackMinutes];
     if (past?.close == null || past.close <= 0) continue;
     const movePct = ((bar.close - past.close) / past.close) * 100;
@@ -260,6 +302,14 @@ export function runPerpTradesOnCandles(spec: PerpStrategySpec, candles: PerpCand
     const side = spec.direction === "trend_follow" ? trendSide : trendSide === "long" ? "short" : "long";
     if (spec.sideBias === "long_only" && side !== "long") continue;
     if (spec.sideBias === "short_only" && side !== "short") continue;
+    if (spec.trendAlignHours > 0) {
+      // Index math like the signal lookback: candles are 1-minute bars.
+      const alignPast = px[i - spec.trendAlignHours * 60];
+      if (alignPast?.close == null || alignPast.close <= 0) continue; // unverifiable -> skip
+      const upTrend = bar.close >= alignPast.close;
+      const sideUp = side === "long";
+      if (spec.trendAlignMode === "with" ? sideUp !== upTrend : sideUp === upTrend) continue;
+    }
     const entry = side === "long" ? bar.askClose : bar.bidClose;
     if (entry == null || entry <= 0) continue;
     pos = { side, entry, entryTs: bar.ts, entryIndex: i, contracts: spec.notional / entry };
