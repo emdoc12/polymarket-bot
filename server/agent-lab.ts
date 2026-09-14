@@ -255,6 +255,10 @@ async function callGlmJson(system: string, task: string): Promise<Record<string,
     body: JSON.stringify({
       model: getGlmWorkerModel(),
       max_tokens: 6000,
+      // GLM 4.5+ are reasoning models: without this they burn the budget on
+      // a reasoning_content stream and may leave content empty. We want the
+      // JSON, not the deliberation.
+      thinking: { type: "disabled" },
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -268,12 +272,31 @@ async function callGlmJson(system: string, task: string): Promise<Record<string,
     throw new Error(`GLM HTTP ${resp.status}: ${body}`);
   }
   const data: any = await resp.json();
-  let text: string = data?.choices?.[0]?.message?.content ?? "";
-  text = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("GLM returned no JSON object");
-  return JSON.parse(text.slice(start, end + 1));
+  const msg = data?.choices?.[0]?.message ?? {};
+  // Some GLM builds answer in content, some (thinking mode) only fill
+  // reasoning_content - scan both, and strip <think> blocks and fences.
+  for (const fieldRaw of [msg.content, msg.reasoning_content]) {
+    if (typeof fieldRaw !== "string" || !fieldRaw) continue;
+    const text = fieldRaw
+      .replace(/<think>[\s\S]*?<\/think>/g, "")
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "");
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) continue;
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {
+      continue; // fall through to the next field / the error below
+    }
+  }
+  const snippet = JSON.stringify({
+    content: String(msg.content ?? "").slice(0, 120),
+    reasoning: String(msg.reasoning_content ?? "").slice(0, 120),
+    finish: data?.choices?.[0]?.finish_reason ?? null,
+  });
+  throw new Error(`GLM returned no parseable JSON - ${snippet}`);
 }
 
 // Loose extraction: GLM has no structured-outputs contract, so accept any
