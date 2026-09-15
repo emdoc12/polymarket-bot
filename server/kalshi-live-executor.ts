@@ -683,7 +683,7 @@ async function runLiveTick() {
     for (const { candidate, spec } of specs) {
       if (spec.series !== series) continue;
       if (secondsToClose > spec.entrySecondsBeforeClose) continue;
-      if (secondsToClose < spec.entrySecondsBeforeClose - ENTRY_TOLERANCE_SEC) continue;
+      if (secondsToClose < spec.entrySecondsBeforeClose - Math.max(ENTRY_TOLERANCE_SEC, spec.entryWindowSeconds)) continue;
       if (storage.hasLiveTradeFor(candidate.id, active.market.ticker)) continue;
       // Real money: one position per window, full stop - correlated strategies
       // never stack live.

@@ -346,7 +346,7 @@ async function runExecutorTick() {
       if (spec.series !== series) continue;
       // Fire once, inside the tolerance window around the spec's entry moment.
       if (secondsToClose > spec.entrySecondsBeforeClose) continue;
-      if (secondsToClose < spec.entrySecondsBeforeClose - ENTRY_TOLERANCE_SEC) continue;
+      if (secondsToClose < spec.entrySecondsBeforeClose - Math.max(ENTRY_TOLERANCE_SEC, spec.entryWindowSeconds)) continue;
       if (storage.hasExecutorTradeFor(candidate.id, active.market.ticker)) continue;
       if (storage.countExecutorTradesForTicker(active.market.ticker) >= maxPerWindow) break;
       if (storage.getUnsettledExecutorTrades().length >= maxOpen) break;

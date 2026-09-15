@@ -182,7 +182,7 @@ async function runShadowTick() {
     for (const { candidate, spec } of specs) {
       if (spec.series !== active.series) continue;
       if (secondsToClose > spec.entrySecondsBeforeClose) continue;
-      if (secondsToClose < spec.entrySecondsBeforeClose - ENTRY_TOLERANCE_SEC) continue;
+      if (secondsToClose < spec.entrySecondsBeforeClose - Math.max(ENTRY_TOLERANCE_SEC, spec.entryWindowSeconds)) continue;
       // Trend rules need candle history over REST - evaluate those at a
       // gentler cadence (the 10s candle cache absorbs the rest).
       if (spec.sideRule.startsWith("trend") && !dueForEval(candidate.id, active.market.ticker, 10_000)) continue;

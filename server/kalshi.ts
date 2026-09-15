@@ -200,6 +200,18 @@ export type KalshiStrategySpec = {
   // within +/- catalystMinutes of a catalyst; "avoid" = never enter there.
   catalystMode: "off" | "require" | "avoid";
   catalystMinutes: number;
+  // Entry WINDOW (PM GRAMMAR REQUEST, granted 2026-09-15): instead of a
+  // one-second snapshot at entrySecondsBeforeClose, the spec may watch from
+  // T until T - entryWindowSeconds and take the FIRST instant the full rule
+  // passes (band, signal, gates). 0 = off (legacy single snapshot; every
+  // pre-existing spec keeps exactly its old behavior). Built because the
+  // snapshot semantics starved samples: a 10-20c band had to contain the
+  // price at one exact instant, leaving survivors at 1-10 fills for weeks
+  // and gated specs unscoreable. Backtest walks the window's candles in
+  // order; executors already re-evaluate every tick inside their tolerance
+  // window, so live simply widens that tolerance to the spec's window -
+  // first passing tick enters, dedupe prevents seconds attempts.
+  entryWindowSeconds: number;
   // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
   // window when the quoted YES spread (ask - bid) is wider than this many
   // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
@@ -300,6 +312,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     catalystMode: raw.catalystMode === "require" || raw.catalystMode === "avoid" ? raw.catalystMode : "off",
     catalystMinutes: Math.round(clampNum(raw.catalystMinutes, 5, 120, 30)),
     maxSpreadCents: Math.round(clampNum(raw.maxSpreadCents, 0, 30, 0)),
+    entryWindowSeconds: Math.round(clampNum(raw.entryWindowSeconds, 0, 300, 0)),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -342,6 +355,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.trendAlignHours > 0 ? [spec.trendAlignHours, spec.trendAlignMode] : []),
     ...(spec.catalystMode !== "off" ? [spec.catalystMode, spec.catalystMinutes] : []),
     ...(spec.maxSpreadCents > 0 ? [`sprd${spec.maxSpreadCents}`] : []),
+    ...(spec.entryWindowSeconds > 0 ? [`win${spec.entryWindowSeconds}`] : []),
   ].join("|");
 }
 
@@ -546,7 +560,24 @@ export async function fetchSettledMarketData(series: string, lookback: number): 
 type SpecTrade = { ticker: string; side: "YES" | "NO"; entryPrice: number; fee: number; won: boolean; netPnl: number };
 
 function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData): SpecTrade | null {
-  const entryTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
+  const baseTs = Math.floor(entry.closeMs / 1000) - spec.entrySecondsBeforeClose;
+  const sortedCandles = [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
+  if (spec.entryWindowSeconds <= 0) {
+    return evaluateSpecAtInstant(spec, entry, baseTs, sortedCandles);
+  }
+  // Walk the window's candles chronologically; the first instant the full
+  // rule passes is the trade - mirroring the executors' first-passing-tick.
+  const windowEnd = baseTs + spec.entryWindowSeconds;
+  for (const c of sortedCandles) {
+    if (c.end_period_ts < baseTs) continue;
+    if (c.end_period_ts > windowEnd) break;
+    const trade = evaluateSpecAtInstant(spec, entry, c.end_period_ts, sortedCandles);
+    if (trade) return trade;
+  }
+  return null;
+}
+
+function evaluateSpecAtInstant(spec: KalshiStrategySpec, entry: SettledMarketData, entryTs: number, presorted?: KalshiCandle[]): SpecTrade | null {
   if (!hourInWindow(hourEt(entryTs * 1000), spec.minHourEt, spec.maxHourEt)) return null;
   if (!dayAllowed(entryTs * 1000, spec.dowMaskEt)) return null;
   if (!catalystGateOk(entryTs * 1000, spec)) return null;
@@ -566,7 +597,7 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
     const vol1mBps = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) * 10000;
     if (!volInGate(vol1mBps, spec)) return null;
   }
-  const sorted = [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
+  const sorted = presorted ?? [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
   const entryCandle = [...sorted].reverse().find((c) => c.end_period_ts <= entryTs);
   if (!entryCandle) return null;
 
@@ -601,7 +632,7 @@ function evaluateSpecOnMarket(spec: KalshiStrategySpec, entry: SettledMarketData
     if (rets.length < 15) return null;
     const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
     const volPerSqrtSec = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) / Math.sqrt(60);
-    const pUp = valueModelProbUp(spot, strike, volPerSqrtSec, spec.entrySecondsBeforeClose);
+    const pUp = valueModelProbUp(spot, strike, volPerSqrtSec, Math.floor(entry.closeMs / 1000) - entryTs);
     const edgeThreshold = Math.max(spec.minSignal, 0.02);
     const edgeYes = pUp - yesAsk;
     const edgeNo = yesBid - pUp; // buying NO at 1-yesBid pays off with prob 1-pUp
