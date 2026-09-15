@@ -294,7 +294,7 @@ async function callGlmJson(system: string, task: string): Promise<Record<string,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
       model: getGlmWorkerModel(),
-      max_tokens: 10000,
+      max_tokens: 16000,
       // GLM 4.5+ are reasoning models: without this they burn the budget on
       // a reasoning_content stream and may leave content empty. We want the
       // JSON, not the deliberation.
@@ -753,7 +753,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       try {
         const response = await client.messages.parse({
           model: workerModel,
-          max_tokens: 10000,
+          max_tokens: 16000,
           system: role.system,
           messages: [{ role: "user", content: role.buildTask(workerContext) }],
           output_config: { format: zodOutputFormat(WorkerOutputSchema) },
@@ -790,7 +790,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       try {
         const response = await client.messages.parse({
           model: workerModel,
-          max_tokens: 10000,
+          max_tokens: 16000,
           system: role.system,
           messages: [{ role: "user", content: role.buildTask(contextText) }],
           output_config: { format: zodOutputFormat(PerpWorkerOutputSchema) },
