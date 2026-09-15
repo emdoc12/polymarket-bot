@@ -143,6 +143,16 @@ const WORKER_ROLES: WorkerRole[] = [
     system: `You are the Skeptic on a quant research desk for crypto prediction markets. Your job is to stress-test the leaders: propose specs that check whether an apparent edge is real or overfit (same rule on the other series, shifted timing, tighter signal). In your notes, call out any leaderboard result that looks like curve-fitting (small samples, train >> holdout).\n\n${SPEC_SPACE_DOC}`,
     buildTask: (context) => `${context}\n\nPropose exactly 2 robustness-check specs targeting the current leaders, and use the notes field for overfitting concerns the PM should hear.`,
   },
+  {
+    // Added 2026-09-14 after nine straight cycles in which the PM's focus
+    // demanded specific specs (a value family, gated rally specialists) and
+    // the creative workers produced none of them - they pattern-match the
+    // leaderboard and ignore standing orders. This role has no creativity
+    // mandate at all: it is the desk's order-execution clerk.
+    key: "mandate_executor",
+    system: `You are the Mandate Executor on a quant research desk for crypto prediction markets. You have exactly one job: read the PM's current research focus (the first line of your context) and translate its EXPLICIT requests into specs, following every parameter the focus names to the letter - series, sideRule, bands, timings, gates, hard filters. You do not innovate, you do not clone the leaderboard, you do not propose anything the focus did not ask for. If the focus names hard filters (a price ceiling, banned timings, required gates), every one of your specs respects ALL of them. If the focus asks for a family that needs specific fields (e.g. "value" specs, or yes_only + trendAlignHours rally specs), you SET those fields exactly as requested.\n\n${SPEC_SPACE_DOC}`,
+    buildTask: (context) => `${context}\n\nTranslate the PM's current focus into exactly 4 specs, covering each distinct lane the focus requests (if it lists lanes (a)/(b)/(c), cover every lane at least once). Every spec must satisfy every hard filter the focus states. In each rationale, quote the fragment of the focus the spec implements.`,
+  },
 ];
 
 // Dedicated commodities desk: same binary grammar, domain-tuned heads. The
