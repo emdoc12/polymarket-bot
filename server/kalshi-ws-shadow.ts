@@ -245,9 +245,35 @@ export function buildAuditionBoard() {
   return [...byCandidate.values()].sort((a, b) => b.netPnl - a.netPnl);
 }
 
+// Cumulative would-be P&L of the prod audition over time - the tracker for
+// "what the team is doing now" (real production books, risk-free). Settled
+// audition rows, ordered by settlement time, running sum; downsampled to keep
+// the payload light since the audition runs 24/7.
+export function buildAuditionPnlSeries() {
+  const settled = storage.getWsShadowTrades(20000)
+    .filter((t) => t.netPnl != null && t.settledAt)
+    .sort((a, b) => Date.parse(a.settledAt!) - Date.parse(b.settledAt!));
+  let cum = 0;
+  const points = settled.map((t) => {
+    cum += t.netPnl ?? 0;
+    return { t: t.settledAt as string, cum: Number(cum.toFixed(2)) };
+  });
+  // Downsample to <= 400 points, always keeping the last.
+  const MAX = 400;
+  if (points.length <= MAX) return points;
+  const step = Math.ceil(points.length / MAX);
+  const out = points.filter((_, i) => i % step === 0);
+  if (out[out.length - 1] !== points[points.length - 1]) out.push(points[points.length - 1]);
+  return out;
+}
+
 export function registerWsShadowRoutes(app: Express) {
   ensureShadowDefaults();
   if (!shadowTimer) scheduleShadow();
+
+  app.get("/api/ws-shadow/pnl-series", (_req, res) => {
+    res.json({ series: buildAuditionPnlSeries() });
+  });
 
   app.get("/api/ws-shadow/status", (_req, res) => {
     res.json({

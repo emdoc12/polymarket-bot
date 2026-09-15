@@ -226,6 +226,11 @@ export default function KalshiDashboard() {
     refetchInterval: 30000,
     retry: false,
   });
+  const { data: auditionPnl } = useQuery<{ series: { t: string; cum: number }[] }>({
+    queryKey: ["/api/ws-shadow/pnl-series"],
+    refetchInterval: 30000,
+    retry: false,
+  });
   const { data: versionData } = useQuery<{ version: string }>({
     queryKey: ["/api/version"],
     retry: false,
@@ -313,12 +318,21 @@ export default function KalshiDashboard() {
   });
   const liveBalanceDollars = liveStatus?.balanceCents != null ? liveStatus.balanceCents / 100 : null;
 
+  // Prod-audition tracker: the team's live arena now that demo is retired and
+  // real money is paused. Cumulative would-be P&L on real production books.
+  const AUDITION_COLOR = "#22D3EE"; // cyan — distinct from every demo series color
+  const auditionSeries = (auditionPnl?.series ?? []).map((p) => ({ time: Date.parse(p.t), audition: p.cum }));
+  const auditionCum = auditionSeries.length > 0 ? auditionSeries[auditionSeries.length - 1].audition : 0;
+  const auditionBoard = auditionData?.board ?? [];
+  const auditionSettled = auditionBoard.reduce((s, r) => s + r.settled, 0);
+  const auditionWins = auditionBoard.reduce((s, r) => s + r.wins, 0);
+
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-semibold tracking-tight">Dashboard</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Kalshi demo account · agent-researched strategies
+          Agent-researched strategies · demo retired, live paused · tracking the prod audition
           {versionData?.version && <span className="font-mono text-xs"> · v{versionData.version}</span>}
         </p>
       </div>
@@ -624,13 +638,60 @@ export default function KalshiDashboard() {
         </Card>
       )}
 
-      {/* Cumulative P&L */}
+      {/* Prod-audition tracker — the team's arena now (demo retired, live paused) */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium">Cumulative demo P&L — real vs rehearsal</CardTitle>
+          <div className="flex items-baseline justify-between gap-2 flex-wrap">
+            <CardTitle className="text-sm font-medium">Prod audition — cumulative would-be P&L (the team's arena now)</CardTitle>
+            <span className="text-sm font-mono" style={{ color: AUDITION_COLOR }}>{money(auditionCum, true)}</span>
+          </div>
           <CardDescription className="text-xs">
-            Full settled history, after fees. Real = actual exchange fills; rehearsal = dry-run scoring at
-            quoted prices. The gap between the curves is execution reality.
+            What the research team is actually doing now: every promoted strategy rehearsed risk-free on REAL
+            production order books, settled against real outcomes — no money at risk.
+            {auditionSettled > 0 && ` ${auditionWins}/${auditionSettled} settled auditions won (${Math.round((auditionWins / auditionSettled) * 100)}%).`}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {auditionSeries.length < 2 ? (
+            <p className="text-xs text-muted-foreground py-6 text-center">
+              Building the audition curve — points appear as promoted strategies settle their would-be trades on real books.
+            </p>
+          ) : (
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={auditionSeries} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+                  <CartesianGrid stroke={gridStroke} strokeOpacity={0.4} vertical={false} />
+                  <XAxis
+                    dataKey="time" type="number" scale="time" domain={["dataMin", "dataMax"]}
+                    tickFormatter={timeFmt} tick={tickStyle} axisLine={false} tickLine={false} minTickGap={60}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => `$${v}`} tick={tickStyle}
+                    axisLine={false} tickLine={false} width={48}
+                  />
+                  <Tooltip
+                    contentStyle={chartTooltipStyle()}
+                    labelFormatter={(v) => timeFmt(Number(v))}
+                    formatter={(value) => [money(Number(value), true), "Would-be P&L"]}
+                  />
+                  <Line
+                    type="monotone" dataKey="audition" stroke={AUDITION_COLOR} strokeWidth={2}
+                    dot={false} activeDot={{ r: 4 }} name="Prod audition (would-be)"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Cumulative P&L — DEMO (historical reference; demo retired 2026-09-15) */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium">Cumulative demo P&L — real vs rehearsal (retired, historical)</CardTitle>
+          <CardDescription className="text-xs">
+            Frozen reference: the demo account is retired — its seeded market-maker fills never transferred to
+            real money. Kept for comparison only. Real = actual demo exchange fills; rehearsal = dry-run scoring.
           </CardDescription>
         </CardHeader>
         <CardContent>
