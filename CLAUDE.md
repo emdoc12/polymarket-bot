@@ -182,16 +182,29 @@ inside these bounds: salvage edge 0.04-0.12, salvage cap 0.25-0.50, cooldown
 8-18 / hard 15-25 / pause 3-12h. Human-only forever: kill switch, arming,
 stakes, floor/ceiling, transport, curfew, money-machinery code.
 
-## PM watch (autonomous grammar-request loop)
+## PM watch (autonomous fix-it-all loop, v3)
 
-A local Claude Code session on the user's Mac runs a 4-hourly "PM WATCH"
-cron: polls /api/agent-lab/runs for new PM commentary, implements SAFE
-grammar/context extensions autonomously (tsc clean, VERSION bump, push;
-never risk parameters, never box settings, never order/exit logic), and
-push-notifies the user on actions, red flags, or requests needing their
-decision. State: memory/pm-watch-state.json (lastRunId). Cron jobs are
-session-scoped and expire after 7 days - to re-arm, tell any local
-session: "re-arm the PM watch per CLAUDE.md".
+A local Claude Code session on the user's Mac runs a 2-hourly "PM WATCH"
+cron (user directive 2026-09-15: "get these messages directly and fix
+them all on your own without any of my input at all"). Each cycle: poll
+/api/agent-lab/runs past state lastRunId + /api/live/status, then act:
+- FULL AUTONOMY over the research pipeline: spec grammar (backtest + all
+  executors, hash-conditional), digests, worker roles/prompts, admission
+  logic, guest-desk plumbing, dashboard/perf fixes. tsc clean, VERSION
+  bump, push, verify deploy. Redundant PM requests get answered in the
+  GRAMMAR REQUESTS ANSWERED inventory instead of alias fields. Watch for
+  the recurring self-sealing-rule failure class (a gate that prevents a
+  desk/venue/family from ever earning its first evidence).
+- RAIL PROPOSALS applied via /api/settings only inside constitutional
+  bounds and only after a ledger replay beats the incumbent value.
+- HUMAN-ONLY forever: kill switch, arming, stakes, floor/ceiling,
+  transport, curfew, order/exit money-machinery code, paid data (CME
+  feed DECLINED 2026-09-14; bar = out-earn 2x its cost).
+- Red flags push-notify, never auto-fix: kill switch, stream down on
+  stream transport, trailing paused >12h, cooldown stuck, stale deploy.
+State: memory/pm-watch-state.json (lastRunId, railChanges). Cron jobs
+are session-scoped and expire after 7 days - to re-arm, tell any local
+session: "re-arm the PM watch per CLAUDE.md" (2-hourly, off-minute).
 
 ## Parked / open threads
 
