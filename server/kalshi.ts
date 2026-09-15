@@ -358,7 +358,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     catalystMode: raw.catalystMode === "require" || raw.catalystMode === "avoid" ? raw.catalystMode : "off",
     catalystMinutes: Math.round(clampNum(raw.catalystMinutes, 5, 120, 30)),
     maxSpreadCents: Math.round(clampNum(raw.maxSpreadCents, 0, 30, 0)),
-    entryWindowSeconds: Math.round(clampNum(raw.entryWindowSeconds, 0, 300, 0)),
+    entryWindowSeconds: Math.round(clampNum(raw.entryWindowSeconds, 0, 600, 0)),
     prevWindowMode: raw.prevWindowMode === "with" || raw.prevWindowMode === "against" ? raw.prevWindowMode : "off",
     makerJoinCents: Math.round(clampNum(raw.makerJoinCents, 0, 10, 0)),
     orderSize: 10, // fixed so results stay comparable across candidates
