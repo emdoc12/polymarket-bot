@@ -355,7 +355,12 @@ function getAnthropicClient() {
   const apiKey = getAnthropicApiKey();
   if (!apiKey) return null;
   if (!anthropic || anthropicClientKey !== apiKey) {
-    anthropic = new Anthropic({ apiKey });
+    // Optimizer workers carry the largest prompts (full leaderboard context)
+    // and were intermittently failing the whole cycle's mutations - the
+    // signature of transient API overload (529) / timeout, not truncation.
+    // Raise the SDK's automatic retry budget and per-request timeout so a
+    // busy-minute blip retries instead of costing a worker's proposals.
+    anthropic = new Anthropic({ apiKey, maxRetries: 4, timeout: 120_000 });
     anthropicClientKey = apiKey;
   }
   return anthropic;
@@ -742,7 +747,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`${new Date().toISOString()} [error] [agent-lab] worker ${role.key} failed: ${message}`);
-        return { role: role.key, proposals: [], notes: `(${role.key} call failed: ${message.slice(0, 120)})` };
+        return { role: role.key, proposals: [], notes: `(${role.key} call failed: ${message.slice(0, 300)})` };
       }
     }));
 
@@ -757,7 +762,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`${new Date().toISOString()} [error] [agent-lab] guest worker ${role.key} failed: ${message}`);
-        return { role: role.key, proposals: [] as Record<string, unknown>[], notes: `(${role.key} call failed: ${message.slice(0, 120)})` };
+        return { role: role.key, proposals: [] as Record<string, unknown>[], notes: `(${role.key} call failed: ${message.slice(0, 300)})` };
       }
     }));
 
@@ -779,12 +784,23 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`${new Date().toISOString()} [error] [agent-lab] worker ${role.key} failed: ${message}`);
-        return { role: role.key, proposals: [], notes: `(${role.key} call failed: ${message.slice(0, 120)})` };
+        return { role: role.key, proposals: [], notes: `(${role.key} call failed: ${message.slice(0, 300)})` };
       }
     }));
 
     // 2. Clamp, dedupe against everything ever tested, cap per cycle.
     const skepticNotes = [...workerResults, ...glmWorkerResults, ...perpWorkerResults].map((w) => `${w.role}: ${w.notes}`).join("\n");
+    // Observability: persist any worker that produced zero proposals with its
+    // note (which carries the real error text), so a recurring crash is
+    // diagnosable from /api/agent-lab/status instead of only the server log.
+    const workerFailures = [...workerResults, ...glmWorkerResults, ...perpWorkerResults]
+      .filter((w) => w.proposals.length === 0 && /call failed|no usable output/.test(w.notes))
+      .map((w) => ({ role: w.role, note: w.notes }));
+    storage.setSetting("lab_last_worker_diag", JSON.stringify({
+      at: new Date().toISOString(),
+      failures: workerFailures,
+      ranWorkers: workerResults.length + glmWorkerResults.length + perpWorkerResults.length,
+    }));
     const generation = storage.getAgentLabRuns(1)[0]?.id ?? 1;
     const fresh: { candidate: CandidateStrategy; spec: KalshiStrategySpec }[] = [];
     let proposalCount = 0;
@@ -1180,6 +1196,7 @@ export function registerAgentLabRoutes(app: Express) {
       glmConfigured: Boolean(getGlmApiKey()),
       glmWorkerModel: getGlmWorkerModel(),
       glmLastCycle: (() => { try { return JSON.parse(storage.getSetting("glm_last_cycle") || "null"); } catch { return null; } })(),
+      lastWorkerDiag: (() => { try { return JSON.parse(storage.getSetting("lab_last_worker_diag") || "null"); } catch { return null; } })(),
       candidates: {
         testing: storage.getCandidateStrategies("testing").length,
         promoted: storage.getCandidateStrategies("promoted").length,
