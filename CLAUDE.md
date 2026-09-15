@@ -165,6 +165,19 @@ live_executor_enabled=true and live_kill_switch — use dedicated routes).
   user approval; the user runs sequenced rollouts themselves only for OTHER
   repos — this repo has standing push permission.
 
+- Maker (passive) entry (v1.30.0, human-authorized order machinery): a spec
+  with makerJoinCents>0 rests a limit order that many cents below the ask
+  (good-till-time, live_maker_timeout_sec=20s) to capture the spread instead
+  of taking it; a two-phase state machine (status "resting" -> reconciled each
+  tick -> "open" on fill, or taker fallback / "unfilled" on expiry). Resting
+  orders count toward max-open/one-per-window but are excluded from settlement
+  and salvage (status != "open"). BACKTEST-INERT by design (maker fills can't
+  be honestly simulated) - it only affects the live/audition ledgers, so it's
+  a live A/B of a taker geometry, never a backtest rescue. makerJoinCents is
+  in the spec grammar + specHash (maker/taker twins are distinct). The order
+  path itself (kalshi-trading.ts restingExpirationTs / getKalshiOrderEnv) is
+  human-only; the research desk and PM-watch may set the field but never touch
+  the order code.
 - Salvage exits (v1.16.0): mid-window sale of dying positions when the
   crowd's bid exceeds fair-value model by live_salvage_edge (0.06) with
   model value <= live_salvage_max_model_value (0.35). Backtest-validated

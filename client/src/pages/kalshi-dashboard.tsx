@@ -57,6 +57,8 @@ type LiveStatus = {
   balanceCents: number | null;
   armedStrategies: { id: number; name: string }[];
   openTrades: number;
+  restingOrders?: number;
+  makerTimeoutSec?: number;
   tradesToday: number;
   maxTradesPerDay: number;
   orderSize: number;
@@ -508,6 +510,9 @@ export default function KalshiDashboard() {
                         {liveStatus.streamConnected ? " · stream orders" : " · stream DOWN (REST fallback)"}
                       </span>
                     )}
+                    {(liveStatus.restingOrders ?? 0) > 0 && (
+                      <span className="text-sky-400"> · {liveStatus.restingOrders} maker resting</span>
+                    )}
                   </p>
                 )}
                 <p className="hidden">{/* structure keeps tile heights aligned */}
@@ -600,9 +605,9 @@ export default function KalshiDashboard() {
                       <td className="px-2 py-2 text-xs">
                         <Badge
                           variant={t.status === "settled_won" ? "default" : t.status === "settled_lost" || t.status === "failed" ? "destructive" : "secondary"}
-                          className="text-[10px]"
+                          className={`text-[10px] ${t.status === "resting" ? "bg-sky-500/15 text-sky-400 border-transparent" : ""}`}
                         >
-                          {t.status.replace("settled_", "")}
+                          {t.status === "resting" ? "maker resting" : t.status.replace("settled_", "")}
                         </Badge>
                       </td>
                       <td className="pl-2 py-2 text-right text-xs whitespace-nowrap"><PnlText value={t.netPnl} /></td>

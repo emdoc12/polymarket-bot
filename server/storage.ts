@@ -256,6 +256,7 @@ function runMigrations() {
   if (!liveColNames.has("exit_price")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN exit_price REAL;");
   if (!liveColNames.has("exited_contracts")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN exited_contracts INTEGER;");
   if (!liveColNames.has("exit_fee")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN exit_fee REAL;");
+  if (!liveColNames.has("maker_expires_at")) sqlite.exec("ALTER TABLE live_trades ADD COLUMN maker_expires_at TEXT;");
 
   // Executor trades table (references candidate_strategies).
   sqlite.exec(`
@@ -346,6 +347,7 @@ export interface IStorage {
   createCandidateStrategy(candidate: InsertCandidateStrategy): CandidateStrategy;
   updateCandidateStrategy(id: number, updates: Partial<CandidateStrategy>): void;
   getCandidateStrategies(status?: string): CandidateStrategy[];
+  getCandidateById(id: number): CandidateStrategy | undefined;
   getCandidateBySpecHash(specHash: string): CandidateStrategy | undefined;
   createAgentLabRun(run: InsertAgentLabRun): AgentLabRun;
   updateAgentLabRun(id: number, updates: Partial<AgentLabRun>): void;
@@ -370,6 +372,8 @@ export interface IStorage {
   updateLiveTrade(id: number, updates: Partial<LiveTrade>): void;
   getLiveTrades(limit?: number): LiveTrade[];
   getUnsettledLiveTrades(): LiveTrade[];
+  getRestingLiveTrades(): LiveTrade[];
+  getPendingLiveTrades(): LiveTrade[];
   hasLiveTradeFor(candidateId: number, ticker: string): boolean;
   createWsShadowTrade(trade: InsertWsShadowTrade): WsShadowTrade;
   updateWsShadowTrade(id: number, updates: Partial<WsShadowTrade>): void;
@@ -548,6 +552,10 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(candidateStrategies).orderBy(desc(candidateStrategies.id)).all();
   }
 
+  getCandidateById(id: number): CandidateStrategy | undefined {
+    return db.select().from(candidateStrategies).where(eq(candidateStrategies.id, id)).get();
+  }
+
   getCandidateBySpecHash(specHash: string): CandidateStrategy | undefined {
     return db.select().from(candidateStrategies).where(eq(candidateStrategies.specHash, specHash)).get();
   }
@@ -652,6 +660,19 @@ export class DatabaseStorage implements IStorage {
 
   getUnsettledLiveTrades(): LiveTrade[] {
     return db.select().from(liveTrades).where(eq(liveTrades.status, "open")).orderBy(desc(liveTrades.id)).all();
+  }
+
+  // Resting maker orders awaiting fill/expiry (not yet settleable).
+  getRestingLiveTrades(): LiveTrade[] {
+    return db.select().from(liveTrades).where(eq(liveTrades.status, "resting")).orderBy(desc(liveTrades.id)).all();
+  }
+
+  // Both filled-open and resting rows count as live exposure for max-open /
+  // one-per-window gating (a resting order can still fill).
+  getPendingLiveTrades(): LiveTrade[] {
+    return db.select().from(liveTrades)
+      .where(inArray(liveTrades.status, ["open", "resting"]))
+      .orderBy(desc(liveTrades.id)).all();
   }
 
   hasLiveTradeFor(candidateId: number, ticker: string): boolean {

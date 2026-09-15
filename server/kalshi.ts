@@ -248,6 +248,16 @@ export type KalshiStrategySpec = {
   // the forensics: P(loss|prior loss) 47% vs 44% window-to-window
   // autocorrelation the portfolio-wide cooldown cannot express per-series.
   prevWindowMode: "off" | "with" | "against";
+  // Maker (passive) entry cushion (PM GRAMMAR REQUEST, built 2026-09-15 by
+  // human authorization - this is ORDER MACHINERY, human-only). 0 = taker at
+  // the ask (today's behavior). >0 = the LIVE executor rests a limit order
+  // this many cents below the taker price for live_maker_timeout_sec, trying
+  // to capture the spread, then falls back to a taker order if unfilled.
+  // BACKTEST-INERT BY DESIGN: maker fills depend on queue position and time
+  // priority, which no historical data can honestly simulate, so discovery
+  // and walk-forward score a maker spec identically to its taker twin -
+  // only the LIVE and AUDITION records diverge. Judge it on real fills.
+  makerJoinCents: number;
   // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
   // window when the quoted YES spread (ask - bid) is wider than this many
   // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
@@ -350,6 +360,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     maxSpreadCents: Math.round(clampNum(raw.maxSpreadCents, 0, 30, 0)),
     entryWindowSeconds: Math.round(clampNum(raw.entryWindowSeconds, 0, 300, 0)),
     prevWindowMode: raw.prevWindowMode === "with" || raw.prevWindowMode === "against" ? raw.prevWindowMode : "off",
+    makerJoinCents: Math.round(clampNum(raw.makerJoinCents, 0, 10, 0)),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -394,6 +405,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.maxSpreadCents > 0 ? [`sprd${spec.maxSpreadCents}`] : []),
     ...(spec.entryWindowSeconds > 0 ? [`win${spec.entryWindowSeconds}`] : []),
     ...(spec.prevWindowMode !== "off" ? [`prev${spec.prevWindowMode}`] : []),
+    ...(spec.makerJoinCents > 0 ? [`mkr${spec.makerJoinCents}`] : []),
   ].join("|");
 }
 

@@ -14,9 +14,11 @@ import {
 import { decideLiveEntry } from "./kalshi-executor";
 import { kalshiProdStream } from "./kalshi-ws";
 import {
+  cancelKalshiOrderEnv,
   ensureShardFundsEnv,
   getKalshiAuthStatusEnv,
   getKalshiBalanceEnv,
+  getKalshiOrderEnv,
   getMarketExchangeIndexEnv,
   placeKalshiOrderEnv,
   runKalshiAuthSelfTestEnv,
@@ -75,6 +77,15 @@ function ensureLiveDefaults() {
   if (!storage.getSetting("live_trailing_soft")) storage.setSetting("live_trailing_soft", "12");
   if (!storage.getSetting("live_trailing_hard")) storage.setSetting("live_trailing_hard", "20");
   if (!storage.getSetting("live_trailing_pause_hours")) storage.setSetting("live_trailing_pause_hours", "6");
+  // How long a maker (passive) entry rests in the book before it expires and
+  // the executor falls back to a taker order. Only matters for specs that set
+  // makerJoinCents > 0; taker specs are unaffected.
+  if (!storage.getSetting("live_maker_timeout_sec")) storage.setSetting("live_maker_timeout_sec", "20");
+}
+
+function makerTimeoutSec(): number {
+  const raw = parseInt(storage.getSetting("live_maker_timeout_sec") || "20", 10);
+  return Number.isFinite(raw) ? Math.min(120, Math.max(5, raw)) : 20;
 }
 
 // Account-level trailing stop (user directive 2026-09-13: "an agentic desk
@@ -525,10 +536,35 @@ function streamOverlay(market: KalshiMarket): { m: KalshiMarket; depthFor: (side
 }
 
 async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySpec, market: KalshiMarket, nowMs: number) {
-  let overlay = streamOverlay(market);
-  let decision = await decideLiveEntry(spec, overlay.m, nowMs);
+  const overlay = streamOverlay(market);
+  const decision = await decideLiveEntry(spec, overlay.m, nowMs);
   if (!decision.ok) return;
   if (!passesLivePriceGuards(decision.entryPrice)) return;
+
+  // Maker (passive) entry: rest a limit order below the ask to try to capture
+  // the spread, rather than crossing it as a taker. Falls back to a taker
+  // order on the next tick if it doesn't fill before expiry.
+  if ((spec.makerJoinCents ?? 0) > 0) {
+    await placeLiveMakerOrder(candidate, spec, market, decision, overlay, nowMs);
+    return;
+  }
+  await placeLiveTakerOrder(candidate, spec, market, decision, overlay, nowMs);
+}
+
+// The taker path: the original behavior - an IOC limit at the entry price,
+// with one requote-and-retry on a latency miss. Also serves as the maker
+// path's fallback when a resting order expires unfilled.
+async function placeLiveTakerOrder(
+  candidate: CandidateStrategy,
+  spec: KalshiStrategySpec,
+  market: KalshiMarket,
+  initialDecision: { ok: true; side: "yes" | "no"; entryPrice: number },
+  initialOverlay: ReturnType<typeof streamOverlay>,
+  nowMs: number,
+  restingRowId?: number,
+) {
+  let overlay = initialOverlay;
+  let decision: { ok: true; side: "yes" | "no"; entryPrice: number } = initialDecision;
 
   const orderSize = await computeLiveStake();
   let contracts = Math.max(1, Math.floor(orderSize / decision.entryPrice));
@@ -536,7 +572,14 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
   // Depth confirmation (stream mode, fresh book only): if the level can't
   // absorb our size, don't fire a doomed IOC - the ~2s tick retries while
   // the entry window is still open, no row recorded.
-  if (overlay.fresh && overlay.depthFor(decision.side) < contracts) return;
+  if (overlay.fresh && overlay.depthFor(decision.side) < contracts) {
+    // A maker fallback whose book can't absorb the size records the miss so
+    // the resting row doesn't linger as "resting" forever.
+    if (restingRowId != null) {
+      storage.updateLiveTrade(restingRowId, { status: "unfilled", contracts: 0, cost: 0, fee: 0, makerExpiresAt: null });
+    }
+    return;
+  }
   let entryPrice = decision.entryPrice;
   let cost = contracts * entryPrice;
   let fee = kalshiTradingFee(contracts, entryPrice);
@@ -608,6 +651,17 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
     error = err instanceof Error ? err.message : String(err);
   }
 
+  // Maker fallback updates its existing "resting" row in place; a plain taker
+  // entry creates a fresh row.
+  if (restingRowId != null) {
+    storage.updateLiveTrade(restingRowId, {
+      side: decision.side, entryPrice, contracts, cost, fee, status, orderId, error,
+      transport: overlay.fresh ? "stream" : "rest", makerExpiresAt: null,
+      placedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
   storage.createLiveTrade({
     candidateId: candidate.id,
     candidateName: candidate.name,
@@ -634,6 +688,170 @@ async function tryLiveEntry(candidate: CandidateStrategy, spec: KalshiStrategySp
   });
 }
 
+// ---------------------------------------------------------------------------
+// Maker (passive) entry - human-authorized order machinery, 2026-09-15.
+// Rests a limit order live_maker_timeout_sec below the ask to capture the
+// spread; reconciled on subsequent ticks. Backtest-inert by design (maker
+// fills can't be honestly simulated), so this only ever affects live/audition.
+// ---------------------------------------------------------------------------
+
+async function placeLiveMakerOrder(
+  candidate: CandidateStrategy,
+  spec: KalshiStrategySpec,
+  market: KalshiMarket,
+  decision: { ok: true; side: "yes" | "no"; entryPrice: number },
+  overlay: ReturnType<typeof streamOverlay>,
+  nowMs: number,
+) {
+  const orderSize = await computeLiveStake();
+  const takerCents = Math.min(99, Math.max(1, Math.round(decision.entryPrice * 100)));
+  // Rest makerJoinCents cheaper than taking; never below 1c. If the cushion
+  // would erase the whole price there's nothing to rest, so bail to taker.
+  const makerCents = takerCents - Math.round(spec.makerJoinCents);
+  if (makerCents < 1) {
+    await placeLiveTakerOrder(candidate, spec, market, decision, overlay, nowMs);
+    return;
+  }
+  const makerPrice = makerCents / 100;
+  const contracts = Math.max(1, Math.floor(orderSize / makerPrice));
+  const cost = contracts * makerPrice;
+
+  try {
+    const exchangeIndex = await getMarketExchangeIndexEnv("prod", market.ticker);
+    if (exchangeIndex == null) throw new Error(`market ${market.ticker} is not listed on the prod exchange`);
+    await ensureShardFundsEnv("prod", exchangeIndex, cost + 1);
+    const expirationTs = Math.floor(Date.now() / 1000) + makerTimeoutSec();
+    const placed = await placeKalshiOrderEnv("prod", {
+      ticker: market.ticker,
+      side: decision.side,
+      action: "buy",
+      count: contracts,
+      type: "limit",
+      yesPriceCents: decision.side === "yes" ? makerCents : undefined,
+      noPriceCents: decision.side === "no" ? makerCents : undefined,
+      exchangeIndex,
+      restingExpirationTs: expirationTs,
+    });
+    if (placed.dryRun) throw new Error("unexpected dry-run result from prod maker path");
+
+    // The resting order may fill immediately (if the book had crossed) or rest.
+    if (placed.fillCount > 0) {
+      const fillPrice = placed.averageFillPriceYesLeg != null
+        ? (decision.side === "yes" ? placed.averageFillPriceYesLeg : 1 - placed.averageFillPriceYesLeg)
+        : makerPrice;
+      const filled = placed.fillCount;
+      storage.createLiveTrade(makerRow(candidate, spec, market, decision.side, fillPrice, filled,
+        filled * fillPrice, placed.averageFeePaid != null ? placed.averageFeePaid * filled : kalshiTradingFee(filled, fillPrice),
+        "open", placed.orderId, null, null, nowMs, overlay));
+      return;
+    }
+    // Resting: record the intent; reconcileMakerOrders resolves it.
+    storage.createLiveTrade(makerRow(candidate, spec, market, decision.side, makerPrice, contracts, cost, 0,
+      "resting", placed.orderId, null, new Date(expirationTs * 1000).toISOString(), nowMs, overlay));
+  } catch (err) {
+    storage.createLiveTrade(makerRow(candidate, spec, market, decision.side, makerPrice, 0, 0, 0,
+      "failed", null, err instanceof Error ? err.message : String(err), null, nowMs, overlay));
+  }
+}
+
+function makerRow(
+  candidate: CandidateStrategy, spec: KalshiStrategySpec, market: KalshiMarket,
+  side: "yes" | "no", entryPrice: number, contracts: number, cost: number, fee: number,
+  status: string, orderId: string | null, error: string | null, makerExpiresAt: string | null,
+  nowMs: number, overlay: ReturnType<typeof streamOverlay>,
+) {
+  return {
+    candidateId: candidate.id,
+    candidateName: candidate.name,
+    ticker: market.ticker,
+    series: spec.series,
+    side,
+    entryPrice,
+    contracts,
+    cost,
+    fee,
+    status,
+    orderId,
+    error,
+    result: null,
+    netPnl: null,
+    makerExpiresAt,
+    spotAtEntry: kalshiProdStream.getSpot(spec.series)?.value ?? null,
+    spotStrike: market.open_time
+      ? kalshiProdStream.getSpotAt(spec.series, new Date(market.open_time).getTime())
+      : null,
+    transport: overlay.fresh ? "stream" : "rest",
+    placedAt: new Date().toISOString(),
+    marketCloseAt: market.close_time ?? new Date(nowMs).toISOString(),
+    settledAt: null,
+  };
+}
+
+// Reconcile resting maker orders each tick: fill -> open; expired unfilled ->
+// taker fallback (if the spec still passes) or unfilled. The exchange
+// auto-cancels at expiration_ts, so nothing leaks; a belt-and-suspenders
+// cancel covers a stuck order.
+async function reconcileMakerOrders() {
+  const resting = storage.getRestingLiveTrades();
+  for (const row of resting) {
+   try {
+    if (!row.orderId) {
+      storage.updateLiveTrade(row.id, { status: "unfilled", makerExpiresAt: null });
+      continue;
+    }
+    const expired = row.makerExpiresAt != null && Date.now() >= Date.parse(row.makerExpiresAt);
+    const info = await getKalshiOrderEnv("prod", row.orderId);
+    const terminal = info?.status != null
+      && ["executed", "canceled", "cancelled", "expired", "closed"].includes(info.status.toLowerCase());
+    // Book the fill only once the order can no longer grow (fully done, or its
+    // good-till-time lapsed) - otherwise a partial fill mid-rest would be
+    // frozen as final and we'd stop watching for the rest.
+    if (info && info.fillCount > 0 && (terminal || expired)) {
+      const fillPrice = info.averageFillPriceYesLeg != null
+        ? (row.side === "yes" ? info.averageFillPriceYesLeg : 1 - info.averageFillPriceYesLeg)
+        : row.entryPrice;
+      const filled = info.fillCount;
+      storage.updateLiveTrade(row.id, {
+        status: "open", entryPrice: fillPrice, contracts: filled, cost: filled * fillPrice,
+        fee: info.averageFeePaid != null ? info.averageFeePaid * filled : kalshiTradingFee(filled, fillPrice),
+        makerExpiresAt: null,
+      });
+      continue;
+    }
+    if (!expired) continue; // still resting, still within its window (no fill yet)
+
+    // Expired with no fill. Make sure the order is truly dead, then fall back.
+    try { await cancelKalshiOrderEnv("prod", row.orderId); } catch { /* already gone/expired */ }
+
+    // Taker fallback ONLY while the window is still open and the spec still
+    // says go - never chase a stale window. Needs the spec, so the candidate
+    // must still exist; if it was culled mid-rest, just mark the miss.
+    const candidate = row.candidateId != null ? storage.getCandidateById(row.candidateId) : undefined;
+    let fellBack = false;
+    if (candidate) {
+      try {
+        const spec = clampSpec(JSON.parse(candidate.spec));
+        const { markets } = await getKalshiMarkets({ seriesTicker: row.series, status: "open", limit: 20 });
+        const market = markets.find((m) => m.ticker === row.ticker) ?? null;
+        if (market) {
+          const overlay = streamOverlay(market);
+          const decision = await decideLiveEntry(spec, overlay.m, Date.now());
+          if (decision.ok && decision.side === row.side && passesLivePriceGuards(decision.entryPrice)) {
+            await placeLiveTakerOrder(candidate, spec, market, decision, overlay, Date.now(), row.id);
+            fellBack = true;
+          }
+        }
+      } catch { /* fall through to unfilled */ }
+    }
+    if (!fellBack) {
+      storage.updateLiveTrade(row.id, { status: "unfilled", contracts: 0, cost: 0, fee: 0, makerExpiresAt: null });
+    }
+   } catch (err) {
+     console.error(`${new Date().toISOString()} [error] [live-executor] maker reconcile failed for row ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+   }
+  }
+}
+
 let settleCounter = 0;
 async function runLiveTick() {
   // Stream mode ticks every ~2s; settlement checks stay on a ~16s cadence.
@@ -642,6 +860,10 @@ async function runLiveTick() {
   // Salvage runs before the entry gates: closing risk is always allowed,
   // even while disarmed, curfewed, or cooling down.
   await runSalvageSweep();
+  // Reconcile resting maker orders every tick regardless of arm state: a
+  // resting order placed while armed must still be resolved (filled, or
+  // expired -> fallback/unfilled) even if the desk disarmed meanwhile.
+  await reconcileMakerOrders();
 
   if (!liveEnabled()) return;
   if (!withinLiveTradingHours()) return;
@@ -656,7 +878,8 @@ async function runLiveTick() {
   // 0 = no daily cap. The rails that actually bound risk are max open
   // positions, one-position-per-window, and the cumulative-loss kill switch.
   const maxPerDay = Math.max(0, parseInt(storage.getSetting("live_max_trades_per_day") || "20", 10));
-  if (storage.getUnsettledLiveTrades().length >= maxOpen) return;
+  // Pending = filled-open + resting maker orders; both are live exposure.
+  if (storage.getPendingLiveTrades().length >= maxOpen) return;
   if (maxPerDay > 0 && liveTradesToday() >= maxPerDay) return;
 
   const specs = armed.map((candidate) => ({ candidate, spec: clampSpec(JSON.parse(candidate.spec)) }));
@@ -688,7 +911,7 @@ async function runLiveTick() {
       // Real money: one position per window, full stop - correlated strategies
       // never stack live.
       if (storage.getLiveTrades(50).some((t) => t.ticker === active.market.ticker && t.status !== "failed")) continue;
-      if (storage.getUnsettledLiveTrades().length >= maxOpen) break;
+      if (storage.getPendingLiveTrades().length >= maxOpen) break;
       try {
         await tryLiveEntry(candidate, spec, active.market, nowMs);
       } catch (err) {
@@ -735,7 +958,9 @@ export function registerLiveExecutorRoutes(app: Express) {
       prodConfigured: getKalshiAuthStatusEnv("prod").configured,
       balanceCents,
       armedStrategies: armed.map((c) => ({ id: c.id, name: c.name, demoTrades: c.demoTrades, demoNetPnl: c.demoNetPnl })),
-      openTrades: storage.getUnsettledLiveTrades().length,
+      openTrades: storage.getPendingLiveTrades().length,
+      restingOrders: storage.getRestingLiveTrades().length,
+      makerTimeoutSec: makerTimeoutSec(),
       tradesToday: liveTradesToday(),
       orderSize: await computeLiveStake(),
       autoStake: storage.getSetting("live_auto_stake") === "true",

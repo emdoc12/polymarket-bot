@@ -238,6 +238,11 @@ export type KalshiOrderRequest = {
   buyMaxCostCents?: number;
   // Pre-resolved demo exchange shard; looked up per-ticker when omitted.
   exchangeIndex?: number;
+  // Maker (passive) entry: unix seconds at which a RESTING limit order
+  // should auto-expire. When set, the order is placed good-till-time
+  // instead of immediate-or-cancel, so it rests in the book until it fills
+  // or the exchange cancels it at this timestamp (no leaked orders).
+  restingExpirationTs?: number;
 };
 
 // Per Kalshi's exchange-sharding rollout (Aug 2026), collateral must be
@@ -313,18 +318,26 @@ function buildOrderPayload(order: KalshiOrderRequest) {
   }
   const yesLegPrice = order.side === "yes" ? cents / 100 : (100 - cents) / 100;
 
-  return {
+  const base: Record<string, unknown> = {
     ticker: order.ticker,
     client_order_id: crypto.randomUUID(),
     side: order.side === "yes" ? "bid" : "ask",
     count: count.toFixed(2),
     price: yesLegPrice.toFixed(4),
+    self_trade_prevention_type: "taker_at_cross",
+  };
+  if (order.restingExpirationTs != null && Number.isFinite(order.restingExpirationTs)) {
+    // Good-till-time RESTING order: sits in the book capturing the spread
+    // until it fills or the exchange auto-cancels it at expiration_ts. Never
+    // leaks - the timestamp is the exchange's own kill switch for the order.
+    base.expiration_ts = Math.floor(order.restingExpirationTs);
+  } else {
     // IOC at our limit: fill whatever is available at or better than the
     // price right now, cancel the rest - matches the executor's fill-at-entry
     // semantics and never leaves resting orders behind.
-    time_in_force: "immediate_or_cancel",
-    self_trade_prevention_type: "taker_at_cross",
-  };
+    base.time_in_force = "immediate_or_cancel";
+  }
+  return base;
 }
 
 // Ring buffer of intended orders while in dry-run mode, so strategy behavior
@@ -402,6 +415,37 @@ export async function placeKalshiOrderEnv(env: KalshiEnv, order: KalshiOrderRequ
 
 export async function cancelKalshiOrder(orderId: string) {
   return kalshiPrivateFetch("DELETE", `/portfolio/orders/${encodeURIComponent(orderId)}`);
+}
+
+export async function cancelKalshiOrderEnv(env: KalshiEnv, orderId: string) {
+  return kalshiPrivateFetchEnv(env, "DELETE", `/portfolio/orders/${encodeURIComponent(orderId)}`);
+}
+
+// Single-order status (for reconciling resting maker orders): returns the
+// order's current fill_count / average price / fee / status. Tolerant of the
+// V2 response nesting the fields under `order`.
+export async function getKalshiOrderEnv(env: KalshiEnv, orderId: string): Promise<{
+  fillCount: number;
+  averageFillPriceYesLeg: number | null;
+  averageFeePaid: number | null;
+  status: string | null;
+} | null> {
+  try {
+    const raw = await kalshiPrivateFetchEnv(env, "GET", `/portfolio/orders/${encodeURIComponent(orderId)}`);
+    const o = (raw?.order ?? raw) as Record<string, unknown>;
+    const parseFp = (value: unknown) => {
+      const parsed = parseFloat(String(value ?? ""));
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    return {
+      fillCount: parseFp(o?.fill_count) ?? 0,
+      averageFillPriceYesLeg: parseFp(o?.average_fill_price ?? o?.yes_price),
+      averageFeePaid: parseFp(o?.average_fee_paid),
+      status: typeof o?.status === "string" ? (o.status as string) : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function getKalshiBalanceEnv(env: KalshiEnv) {

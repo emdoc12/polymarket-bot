@@ -187,8 +187,13 @@ export const liveTrades = sqliteTable("live_trades", {
   contracts: integer("contracts").notNull(),
   cost: real("cost").notNull(),
   fee: real("fee").notNull(),
-  status: text("status").notNull(),          // open | settled_won | settled_lost | unfilled | failed
+  status: text("status").notNull(),          // resting | open | settled_won | settled_lost | unfilled | failed
   orderId: text("order_id"),
+  // Maker (passive) entry: when a spec sets makerJoinCents>0 the executor
+  // rests a limit order below the ask to capture the spread, recorded with
+  // status "resting" until it fills, expires, or falls back to a taker order.
+  // maker_expires_at is when the resting order's good-till-time lapses.
+  makerExpiresAt: text("maker_expires_at"),
   error: text("error"),
   result: text("result"),
   netPnl: real("net_pnl"),
