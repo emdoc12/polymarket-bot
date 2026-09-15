@@ -1053,8 +1053,20 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
                 if (guests.length === 0) return "";
                 const byStatus: Record<string, number> = {};
                 for (const g of guests) byStatus[g.status] = (byStatus[g.status] ?? 0) + 1;
-                const newest = guests.slice(-5).map((g) => `#${g.id} ${g.name.slice(0, 55)} [${g.status}]`).join("; ");
-                return `\nGUEST DESK STATUS (glm_): ${guests.length} candidates filed (${Object.entries(byStatus).map(([k, v]) => `${v} ${k}`).join(", ")}). Newest: ${newest}. Fresh gated specs need days of walk-forward windows before they rank into your review list - "not yet reviewed" is NOT "not producing". Judge the guest desk on settled evidence when it arrives.`;
+                // Show the guest cells that ARE accumulating walk-forward fills,
+                // by net P&L. Without this the PM reads "zero settled" and calls
+                // the guest desk defective - but its gated cells DO earn fills at
+                // the same (sample-starved) rate as house cells; they're just
+                // younger. "Settled" means reaching the 15-fill gate, which the
+                // whole gated/value family is far from - not a guest-only defect.
+                const withFills = guests
+                  .filter((g) => (g.liveTrades ?? 0) > 0)
+                  .sort((a, b) => (b.liveNetPnl ?? 0) - (a.liveNetPnl ?? 0));
+                const producing = withFills.slice(0, 5)
+                  .map((g) => `#${g.id} ${(g.liveNetPnl ?? 0) >= 0 ? "+" : ""}$${(g.liveNetPnl ?? 0).toFixed(0)}/${g.liveTrades}wf`)
+                  .join(", ");
+                const newest = guests.slice(-4).map((g) => `#${g.id} ${g.name.slice(0, 45)}`).join("; ");
+                return `\nGUEST DESK STATUS (glm_): ${guests.length} filed (${Object.entries(byStatus).map(([k, v]) => `${v} ${k}`).join(", ")}); ${withFills.length} already accumulating walk-forward fills. Top producing: ${producing || "none yet"}. Newest: ${newest}. Guest gated cells earn fills at the SAME sample-starved rate as house cells (the whole value/gated family tops out at ~4 walk-forward fills - nobody is near the 15-fill gate yet), so "guest 0 settled" is family-wide sampling latency, NOT a guest-desk defect. Judge guest vs house on P&L-per-fill among cells with fills, not on absolute settled counts.`;
               })(),
               `\nCandidates currently under review (decide each by candidateId):`,
               JSON.stringify(underReview.map((c) => describeCandidate(c, fillStats, liveStats, auditionStats)), null, 1),
