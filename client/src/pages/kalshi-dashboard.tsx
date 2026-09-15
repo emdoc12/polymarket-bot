@@ -460,7 +460,7 @@ export default function KalshiDashboard() {
               )}
               {liveStatus?.trailing?.mode === "defensive" && (
                 <Badge className="text-[10px] bg-amber-500/15 text-amber-400 border-transparent">
-                  defensive · ½ stakes (−${liveStatus.trailing.drawdown.toFixed(0)} from peak)
+                  defensive · ½ stakes · −${liveStatus.trailing.drawdown.toFixed(0)} from rebased high ({liveStatus.trailing.hwm >= 0 ? "+" : "−"}${Math.abs(liveStatus.trailing.hwm).toFixed(0)})
                 </Badge>
               )}
               {liveStatus?.trailing?.mode === "paused" && (
