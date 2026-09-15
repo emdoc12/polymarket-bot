@@ -61,6 +61,7 @@ const SpecProposalSchema = z.object({
   catalystMinutes: z.number(),
   maxSpreadCents: z.number(),
   entryWindowSeconds: z.number(),
+  prevWindowMode: z.enum(["off", "with", "against"]),
   rationale: z.string(),
 });
 
@@ -117,6 +118,7 @@ const SPEC_SPACE_DOC = `Strategy spec fields (all trades are $10 stakes on Kalsh
 - minVol1mBps / maxVol1mBps: realized-volatility regime gate (your GRAMMAR REQUEST, granted). Only enter when the UNDERLYING's trailing 30-min realized vol - stddev of 1-minute log returns, in basis points - is inside the range; 0 disables a bound. Typical BTC/ETH: ~4-10 bps calm/chop, ~12-30 bps trending, 40+ storm. Use a FLOOR (e.g. minVol1mBps 8-12) to keep momentum/trend specs out of the chop where losses streak, a CAP to keep specs out of storms. CRYPTO ONLY (commodities have no underlying feed - leave both 0 there). Fully backtested; a gated spec skips windows where spot history can't verify the regime.
 - dowMaskEt: day-of-week bitmask in ET, bit 0=Sunday ... bit 6=Saturday; 127 = every day. Examples: 62 = Mon-Fri, 16 = Thursday only (EIA natgas storage), 8 = Wednesday only (EIA crude inventories), 40 = Wed+Thu. Granted per your GRAMMAR REQUEST so catalyst-driven specs target their days instead of diluting samples across dead days. Fully backtested like every field.
 - minHourEt / maxHourEt: 0-24, entries allowed only in this ET-hour window (0 and 24 = all day; minHourEt > maxHourEt wraps overnight). Fully backtested like every other field. Live forensics show strong time-of-day regime structure (overnight 0-8 ET underperforms daytime badly), so hour-banded variants of proven specs are fertile ground - but let the backtests decide, not the anecdote.
+- prevWindowMode: "off" | "with" | "against" (your GRAMMAR REQUEST x12, granted): condition on how the immediately preceding 15-min window in the SAME series resolved. "with" = only enter when your chosen side agrees with the last window's resolution (continuation - covers your require_same_direction AND skip_after_loss: a spec never re-fights the direction that just beat it); "against" = only enter opposing it (reversal specs). Backtested via each settled window's actual predecessor; live fetches the just-settled prior market. An entry whose prior result is unknown is skipped. Built on your forensics: 47% loss-after-loss vs 44% autocorrelation the portfolio-wide cooldown cannot express per-series.
 - maxSpreadCents: 0-30, 0 = off (your GRAMMAR REQUEST, granted): refuse entry when the quoted YES spread (ask - bid) is wider than this many cents. Built for the thin commodity venues (GOLD/WTI/SILVER and the thinner metals) where the real book is often two market-maker quotes wide and a backtest fill is fiction - a commodity spec without this gate is trusting quotes nobody may honor. Backtested from candle bid/ask; enforced live on the same quotes the entry uses. Sensible values: 3-6c strict, 8-12c permissive. Resting-depth was NOT granted as a spec field (no historical depth data to backtest against) - the prod audition's depth-confirmed would-fill records remain the depth check, so read audition fillable rates before trusting any thin-venue spec.
 COMPLIANCE: the gates above (sideFilter, trendAlignHours, catalystMode, dowMaskEt, vol gate, maxSpreadCents, hour bands) were granted because live evidence demanded them - a proposal batch that leaves every gate at its neutral default while the PM's focus or the forensics digests call for regime/direction/liquidity discipline is non-responsive. When the evidence in your context supports a gate, USE it in at least some proposals; ungated clones of existing geometry are the first candidates the PM culls.
 Known result: naive momentum at T-300s loses money despite ~60% win rate because favorites are priced rich. The edge, if any, lives in timing, price bands, signal thresholds, and trading hours.
@@ -231,7 +233,7 @@ RAIL PROPOSALS ADJUDICATED (do not re-propose without NEW evidence): live_cooldo
 
 GUEST DESK: proposals whose creator starts with "glm_" come from a guest research team (GLM, a different AI vendor) invited to test whether independent minds find edges the incumbent desk misses. Judge them by evidence exactly like every other candidate - no deference, no prejudice - but DO note in commentary when the guest desk's candidates meaningfully outperform or underperform the house desk's, because the human is explicitly evaluating whether the guest adds value.
 
-GRAMMAR REQUESTS ANSWERED (do not re-request): entryWindowSeconds GRANTED 2026-09-15 exactly as you specified (first in-band executable price within [T, T-window]; backtest walks candles, executors take the first passing tick; 0 = legacy snapshot so no existing record is disturbed) - direct every new gated spec and the next mutations of the nine survivors to carry a window so sampling unblocks. CME settlement-index feed for commodities DECLINED by the human 2026-09-14 (like Pyth before it): licensed real-time commodity data costs ~$1k/month and the human's bar is explicit - a paid feed happens only if the desk can out-earn MORE THAN DOUBLE its cost in the same period, which a $50 test account cannot. Until then commodities trade on crowd-price-relative rules (momentum/trend/hour/dow/spread gates) and the PROD AUDITION is the arbiter of whether commodity edge exists at all - prove the edge with would-be records first, then the feed becomes a scaling decision. Stop re-requesting; revisit only when the human raises account scale. maxPriceOverMidCents (per-spec entry limit-offset) ANSWERED 2026-09-13 as already expressible: with top-of-book quotes the executable price sits exactly HALF THE QUOTED SPREAD over mid on either side (yes pays ask - mid = spread/2; no pays mid - bid = spread/2), so your pay-up gate IS maxSpreadCents - set maxSpreadCents to twice the offset you want (e.g. 2c over mid = maxSpreadCents 4) on CRYPTO specs too, it was never commodity-only. If the real concern is absolute entry richness rather than pay-up vs mid, that is what a tighter maxEntryPrice ceiling expresses (real money already shows where: sub-60c pays, 60c+ bleeds). commodity liquidity gate granted 2026-09-13 as maxSpreadCents (max quoted YES spread in cents, backtested + live-enforced; the resting-depth half was declined - no historical depth exists to backtest, and the prod audition's depth-confirmed would-fills already measure it - so judge thin venues by audition fillable rates). Perp minHourEt/maxHourEt + sideBias granted 2026-09-13, and perp minVol1mBps/maxVol1mBps + trendAlignHours/trendAlignMode granted 2026-09-14 (computed from the perp's own candles; the full "long only when trending up out of chop" mandate is now expressible - stop restating it, direct the perp workers to use it). catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
+GRAMMAR REQUESTS ANSWERED (do not re-request): prevWindowMode GRANTED 2026-09-15 ("with"/"against" the prior window's resolution; your skip_after_loss maps to "with" - skipping when the previous window went against your side IS requiring agreement). ALSO FIXED 2026-09-15: your review list was ranked purely by accumulated walk-forward P&L, so fresh gated/guest specs could never surface - 15 spotlight slots are now reserved for gated/windowed/value/guest/mandate candidates; expect to finally see them and judge accordingly, and note their samples are young. Worker structured-output crash budget raised (max_tokens 6000->10000). entryWindowSeconds GRANTED 2026-09-15 exactly as you specified (first in-band executable price within [T, T-window]; backtest walks candles, executors take the first passing tick; 0 = legacy snapshot so no existing record is disturbed) - direct every new gated spec and the next mutations of the nine survivors to carry a window so sampling unblocks. CME settlement-index feed for commodities DECLINED by the human 2026-09-14 (like Pyth before it): licensed real-time commodity data costs ~$1k/month and the human's bar is explicit - a paid feed happens only if the desk can out-earn MORE THAN DOUBLE its cost in the same period, which a $50 test account cannot. Until then commodities trade on crowd-price-relative rules (momentum/trend/hour/dow/spread gates) and the PROD AUDITION is the arbiter of whether commodity edge exists at all - prove the edge with would-be records first, then the feed becomes a scaling decision. Stop re-requesting; revisit only when the human raises account scale. maxPriceOverMidCents (per-spec entry limit-offset) ANSWERED 2026-09-13 as already expressible: with top-of-book quotes the executable price sits exactly HALF THE QUOTED SPREAD over mid on either side (yes pays ask - mid = spread/2; no pays mid - bid = spread/2), so your pay-up gate IS maxSpreadCents - set maxSpreadCents to twice the offset you want (e.g. 2c over mid = maxSpreadCents 4) on CRYPTO specs too, it was never commodity-only. If the real concern is absolute entry richness rather than pay-up vs mid, that is what a tighter maxEntryPrice ceiling expresses (real money already shows where: sub-60c pays, 60c+ bleeds). commodity liquidity gate granted 2026-09-13 as maxSpreadCents (max quoted YES spread in cents, backtested + live-enforced; the resting-depth half was declined - no historical depth exists to backtest, and the prod audition's depth-confirmed would-fills already measure it - so judge thin venues by audition fillable rates). Perp minHourEt/maxHourEt + sideBias granted 2026-09-13, and perp minVol1mBps/maxVol1mBps + trendAlignHours/trendAlignMode granted 2026-09-14 (computed from the perp's own candles; the full "long only when trending up out of chop" mandate is now expressible - stop restating it, direct the perp workers to use it). catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 
@@ -272,7 +274,7 @@ async function callGlmJson(system: string, task: string): Promise<Record<string,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
       model: getGlmWorkerModel(),
-      max_tokens: 6000,
+      max_tokens: 10000,
       // GLM 4.5+ are reasoning models: without this they burn the budget on
       // a reasoning_content stream and may leave content empty. We want the
       // JSON, not the deliberation.
@@ -283,7 +285,7 @@ async function callGlmJson(system: string, task: string): Promise<Record<string,
         { role: "user", content: task },
       ],
     }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(150_000),
   });
   if (!resp.ok) {
     const body = (await resp.text().catch(() => "")).slice(0, 200);
@@ -726,7 +728,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       try {
         const response = await client.messages.parse({
           model: workerModel,
-          max_tokens: 6000,
+          max_tokens: 10000,
           system: role.system,
           messages: [{ role: "user", content: role.buildTask(workerContext) }],
           output_config: { format: zodOutputFormat(WorkerOutputSchema) },
@@ -763,7 +765,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       try {
         const response = await client.messages.parse({
           model: workerModel,
-          max_tokens: 6000,
+          max_tokens: 10000,
           system: role.system,
           messages: [{ role: "user", content: role.buildTask(contextText) }],
           output_config: { format: zodOutputFormat(PerpWorkerOutputSchema) },
@@ -978,10 +980,33 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
 
     // 4. PM reviews everything under test, strongest live evidence first so the
     // contenders are always inside the review window.
-    const underReview = storage.getCandidateStrategies("testing")
-      .filter((c) => c.lastTestedAt != null)
-      .sort((a, b) => (b.liveNetPnl ?? -Infinity) - (a.liveNetPnl ?? -Infinity))
-      .slice(0, 40);
+    // Review queue: top of the walk-forward leaderboard PLUS reserved
+    // spotlight slots. Ranking purely by accumulated P&L meant a fresh gated
+    // or guest spec with 0-2 small trades could NEVER outrank legacy debris,
+    // so the PM spent 17 cycles insisting "not one candidate under review
+    // carries a gate" while dozens sat filed - the queue itself was the
+    // filing-discipline failure it was diagnosing. Spotlight = gated /
+    // windowed / value / guest / mandate specs, evidence-first then newest.
+    const allTesting = storage.getCandidateStrategies("testing").filter((c) => c.lastTestedAt != null);
+    const isSpotlight = (c: CandidateStrategy) => {
+      if (c.kind === "perp") return false;
+      if (c.createdBy?.startsWith("glm") || c.createdBy === "mandate_executor") return true;
+      try {
+        const sp = JSON.parse(c.spec);
+        return sp.sideRule === "value" || sp.sideFilter !== "both" || (sp.trendAlignHours ?? 0) > 0
+          || (sp.minVol1mBps ?? 0) > 0 || (sp.maxVol1mBps ?? 0) > 0 || sp.catalystMode === "require"
+          || sp.catalystMode === "avoid" || (sp.maxSpreadCents ?? 0) > 0 || (sp.entryWindowSeconds ?? 0) > 0
+          || sp.prevWindowMode === "with" || sp.prevWindowMode === "against";
+      } catch { return false; }
+    };
+    const byPnl = [...allTesting].sort((a, b) => (b.liveNetPnl ?? -Infinity) - (a.liveNetPnl ?? -Infinity));
+    const top = byPnl.slice(0, 25);
+    const topIds = new Set(top.map((c) => c.id));
+    const spotlight = allTesting
+      .filter((c) => !topIds.has(c.id) && isSpotlight(c))
+      .sort((a, b) => ((b.liveTrades ?? 0) - (a.liveTrades ?? 0)) || (b.id - a.id))
+      .slice(0, 15);
+    const underReview = [...top, ...spotlight];
     let promoted = 0;
     let rejected = 0;
     let focus: string | null = null;

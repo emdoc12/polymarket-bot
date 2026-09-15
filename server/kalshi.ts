@@ -104,6 +104,33 @@ export async function getKalshiMarkets(params: {
   };
 }
 
+// Result of the window that closed right as the given window opened (the
+// prior 15-min window in the series). Settled results never change, so the
+// cache is per series+window-bucket with no TTL; a miss (not yet settled,
+// API hiccup) caches null briefly via a short negative entry.
+const prevResultCache = new Map<string, { at: number; result: "yes" | "no" | null }>();
+export async function getPrevWindowResult(seriesTicker: string, openMs: number): Promise<"yes" | "no" | null> {
+  const key = `${seriesTicker}|${Math.floor(openMs / 900_000)}`;
+  const hit = prevResultCache.get(key);
+  if (hit && (hit.result !== null || Date.now() - hit.at < 60_000)) return hit.result;
+  let result: "yes" | "no" | null = null;
+  try {
+    const { markets } = await getKalshiMarkets({ seriesTicker, status: "settled", limit: 10 });
+    for (const m of markets) {
+      const closeMs = m.close_time ? new Date(m.close_time).getTime() : null;
+      if (closeMs != null && Math.abs(closeMs - openMs) <= 90_000) {
+        result = m.result === "yes" ? "yes" : m.result === "no" ? "no" : null;
+        break;
+      }
+    }
+  } catch {
+    result = null;
+  }
+  if (prevResultCache.size > 500) prevResultCache.clear();
+  prevResultCache.set(key, { at: Date.now(), result });
+  return result;
+}
+
 export async function getKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
   const data = await kalshiFetch(`/markets/${encodeURIComponent(ticker)}`) as { market?: KalshiMarket };
   return data.market ?? null;
@@ -212,6 +239,15 @@ export type KalshiStrategySpec = {
   // window, so live simply widens that tolerance to the spec's window -
   // first passing tick enters, dedupe prevents seconds attempts.
   entryWindowSeconds: number;
+  // Prior-window continuation gate (PM GRAMMAR REQUEST x12, granted
+  // 2026-09-15): condition on how the immediately preceding 15-min window in
+  // the SAME series resolved. "with" only enters when the chosen side agrees
+  // with the previous window's resolution (continuation - the PM's
+  // require_same_direction, and skip_after_loss for a would-be repeat);
+  // "against" only enters opposing it (reversal). "off" = no gate. Built on
+  // the forensics: P(loss|prior loss) 47% vs 44% window-to-window
+  // autocorrelation the portfolio-wide cooldown cannot express per-series.
+  prevWindowMode: "off" | "with" | "against";
   // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
   // window when the quoted YES spread (ask - bid) is wider than this many
   // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
@@ -313,6 +349,7 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     catalystMinutes: Math.round(clampNum(raw.catalystMinutes, 5, 120, 30)),
     maxSpreadCents: Math.round(clampNum(raw.maxSpreadCents, 0, 30, 0)),
     entryWindowSeconds: Math.round(clampNum(raw.entryWindowSeconds, 0, 300, 0)),
+    prevWindowMode: raw.prevWindowMode === "with" || raw.prevWindowMode === "against" ? raw.prevWindowMode : "off",
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -356,6 +393,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.catalystMode !== "off" ? [spec.catalystMode, spec.catalystMinutes] : []),
     ...(spec.maxSpreadCents > 0 ? [`sprd${spec.maxSpreadCents}`] : []),
     ...(spec.entryWindowSeconds > 0 ? [`win${spec.entryWindowSeconds}`] : []),
+    ...(spec.prevWindowMode !== "off" ? [`prev${spec.prevWindowMode}`] : []),
   ].join("|");
 }
 
@@ -363,6 +401,9 @@ export type SettledMarketData = {
   market: KalshiMarket;
   candles: KalshiCandle[];
   closeMs: number;
+  // Resolution of the immediately preceding window in the same series
+  // (close ~15 min earlier), for the prevWindowMode gate. null = unknown.
+  prevResult?: "yes" | "no" | null;
   // Underlying spot history for the window (minute closes; Coinbase proxy for
   // the CF index in backtests - live uses the real streamed index).
   spotValueAt?: (tsSec: number) => number | null;
@@ -531,6 +572,22 @@ export async function fetchSettledMarketData(series: string, lookback: number): 
       continue;
     }
   }
+  // Attach each window's predecessor resolution (prevWindowMode gate). The
+  // full settled list is wider than the sliced lookback, so most windows
+  // find their neighbor; edges stay null and gated specs skip them.
+  {
+    const resultByBucket = new Map<number, "yes" | "no">();
+    for (const m of settled) {
+      const c = m.close_time ? new Date(m.close_time).getTime() : null;
+      if (c != null && (m.result === "yes" || m.result === "no")) {
+        resultByBucket.set(Math.round(c / 900_000), m.result);
+      }
+    }
+    for (const d of data) {
+      const openMs = d.market.open_time ? new Date(d.market.open_time).getTime() : d.closeMs - 900_000;
+      d.prevResult = resultByBucket.get(Math.round(openMs / 900_000)) ?? null;
+    }
+  }
   // Attach underlying spot history (one range fetch shared by all windows) so
   // "value" specs can be evaluated like any other rule. Prefer the TRUE
   // settlement index via the CF Benchmarks passthrough; fall back to the
@@ -652,6 +709,13 @@ function evaluateSpecAtInstant(spec: KalshiStrategySpec, entry: SettledMarketDat
   if (!side) return null;
   if (spec.sideFilter === "yes_only" && side !== "YES") return null;
   if (spec.sideFilter === "no_only" && side !== "NO") return null;
+  if (spec.prevWindowMode !== "off") {
+    const prev = entry.prevResult;
+    if (prev !== "yes" && prev !== "no") return null; // unverifiable -> skip
+    const prevUp = prev === "yes";
+    const sideUp = side === "YES";
+    if (spec.prevWindowMode === "with" ? sideUp !== prevUp : sideUp === prevUp) return null;
+  }
   if (spec.trendAlignHours > 0) {
     if (!entry.spotValueAt) return null;
     const spotNow = entry.spotValueAt(entryTs);

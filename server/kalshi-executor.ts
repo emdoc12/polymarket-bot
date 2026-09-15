@@ -18,7 +18,7 @@ import {
   volPerSqrtSecTo1mBps,
   type KalshiMarket,
   type KalshiStrategySpec,
-} from "./kalshi";
+getPrevWindowResult } from "./kalshi";
 import {
   ensureShardFunds,
   getDemoMarketExchangeIndex,
@@ -152,6 +152,15 @@ export async function decideLiveEntry(
   if (!side) return { ok: false, reason: "no side decision" };
   if (spec.sideFilter === "yes_only" && side !== "yes") return { ok: false, reason: "side filter (yes_only)" };
   if (spec.sideFilter === "no_only" && side !== "no") return { ok: false, reason: "side filter (no_only)" };
+  if (spec.prevWindowMode !== "off") {
+    const openMs = market.open_time ? new Date(market.open_time).getTime() : null;
+    const prev = openMs != null ? await getPrevWindowResult(spec.series, openMs) : null;
+    if (prev == null) return { ok: false, reason: "prev-window gate set but prior result unavailable" };
+    const prevUp = prev === "yes";
+    if (spec.prevWindowMode === "with" ? (side === "yes") !== prevUp : (side === "yes") === prevUp) {
+      return { ok: false, reason: "prev-window continuation gate" };
+    }
+  }
   if (spec.trendAlignHours > 0) {
     const spotNow = kalshiProdStream.getSpot(spec.series);
     const spotThen = kalshiProdStream.getSpotAt(spec.series, nowMs - spec.trendAlignHours * 3600_000, 10 * 60_000);
