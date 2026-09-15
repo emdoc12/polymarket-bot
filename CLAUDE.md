@@ -6,11 +6,21 @@ working on this repo. Last full update: 2026-09-12 (v1.13.0 era).
 ## What this is
 
 An autonomous trading system for Kalshi 15-minute crypto/commodity up/down
-markets, TRADING REAL MONEY on a production Kalshi account. A Claude Opus PM
-directs Haiku specialist agents ("Strategy Lab") that invent strategy specs,
-backtest them on real settled markets, walk-forward validate, and promote.
-Promoted strategies flow: demo execution → prod audition (risk-free rehearsal
-on real orderbooks) → live allowlist (real dollars).
+markets. A Claude Opus PM directs Haiku specialist agents ("Strategy Lab")
+that invent strategy specs, backtest them on real settled markets,
+walk-forward validate, and promote.
+
+**REGIME as of 2026-09-15 (human directive):** DEMO is RETIRED and the LIVE
+real-money account is PAUSED (disarmed). The demo exchange's seeded-MM
+counterparties gave false-hope fills (~+$1,338 demo that never transferred;
+real account bled to ~-$10 from $50). Demo executor is OFF
+(kalshi_executor_enabled=false); demo evidence no longer qualifies anything.
+The PROD AUDITION (risk-free rehearsal on REAL production orderbooks) is now
+the primary and forward-looking evidence gate - the honest simulator. The
+desk's job: prove a robust edge on the audition worth re-arming real money
+at scale. Re-arming live is a human-only decision (POST /api/live/arm).
+Promoted strategies now flow: discovery → walk-forward → prod audition
+(the arena). Live allowlist exists but is dormant while disarmed.
 
 Stack: Node/Express + TypeScript, esbuild → dist/index.cjs, React/Vite/
 Tailwind/shadcn client, SQLite via Drizzle (better-sqlite3), additive

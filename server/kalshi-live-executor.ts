@@ -366,13 +366,14 @@ function computeLiveArmedStrategies(): CandidateStrategy[] {
       const audition = auditionByCandidate.get(c.id);
       const live = liveByCandidate.get(c.id);
       const auditionOk = audition != null && audition.settled >= minAudition && audition.netPnl > 0;
-      const demoOk = (c.demoTrades ?? 0) >= minDemo && (c.demoNetPnl ?? 0) > 0;
+      // Demo is RETIRED (2026-09-15): its seeded-MM fills were false hope and
+      // never transferred to real money, so demo can no longer qualify a spec
+      // for the live allowlist. Prod audition is the only gate now.
       const liveBenched = live != null && live.settled >= 25 && live.netPnl < -10;
       const recencyBenched = isRecencyBenched(c);
-      if (recencyBenched && (auditionOk || demoOk)) recencyBenchedNames.push(c.name);
-      const eligible = (auditionOk || demoOk) && (!liveBenched || auditionOk) && !recencyBenched;
-      // Audition-qualified specs sort above demo-only ones regardless of size.
-      const score = auditionOk ? 1_000_000 + audition!.netPnl : (c.demoNetPnl ?? 0);
+      if (recencyBenched && auditionOk) recencyBenchedNames.push(c.name);
+      const eligible = auditionOk && (!liveBenched || auditionOk) && !recencyBenched;
+      const score = audition?.netPnl ?? -Infinity;
       return { c, eligible, score };
     })
     .filter((entry) => entry.eligible)
