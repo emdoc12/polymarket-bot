@@ -258,6 +258,16 @@ export type KalshiStrategySpec = {
   // and walk-forward score a maker spec identically to its taker twin -
   // only the LIVE and AUDITION records diverge. Judge it on real fills.
   makerJoinCents: number;
+  // Model-value band (PM GRAMMAR REQUEST, granted 2026-09-15): for the
+  // "value" rule ONLY, restrict entries to windows where the MODEL's
+  // probability of up (fair value from spot/strike/vol) sits in
+  // [minModelProb, maxModelProb]. This is distinct from the crowd
+  // price band (min/maxEntryPrice): it says WHERE ON THE PROBABILITY
+  // CURVE the mispricing must be - deep-underdog (e.g. 0.05-0.25),
+  // coin-flip (0.40-0.60), etc. - so the desk can locate where value's
+  // edge actually lives. 0/1 = off. Inert for non-value rules.
+  minModelProb: number;
+  maxModelProb: number;
   // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
   // window when the quoted YES spread (ask - bid) is wider than this many
   // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
@@ -361,6 +371,8 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     entryWindowSeconds: Math.round(clampNum(raw.entryWindowSeconds, 0, 600, 0)),
     prevWindowMode: raw.prevWindowMode === "with" || raw.prevWindowMode === "against" ? raw.prevWindowMode : "off",
     makerJoinCents: Math.round(clampNum(raw.makerJoinCents, 0, 10, 0)),
+    minModelProb: clampNum(raw.minModelProb, 0, 1, 0),
+    maxModelProb: clampNum(raw.maxModelProb, 0, 1, 1),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -370,6 +382,13 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
 export function trendAlignOk(side: "yes" | "no" | "YES" | "NO", upTrend: boolean, mode: "with" | "against"): boolean {
   const sideUp = side === "yes" || side === "YES";
   return mode === "with" ? sideUp === upTrend : sideUp !== upTrend;
+}
+
+// Value-rule model-probability gate: is the model's P(up) inside the spec's
+// [minModelProb, maxModelProb]? Off (always true) when the band is 0..1.
+export function modelProbInGate(spec: KalshiStrategySpec, pUp: number): boolean {
+  if (spec.minModelProb <= 0 && spec.maxModelProb >= 1) return true;
+  return pUp >= spec.minModelProb && pUp <= spec.maxModelProb;
 }
 
 export function volGateActive(spec: KalshiStrategySpec): boolean {
@@ -406,6 +425,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.entryWindowSeconds > 0 ? [`win${spec.entryWindowSeconds}`] : []),
     ...(spec.prevWindowMode !== "off" ? [`prev${spec.prevWindowMode}`] : []),
     ...(spec.makerJoinCents > 0 ? [`mkr${spec.makerJoinCents}`] : []),
+    ...(spec.minModelProb > 0 || spec.maxModelProb < 1 ? [`mp${spec.minModelProb.toFixed(2)}-${spec.maxModelProb.toFixed(2)}`] : []),
   ].join("|");
 }
 
@@ -702,6 +722,7 @@ function evaluateSpecAtInstant(spec: KalshiStrategySpec, entry: SettledMarketDat
     const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
     const volPerSqrtSec = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) / Math.sqrt(60);
     const pUp = valueModelProbUp(spot, strike, volPerSqrtSec, Math.floor(entry.closeMs / 1000) - entryTs);
+    if (!modelProbInGate(spec, pUp)) return null;
     const edgeThreshold = Math.max(spec.minSignal, 0.02);
     const edgeYes = pUp - yesAsk;
     const edgeNo = yesBid - pUp; // buying NO at 1-yesBid pays off with prob 1-pUp

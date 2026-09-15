@@ -18,7 +18,7 @@ import {
   volPerSqrtSecTo1mBps,
   type KalshiMarket,
   type KalshiStrategySpec,
-getPrevWindowResult } from "./kalshi";
+getPrevWindowResult , modelProbInGate } from "./kalshi";
 import {
   ensureShardFunds,
   getDemoMarketExchangeIndex,
@@ -126,6 +126,7 @@ export async function decideLiveEntry(
     }
     const closeMs = market.close_time ? new Date(market.close_time).getTime() : nowMs + spec.entrySecondsBeforeClose * 1000;
     const pUp = valueModelProbUp(spot.value, strike, vol, (closeMs - nowMs) / 1000);
+    if (!modelProbInGate(spec, pUp)) return { ok: false, reason: "model prob outside value band" };
     const edgeThreshold = Math.max(spec.minSignal, 0.02);
     const edgeYes = pUp - yesAsk;
     const edgeNo = yesBid - pUp;
