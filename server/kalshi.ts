@@ -277,6 +277,18 @@ export type KalshiStrategySpec = {
   // where unavailable, like the vol and value gates.
   minStrikeDistanceBps: number;
   maxStrikeDistanceBps: number;
+  // Cross-asset lead gate (PM GRAMMAR REQUEST, granted 2026-09-15): condition
+  // a spec on ANOTHER crypto's concurrent move - ETH windows are largely
+  // driven by BTC's move, so trade ETH on BTC's lead. leaderSeries = the
+  // other series to follow ("" = off), leaderLookbackMinutes = how far back
+  // to measure its move, leaderAlignMode "with"/"against" the chosen side.
+  // BACKTEST-INERT by design (like makerJoinCents): the shared backtest spot
+  // path isn't touched, so discovery/walk-forward score it as the ungated
+  // twin - it takes effect only LIVE/AUDITION, where the prod audition (the
+  // arena now) measures its real effect on real books. Crypto only.
+  leaderSeries: string;
+  leaderLookbackMinutes: number;
+  leaderAlignMode: "with" | "against";
   // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
   // window when the quoted YES spread (ask - bid) is wider than this many
   // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
@@ -385,6 +397,12 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     maxModelProb: clampNum(raw.maxModelProb, 0, 1, 1),
     minStrikeDistanceBps: clampNum(raw.minStrikeDistanceBps, 0, 500, 0),
     maxStrikeDistanceBps: clampNum(raw.maxStrikeDistanceBps, 0, 500, 0),
+    leaderSeries: (() => {
+      const ls = String(raw.leaderSeries ?? "").trim().toUpperCase();
+      return SPEC_SERIES.includes(ls as any) && ls !== series ? ls : "";
+    })(),
+    leaderLookbackMinutes: Math.round(clampNum(raw.leaderLookbackMinutes, 2, 30, 5)),
+    leaderAlignMode: raw.leaderAlignMode === "against" ? "against" : "with",
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -454,6 +472,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.makerJoinCents > 0 ? [`mkr${spec.makerJoinCents}`] : []),
     ...(spec.minModelProb > 0 || spec.maxModelProb < 1 ? [`mp${spec.minModelProb.toFixed(2)}-${spec.maxModelProb.toFixed(2)}`] : []),
     ...(spec.minStrikeDistanceBps > 0 || spec.maxStrikeDistanceBps > 0 ? [`sd${spec.minStrikeDistanceBps}-${spec.maxStrikeDistanceBps}`] : []),
+    ...(spec.leaderSeries ? [`lead${spec.leaderSeries}${spec.leaderLookbackMinutes}${spec.leaderAlignMode}`] : []),
   ].join("|");
 }
 

@@ -184,6 +184,17 @@ export async function decideLiveEntry(
       return { ok: false, reason: "side misaligned with higher-timeframe trend gate" };
     }
   }
+  if (spec.leaderSeries && spec.leaderSeries !== spec.series) {
+    // Cross-asset lead: gate on the leader crypto's concurrent N-min move.
+    const leadNow = kalshiProdStream.getSpot(spec.leaderSeries);
+    const leadThen = kalshiProdStream.getSpotAt(spec.leaderSeries, nowMs - spec.leaderLookbackMinutes * 60_000, 3 * 60_000);
+    if (!leadNow || leadThen == null) {
+      return { ok: false, reason: "cross-asset leader spot unavailable" };
+    }
+    if (!trendAlignOk(side, leadNow.value >= leadThen, spec.leaderAlignMode)) {
+      return { ok: false, reason: "side misaligned with cross-asset leader gate" };
+    }
+  }
 
   const entryPrice = side === "yes" ? yesAsk : 1 - yesBid;
   if (entryPrice < spec.minEntryPrice || entryPrice > spec.maxEntryPrice) {
