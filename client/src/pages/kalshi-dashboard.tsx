@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -176,6 +177,7 @@ function chartTooltipStyle() {
 }
 
 export default function KalshiDashboard() {
+  const [showDemo, setShowDemo] = useState(false);
   const { data: executor } = useQuery<ExecutorStatus>({
     queryKey: ["/api/executor/status"],
     refetchInterval: 10000,
@@ -341,33 +343,22 @@ export default function KalshiDashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card>
           <CardContent className="py-3 px-4">
-            <p className="text-xs text-muted-foreground flex items-center gap-1"><Wallet className="w-3 h-3" /> Demo balance</p>
-            <p className="text-lg font-semibold font-mono mt-0.5">
-              {balanceDollars != null ? `$${balanceDollars.toFixed(2)}` : "—"}
+            <p className="text-xs text-muted-foreground flex items-center gap-1"><Activity className="w-3 h-3" /> Prod audition P&L</p>
+            <p className="text-lg font-semibold font-mono mt-0.5" style={{ color: AUDITION_COLOR }}>
+              {auditionSeries.length > 0 ? money(auditionCum, true) : "—"}
             </p>
-            {balanceDollars == null && (
-              <p className="text-[11px] text-muted-foreground">connect Kalshi key in Settings</p>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="py-3 px-4">
-            <p className="text-xs text-muted-foreground flex items-center gap-1"><Activity className="w-3 h-3" /> Real P&L (exchange fills)</p>
-            <p className="text-lg font-semibold mt-0.5"><PnlText value={settled.length > 0 ? realPnl : null} /></p>
             <p className="text-[11px] text-muted-foreground">
-              {realStats.length}/300 real fills toward graduation · rehearsal {money(rehearsalPnl, true)}
+              {auditionSettled > 0
+                ? `${auditionSettled} settled · ${Math.round((auditionWins / auditionSettled) * 100)}% won · would-be, real books`
+                : "risk-free on real production books"}
             </p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="py-3 px-4">
-            <p className="text-xs text-muted-foreground flex items-center gap-1"><Trophy className="w-3 h-3" /> Armed strategies</p>
-            <p className="text-lg font-semibold font-mono mt-0.5">{executor?.promotedStrategies ?? "—"}</p>
-            <p className="text-[11px] text-muted-foreground">
-              {executor?.enabled
-                ? executor.dryRun ? "executing (dry run)" : "executing live on demo"
-                : "execution off"}
-            </p>
+            <p className="text-xs text-muted-foreground flex items-center gap-1"><Trophy className="w-3 h-3" /> Auditioning strategies</p>
+            <p className="text-lg font-semibold font-mono mt-0.5">{auditionBoard.length || "—"}</p>
+            <p className="text-[11px] text-muted-foreground">rehearsing on real books · risk-free</p>
           </CardContent>
         </Card>
         <Card>
@@ -381,7 +372,67 @@ export default function KalshiDashboard() {
             </p>
           </CardContent>
         </Card>
+        <Card>
+          <CardContent className="py-3 px-4">
+            <p className="text-xs text-muted-foreground flex items-center gap-1"><Wallet className="w-3 h-3" /> Live account</p>
+            <p className="text-lg font-semibold font-mono mt-0.5">
+              {liveStatus?.enabled ? "ARMED" : "Paused"}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              {liveStatus?.enabled ? "real money at risk" : "no real money at risk · re-arm in Settings"}
+            </p>
+          </CardContent>
+        </Card>
       </div>
+
+
+      {/* Prod-audition tracker — the team's arena now (demo retired, live paused) */}
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-baseline justify-between gap-2 flex-wrap">
+            <CardTitle className="text-sm font-medium">Prod audition — cumulative would-be P&L (the team's arena now)</CardTitle>
+            <span className="text-sm font-mono" style={{ color: AUDITION_COLOR }}>{money(auditionCum, true)}</span>
+          </div>
+          <CardDescription className="text-xs">
+            What the research team is actually doing now: every promoted strategy rehearsed risk-free on REAL
+            production order books, settled against real outcomes — no money at risk.
+            {auditionSettled > 0 && ` ${auditionWins}/${auditionSettled} settled auditions won (${Math.round((auditionWins / auditionSettled) * 100)}%).`}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {auditionSeries.length < 2 ? (
+            <p className="text-xs text-muted-foreground py-6 text-center">
+              Building the audition curve — points appear as promoted strategies settle their would-be trades on real books.
+            </p>
+          ) : (
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={auditionSeries} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+                  <CartesianGrid stroke={gridStroke} strokeOpacity={0.4} vertical={false} />
+                  <XAxis
+                    dataKey="time" type="number" scale="time" domain={["dataMin", "dataMax"]}
+                    tickFormatter={timeFmt} tick={tickStyle} axisLine={false} tickLine={false} minTickGap={60}
+                  />
+                  <YAxis
+                    tickFormatter={(v: number) => `$${v}`} tick={tickStyle}
+                    axisLine={false} tickLine={false} width={48}
+                  />
+                  <Tooltip
+                    contentStyle={chartTooltipStyle()}
+                    labelFormatter={(v) => timeFmt(Number(v))}
+                    formatter={(value) => [money(Number(value), true), "Would-be P&L"]}
+                  />
+                  <Line
+                    type="monotone" dataKey="audition" stroke={AUDITION_COLOR} strokeWidth={2}
+                    dot={false} activeDot={{ r: 4 }} name="Prod audition (would-be)"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
 
       {/* Prod audition — every promoted strategy rehearses on real orderbooks */}
       {showLive && (
@@ -454,6 +505,7 @@ export default function KalshiDashboard() {
           </CardContent>
         </Card>
       )}
+
 
       {/* Live (real-money) trading */}
       {showLive && (
@@ -638,53 +690,39 @@ export default function KalshiDashboard() {
         </Card>
       )}
 
-      {/* Prod-audition tracker — the team's arena now (demo retired, live paused) */}
-      <Card>
-        <CardHeader className="pb-2">
-          <div className="flex items-baseline justify-between gap-2 flex-wrap">
-            <CardTitle className="text-sm font-medium">Prod audition — cumulative would-be P&L (the team's arena now)</CardTitle>
-            <span className="text-sm font-mono" style={{ color: AUDITION_COLOR }}>{money(auditionCum, true)}</span>
-          </div>
-          <CardDescription className="text-xs">
-            What the research team is actually doing now: every promoted strategy rehearsed risk-free on REAL
-            production order books, settled against real outcomes — no money at risk.
-            {auditionSettled > 0 && ` ${auditionWins}/${auditionSettled} settled auditions won (${Math.round((auditionWins / auditionSettled) * 100)}%).`}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {auditionSeries.length < 2 ? (
-            <p className="text-xs text-muted-foreground py-6 text-center">
-              Building the audition curve — points appear as promoted strategies settle their would-be trades on real books.
-            </p>
-          ) : (
-            <div className="h-56">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={auditionSeries} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
-                  <CartesianGrid stroke={gridStroke} strokeOpacity={0.4} vertical={false} />
-                  <XAxis
-                    dataKey="time" type="number" scale="time" domain={["dataMin", "dataMax"]}
-                    tickFormatter={timeFmt} tick={tickStyle} axisLine={false} tickLine={false} minTickGap={60}
-                  />
-                  <YAxis
-                    tickFormatter={(v: number) => `$${v}`} tick={tickStyle}
-                    axisLine={false} tickLine={false} width={48}
-                  />
-                  <Tooltip
-                    contentStyle={chartTooltipStyle()}
-                    labelFormatter={(v) => timeFmt(Number(v))}
-                    formatter={(value) => [money(Number(value), true), "Would-be P&L"]}
-                  />
-                  <Line
-                    type="monotone" dataKey="audition" stroke={AUDITION_COLOR} strokeWidth={2}
-                    dot={false} activeDot={{ r: 4 }} name="Prod audition (would-be)"
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </CardContent>
-      </Card>
 
+      {/* Latest PM commentary */}
+      {lastCommentary && (
+        <Card className="border-primary/20 bg-primary/5">
+          <CardContent className="py-4 px-5">
+            <div className="flex items-center gap-2 mb-1.5">
+              <BrainCircuit className="w-4 h-4 text-primary" />
+              <h3 className="text-sm font-medium">Latest PM read</h3>
+              <Badge variant="outline" className="text-[10px]">
+                {new Date(lastCommentary.ranAt).toLocaleString()}
+              </Badge>
+            </div>
+            <p className="text-xs text-muted-foreground">{lastCommentary.pmCommentary}</p>
+            {lastCommentary.focus && (
+              <p className="text-[11px] text-muted-foreground mt-1.5">
+                <span className="font-medium text-foreground/80">Next focus:</span> {lastCommentary.focus}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Retired demo data — collapsed by default (demo is meaningless post-retirement) */}
+      <div>
+        <button
+          onClick={() => setShowDemo((v) => !v)}
+          className="w-full flex items-center justify-between text-xs text-muted-foreground hover:text-foreground border border-border/60 rounded-md px-4 py-2"
+        >
+          <span>Retired demo data (historical — seeded-MM fills, never transferred to real money)</span>
+          <span className="font-mono">{showDemo ? "hide ▲" : "show ▼"}</span>
+        </button>
+        {showDemo && (
+          <div className="space-y-6 mt-6">
       {/* Cumulative P&L — DEMO (historical reference; demo retired 2026-09-15) */}
       <Card>
         <CardHeader className="pb-2">
@@ -845,26 +883,9 @@ export default function KalshiDashboard() {
         </CardContent>
       </Card>
 
-      {/* Latest PM commentary */}
-      {lastCommentary && (
-        <Card className="border-primary/20 bg-primary/5">
-          <CardContent className="py-4 px-5">
-            <div className="flex items-center gap-2 mb-1.5">
-              <BrainCircuit className="w-4 h-4 text-primary" />
-              <h3 className="text-sm font-medium">Latest PM read</h3>
-              <Badge variant="outline" className="text-[10px]">
-                {new Date(lastCommentary.ranAt).toLocaleString()}
-              </Badge>
-            </div>
-            <p className="text-xs text-muted-foreground">{lastCommentary.pmCommentary}</p>
-            {lastCommentary.focus && (
-              <p className="text-[11px] text-muted-foreground mt-1.5">
-                <span className="font-medium text-foreground/80">Next focus:</span> {lastCommentary.focus}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
