@@ -18,7 +18,10 @@ import {
   volPerSqrtSecTo1mBps,
   type KalshiMarket,
   type KalshiStrategySpec,
-getPrevWindowResult , modelProbInGate } from "./kalshi";
+getPrevWindowResult , modelProbInGate,
+  strikeDistanceGateActive,
+  strikeDistanceBps,
+  strikeDistInGate} from "./kalshi";
 import {
   ensureShardFunds,
   getDemoMarketExchangeIndex,
@@ -94,6 +97,15 @@ export async function decideLiveEntry(
     if (volPerSqrtSec == null) return { ok: false, reason: "vol gate set but spot stream unavailable" };
     if (!volInGate(volPerSqrtSecTo1mBps(volPerSqrtSec), spec)) {
       return { ok: false, reason: "realized vol outside spec regime gate" };
+    }
+  }
+  if (strikeDistanceGateActive(spec)) {
+    const spot = kalshiProdStream.getSpot(spec.series);
+    const openMs = market.open_time ? new Date(market.open_time).getTime() : null;
+    const strike = openMs != null ? kalshiProdStream.getSpotAt(spec.series, openMs) : null;
+    if (!spot || strike == null) return { ok: false, reason: "strike-distance gate set but spot/strike unavailable" };
+    if (!strikeDistInGate(spec, strikeDistanceBps(spot.value, strike))) {
+      return { ok: false, reason: "strike distance outside spec band" };
     }
   }
   const yesAsk = parseDollars(market.yes_ask_dollars);

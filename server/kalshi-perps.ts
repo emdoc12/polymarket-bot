@@ -147,7 +147,8 @@ const clampNum = (value: unknown, min: number, max: number, fallback: number) =>
 };
 
 export function clampPerpSpec(raw: Record<string, unknown>): PerpStrategySpec {
-  const market = PERP_MARKETS.includes(raw.market as any) ? String(raw.market) : "KXBTCPERP1";
+  const rawMarket = String(raw.market ?? "").trim().toUpperCase();
+  const market = PERP_MARKETS.includes(rawMarket as any) ? rawMarket : "KXBTCPERP1";
   return {
     name: String(raw.name || "unnamed-perp").slice(0, 80),
     market,

@@ -268,6 +268,15 @@ export type KalshiStrategySpec = {
   // edge actually lives. 0/1 = off. Inert for non-value rules.
   minModelProb: number;
   maxModelProb: number;
+  // Strike-distance band (PM GRAMMAR REQUEST, granted 2026-09-15): gate ANY
+  // rule on |spot - strike| / strike in basis points at entry - how far the
+  // underlying sits from the window's open (the strike) - so a spec can
+  // separate near-the-money coin flips (small bps) from far-from-strike
+  // carry (large bps), the single most predictive variable in a 15-min
+  // window. 0 = off. Crypto only (needs the spot/strike feed); auto-skips
+  // where unavailable, like the vol and value gates.
+  minStrikeDistanceBps: number;
+  maxStrikeDistanceBps: number;
   // Liquidity gate (PM GRAMMAR REQUEST x5, granted 2026-09-13): refuse the
   // window when the quoted YES spread (ask - bid) is wider than this many
   // cents. 0 = off. Built for the thin MM-quoted commodity venues where a
@@ -342,7 +351,8 @@ const clampNum = (value: unknown, min: number, max: number, fallback: number) =>
 // Agents propose specs as JSON; clamp everything into the legal search space
 // rather than rejecting, so a slightly-out-of-range idea still gets tested.
 export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
-  const series = SPEC_SERIES.includes(raw.series as any) ? String(raw.series) : "KXBTC15M";
+  const rawSeries = String(raw.series ?? "").trim().toUpperCase();
+  const series = SPEC_SERIES.includes(rawSeries as any) ? rawSeries : "KXBTC15M";
   const sideRule = SPEC_SIDE_RULES.includes(raw.sideRule as any)
     ? raw.sideRule as KalshiStrategySpec["sideRule"]
     : "momentum";
@@ -373,6 +383,8 @@ export function clampSpec(raw: Record<string, unknown>): KalshiStrategySpec {
     makerJoinCents: Math.round(clampNum(raw.makerJoinCents, 0, 10, 0)),
     minModelProb: clampNum(raw.minModelProb, 0, 1, 0),
     maxModelProb: clampNum(raw.maxModelProb, 0, 1, 1),
+    minStrikeDistanceBps: clampNum(raw.minStrikeDistanceBps, 0, 500, 0),
+    maxStrikeDistanceBps: clampNum(raw.maxStrikeDistanceBps, 0, 500, 0),
     orderSize: 10, // fixed so results stay comparable across candidates
   };
 }
@@ -389,6 +401,21 @@ export function trendAlignOk(side: "yes" | "no" | "YES" | "NO", upTrend: boolean
 export function modelProbInGate(spec: KalshiStrategySpec, pUp: number): boolean {
   if (spec.minModelProb <= 0 && spec.maxModelProb >= 1) return true;
   return pUp >= spec.minModelProb && pUp <= spec.maxModelProb;
+}
+
+export function strikeDistanceGateActive(spec: KalshiStrategySpec): boolean {
+  return spec.minStrikeDistanceBps > 0 || spec.maxStrikeDistanceBps > 0;
+}
+// |spot - strike| / strike in basis points.
+export function strikeDistanceBps(spot: number, strike: number): number {
+  if (!(strike > 0)) return NaN;
+  return Math.abs(spot - strike) / strike * 10000;
+}
+export function strikeDistInGate(spec: KalshiStrategySpec, distBps: number): boolean {
+  if (!Number.isFinite(distBps)) return false; // gate set but unverifiable -> skip
+  if (spec.minStrikeDistanceBps > 0 && distBps < spec.minStrikeDistanceBps) return false;
+  if (spec.maxStrikeDistanceBps > 0 && distBps > spec.maxStrikeDistanceBps) return false;
+  return true;
 }
 
 export function volGateActive(spec: KalshiStrategySpec): boolean {
@@ -426,6 +453,7 @@ export function specHash(spec: KalshiStrategySpec) {
     ...(spec.prevWindowMode !== "off" ? [`prev${spec.prevWindowMode}`] : []),
     ...(spec.makerJoinCents > 0 ? [`mkr${spec.makerJoinCents}`] : []),
     ...(spec.minModelProb > 0 || spec.maxModelProb < 1 ? [`mp${spec.minModelProb.toFixed(2)}-${spec.maxModelProb.toFixed(2)}`] : []),
+    ...(spec.minStrikeDistanceBps > 0 || spec.maxStrikeDistanceBps > 0 ? [`sd${spec.minStrikeDistanceBps}-${spec.maxStrikeDistanceBps}`] : []),
   ].join("|");
 }
 
@@ -685,6 +713,14 @@ function evaluateSpecAtInstant(spec: KalshiStrategySpec, entry: SettledMarketDat
     const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
     const vol1mBps = Math.sqrt(rets.reduce((a, r) => a + (r - mean) ** 2, 0) / rets.length) * 10000;
     if (!volInGate(vol1mBps, spec)) return null;
+  }
+  if (strikeDistanceGateActive(spec)) {
+    if (!entry.spotValueAt || !entry.market.open_time) return null;
+    const openTs = Math.floor(new Date(entry.market.open_time).getTime() / 1000);
+    const strike = entry.spotValueAt(openTs);
+    const spot = entry.spotValueAt(entryTs);
+    if (strike == null || spot == null) return null;
+    if (!strikeDistInGate(spec, strikeDistanceBps(spot, strike))) return null;
   }
   const sorted = presorted ?? [...entry.candles].sort((a, b) => a.end_period_ts - b.end_period_ts);
   const entryCandle = [...sorted].reverse().find((c) => c.end_period_ts <= entryTs);
