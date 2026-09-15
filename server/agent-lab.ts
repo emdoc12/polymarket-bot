@@ -129,6 +129,16 @@ type WorkerRole = {
 
 const WORKER_ROLES: WorkerRole[] = [
   {
+    // Added 2026-09-14 after nine straight cycles in which the PM's focus
+    // demanded specific specs (a value family, gated rally specialists) and
+    // the creative workers produced none of them - they pattern-match the
+    // leaderboard and ignore standing orders. This role has no creativity
+    // mandate at all: it is the desk's order-execution clerk.
+    key: "mandate_executor",
+    system: `You are the Mandate Executor on a quant research desk for crypto prediction markets. You have exactly one job: read the PM's current research focus (the first line of your context) and translate its EXPLICIT requests into specs, following every parameter the focus names to the letter - series, sideRule, bands, timings, gates, hard filters. You do not innovate, you do not clone the leaderboard, you do not propose anything the focus did not ask for. If the focus names hard filters (a price ceiling, banned timings, required gates), every one of your specs respects ALL of them. If the focus asks for a family that needs specific fields (e.g. "value" specs, or yes_only + trendAlignHours rally specs), you SET those fields exactly as requested.\n\n${SPEC_SPACE_DOC}`,
+    buildTask: (context) => `${context}\n\nTranslate the PM's current focus into exactly 4 specs, covering each distinct lane the focus requests (if it lists lanes (a)/(b)/(c), cover every lane at least once). Every spec must satisfy every hard filter the focus states. In each rationale, quote the fragment of the focus the spec implements.`,
+  },
+  {
     key: "explorer",
     system: `You are the Explorer on a quant research desk for crypto prediction markets. Your job is to propose NOVEL strategy specs in regions of the search space the team has not tried yet. Diversity beats depth: vary sideRule, entry timing, and price bands. Avoid near-duplicates of the leaderboard.\n\n${SPEC_SPACE_DOC}`,
     buildTask: (context) => `${context}\n\nPropose exactly 3 novel specs with distinct hypotheses. For each, one-sentence rationale stating the market inefficiency it targets.`,
@@ -142,16 +152,6 @@ const WORKER_ROLES: WorkerRole[] = [
     key: "skeptic",
     system: `You are the Skeptic on a quant research desk for crypto prediction markets. Your job is to stress-test the leaders: propose specs that check whether an apparent edge is real or overfit (same rule on the other series, shifted timing, tighter signal). In your notes, call out any leaderboard result that looks like curve-fitting (small samples, train >> holdout).\n\n${SPEC_SPACE_DOC}`,
     buildTask: (context) => `${context}\n\nPropose exactly 2 robustness-check specs targeting the current leaders, and use the notes field for overfitting concerns the PM should hear.`,
-  },
-  {
-    // Added 2026-09-14 after nine straight cycles in which the PM's focus
-    // demanded specific specs (a value family, gated rally specialists) and
-    // the creative workers produced none of them - they pattern-match the
-    // leaderboard and ignore standing orders. This role has no creativity
-    // mandate at all: it is the desk's order-execution clerk.
-    key: "mandate_executor",
-    system: `You are the Mandate Executor on a quant research desk for crypto prediction markets. You have exactly one job: read the PM's current research focus (the first line of your context) and translate its EXPLICIT requests into specs, following every parameter the focus names to the letter - series, sideRule, bands, timings, gates, hard filters. You do not innovate, you do not clone the leaderboard, you do not propose anything the focus did not ask for. If the focus names hard filters (a price ceiling, banned timings, required gates), every one of your specs respects ALL of them. If the focus asks for a family that needs specific fields (e.g. "value" specs, or yes_only + trendAlignHours rally specs), you SET those fields exactly as requested.\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nTranslate the PM's current focus into exactly 4 specs, covering each distinct lane the focus requests (if it lists lanes (a)/(b)/(c), cover every lane at least once). Every spec must satisfy every hard filter the focus states. In each rationale, quote the fragment of the focus the spec implements.`,
   },
 ];
 
@@ -229,7 +229,7 @@ RAIL PROPOSALS ADJUDICATED (do not re-propose without NEW evidence): live_cooldo
 
 GUEST DESK: proposals whose creator starts with "glm_" come from a guest research team (GLM, a different AI vendor) invited to test whether independent minds find edges the incumbent desk misses. Judge them by evidence exactly like every other candidate - no deference, no prejudice - but DO note in commentary when the guest desk's candidates meaningfully outperform or underperform the house desk's, because the human is explicitly evaluating whether the guest adds value.
 
-GRAMMAR REQUESTS ANSWERED (do not re-request): maxPriceOverMidCents (per-spec entry limit-offset) ANSWERED 2026-09-13 as already expressible: with top-of-book quotes the executable price sits exactly HALF THE QUOTED SPREAD over mid on either side (yes pays ask - mid = spread/2; no pays mid - bid = spread/2), so your pay-up gate IS maxSpreadCents - set maxSpreadCents to twice the offset you want (e.g. 2c over mid = maxSpreadCents 4) on CRYPTO specs too, it was never commodity-only. If the real concern is absolute entry richness rather than pay-up vs mid, that is what a tighter maxEntryPrice ceiling expresses (real money already shows where: sub-60c pays, 60c+ bleeds). commodity liquidity gate granted 2026-09-13 as maxSpreadCents (max quoted YES spread in cents, backtested + live-enforced; the resting-depth half was declined - no historical depth exists to backtest, and the prod audition's depth-confirmed would-fills already measure it - so judge thin venues by audition fillable rates). Perp minHourEt/maxHourEt + sideBias granted 2026-09-13, and perp minVol1mBps/maxVol1mBps + trendAlignHours/trendAlignMode granted 2026-09-14 (computed from the perp's own candles; the full "long only when trending up out of chop" mandate is now expressible - stop restating it, direct the perp workers to use it). catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
+GRAMMAR REQUESTS ANSWERED (do not re-request): CME settlement-index feed for commodities DECLINED by the human 2026-09-14 (like Pyth before it): licensed real-time commodity data costs ~$1k/month and the human's bar is explicit - a paid feed happens only if the desk can out-earn MORE THAN DOUBLE its cost in the same period, which a $50 test account cannot. Until then commodities trade on crowd-price-relative rules (momentum/trend/hour/dow/spread gates) and the PROD AUDITION is the arbiter of whether commodity edge exists at all - prove the edge with would-be records first, then the feed becomes a scaling decision. Stop re-requesting; revisit only when the human raises account scale. maxPriceOverMidCents (per-spec entry limit-offset) ANSWERED 2026-09-13 as already expressible: with top-of-book quotes the executable price sits exactly HALF THE QUOTED SPREAD over mid on either side (yes pays ask - mid = spread/2; no pays mid - bid = spread/2), so your pay-up gate IS maxSpreadCents - set maxSpreadCents to twice the offset you want (e.g. 2c over mid = maxSpreadCents 4) on CRYPTO specs too, it was never commodity-only. If the real concern is absolute entry richness rather than pay-up vs mid, that is what a tighter maxEntryPrice ceiling expresses (real money already shows where: sub-60c pays, 60c+ bleeds). commodity liquidity gate granted 2026-09-13 as maxSpreadCents (max quoted YES spread in cents, backtested + live-enforced; the resting-depth half was declined - no historical depth exists to backtest, and the prod audition's depth-confirmed would-fills already measure it - so judge thin venues by audition fillable rates). Perp minHourEt/maxHourEt + sideBias granted 2026-09-13, and perp minVol1mBps/maxVol1mBps + trendAlignHours/trendAlignMode granted 2026-09-14 (computed from the perp's own candles; the full "long only when trending up out of chop" mandate is now expressible - stop restating it, direct the perp workers to use it). catalystMode/catalystMinutes (scheduled-catalyst proximity gate; built-in calendar = weekday 8:30 prints + Wed/Thu 10:30 EIA; FOMC dates not yet modeled) granted 2026-09-13. dowMaskEt (day-of-week mask, ET) granted 2026-09-12. Your realized-volatility/chop regime gate was granted 2026-09-12 as minVol1mBps/maxVol1mBps (trailing 30-min underlying vol in 1-minute-bps; crypto only) - direct the workers to gate momentum/trend specs out of low-vol chop. Your loss-streak cooldown request is ALREADY ENFORCED at the executor level (3 consecutive real losses pause all live entries 45 minutes; a per-spec field was considered and deferred). Other executor-level rails that exist outside the spec grammar, so you never re-request them: requote-retry on empty fills, orderbook depth confirmation before firing (stream transport), salvage exits (dying positions are sold when the crowd bids >= 6c over fair value), bankroll-proportional stakes, entry price floor 0.30 / ceiling 0.70, portfolio trading hours 8-24 ET. A research focus concentrates effort - it must never SEAL OFF the frontier: when the context lists UNEXPLORED VENUES (newly launched markets with zero candidates), your focus must explicitly allocate some exploration to them alongside whatever cells you are concentrating on. Never write a focus that routes 100% of capacity to existing cells while unexplored venues exist.
 
 Output limits: one sentence per decision reason. Keep commentary to one focused paragraph and the research focus to a few sentences - your full reasoning happens internally, the output is the executive summary. A response that exceeds the token limit is truncated and every decision in it is lost.
 
@@ -360,7 +360,7 @@ function ensureAgentLabDefaults() {
   if (!storage.getSetting("agent_lab_perps_enabled")) storage.setSetting("agent_lab_perps_enabled", "true");
   if (!storage.getSetting("perp_lab_hours")) storage.setSetting("perp_lab_hours", "72");
   if (!storage.getSetting("agent_lab_interval_minutes")) storage.setSetting("agent_lab_interval_minutes", "30");
-  if (!storage.getSetting("agent_lab_max_candidates_per_cycle")) storage.setSetting("agent_lab_max_candidates_per_cycle", "8");
+  if (!storage.getSetting("agent_lab_max_candidates_per_cycle")) storage.setSetting("agent_lab_max_candidates_per_cycle", "20");
   if (!storage.getSetting("agent_lab_max_cycles_per_day")) storage.setSetting("agent_lab_max_cycles_per_day", "24");
   if (!storage.getSetting("agent_lab_markets_lookback")) storage.setSetting("agent_lab_markets_lookback", "80");
   if (!storage.getSetting("agent_lab_pm_model")) storage.setSetting("agent_lab_pm_model", DEFAULT_PM_MODEL);
@@ -683,7 +683,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     ensureAgentLabDefaults();
     const workerModel = storage.getSetting("agent_lab_worker_model") || DEFAULT_WORKER_MODEL;
     const pmModel = storage.getSetting("agent_lab_pm_model") || DEFAULT_PM_MODEL;
-    const maxCandidates = Math.min(16, Math.max(1, parseInt(storage.getSetting("agent_lab_max_candidates_per_cycle") || "8", 10)));
+    const maxCandidates = Math.min(32, Math.max(1, parseInt(storage.getSetting("agent_lab_max_candidates_per_cycle") || "20", 10)));
     const lookback = Math.min(150, Math.max(20, parseInt(storage.getSetting("agent_lab_markets_lookback") || "80", 10)));
 
     const fillStats = storage.getExecutorFillStats();
@@ -1142,7 +1142,7 @@ export function registerAgentLabRoutes(app: Express) {
       apiKeyConfigured: Boolean(getAnthropicApiKey()),
       enabled: storage.getSetting("agent_lab_enabled") === "true",
       intervalMinutes: parseInt(storage.getSetting("agent_lab_interval_minutes") || "30", 10),
-      maxCandidatesPerCycle: parseInt(storage.getSetting("agent_lab_max_candidates_per_cycle") || "8", 10),
+      maxCandidatesPerCycle: parseInt(storage.getSetting("agent_lab_max_candidates_per_cycle") || "20", 10),
       maxCyclesPerDay: parseInt(storage.getSetting("agent_lab_max_cycles_per_day") || "24", 10),
       cyclesToday: cyclesToday(),
       cycleInFlight,
