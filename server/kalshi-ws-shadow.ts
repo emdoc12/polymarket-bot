@@ -37,6 +37,10 @@ function ensureShadowDefaults() {
   // Rehearsal only - no money at risk - so it defaults ON and starts
   // collecting comparison data as soon as prod credentials exist.
   if (!storage.getSetting("ws_shadow_enabled")) storage.setSetting("ws_shadow_enabled", "true");
+  // How many top TESTING candidates (by walk-forward fills) also audition
+  // alongside promoted specs, so near-gate/gated specs can accumulate real-book
+  // evidence without first clearing the 15-fill promotion gate. 0 = promoted only.
+  if (!storage.getSetting("audition_shadow_testing_slots")) storage.setSetting("audition_shadow_testing_slots", "8");
 }
 
 // Active-market cache per series, refreshed by REST (close times and tickers
@@ -159,13 +163,29 @@ async function runShadowTick() {
   // predict live rules), around the clock (curfew evidence must keep
   // accumulating during the disputed hours or it can never be revisited).
   const promoted = storage.getCandidateStrategies("promoted").filter((c) => c.kind !== "perp");
-  if (promoted.length === 0) {
+
+  // Audition-shadow (2026-09-15, PM GRAMMAR REQUEST - fixes a self-sealing
+  // rule): the audition is now the desk's PRIMARY evidence, but it only ran
+  // on promoted specs while promotion requires 15 walk-forward fills that
+  // heavily-gated specs cannot reach - so the specs that most need audition
+  // evidence could never get it. Also audition the top few TESTING candidates
+  // closest to the gate (most walk-forward fills), so near-promotion and
+  // gated specs accumulate real-book evidence directly. Risk-free (live is
+  // paused; never was money). Cap keeps the stream/compute bounded.
+  const shadowSlots = Math.max(0, parseInt(storage.getSetting("audition_shadow_testing_slots") || "8", 10));
+  const testingLeaders = shadowSlots === 0 ? [] : storage.getCandidateStrategies("testing")
+    .filter((c) => c.kind !== "perp" && (c.liveTrades ?? 0) > 0)
+    .sort((a, b) => (b.liveTrades ?? 0) - (a.liveTrades ?? 0) || (b.liveNetPnl ?? 0) - (a.liveNetPnl ?? 0))
+    .slice(0, shadowSlots);
+
+  const auditionSet = [...promoted, ...testingLeaders];
+  if (auditionSet.length === 0) {
     kalshiProdStream.setMarkets([]);
     return;
   }
   kalshiProdStream.start();
 
-  const specs = promoted.map((candidate) => ({ candidate, spec: clampSpec(JSON.parse(candidate.spec)) }));
+  const specs = auditionSet.map((candidate) => ({ candidate, spec: clampSpec(JSON.parse(candidate.spec)) }));
   const seriesNeeded = [...new Set(specs.map((s) => s.spec.series))];
   const nowMs = Date.now();
 
