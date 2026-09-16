@@ -218,12 +218,12 @@ const PERP_WORKER_ROLES: { key: string; system: string; buildTask: (context: str
   {
     key: "perp_explorer",
     system: `You are the Perps Explorer on a quant research desk. Propose NOVEL perpetual-futures specs in unexplored regions: vary market, direction, lookback horizons and threshold/exit geometry. Diversity beats depth.\n\n${PERP_SPEC_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 3 novel perp specs with distinct hypotheses. One-sentence rationale each.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 2 novel perp specs with distinct hypotheses. Keep every rationale to ONE short sentence and notes to one line - terse output only.`,
   },
   {
     key: "perp_optimizer",
     system: `You are the Perps Optimizer on a quant research desk. Mutate the most promising existing perp candidates: adjust one or two parameters to sharpen the edge, guided by train/holdout gaps. If nothing is profitable yet, probe the opposite direction or different exit geometry of near-misses.\n\n${PERP_SPEC_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 3 mutations of the strongest perp candidates (or best near-misses), naming the parent and the change.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 2 mutations of the strongest perp candidates (or best near-misses), naming the parent and the change. Keep every rationale to ONE short sentence and notes to one line - terse output only.`,
   },
 ];
 
