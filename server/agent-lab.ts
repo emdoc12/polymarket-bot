@@ -47,7 +47,7 @@ const SpecProposalSchema = z.object({
   // the ENTIRE response over it (observed via lastWorkerDiag). clampSpec
   // normalizes/validates instead - a stray value defaults, never crashes.
   series: z.string(),
-  sideRule: z.enum(["momentum", "fade", "always_yes", "always_no", "trend_follow", "trend_fade", "value"]),
+  sideRule: z.string(),        // clampSpec validates -> defaults; avoids whole-response crash on a stray enum
   entrySecondsBeforeClose: z.number(),
   minEntryPrice: z.number(),
   maxEntryPrice: z.number(),
@@ -55,17 +55,17 @@ const SpecProposalSchema = z.object({
   minSignal: z.number(),
   minHourEt: z.number(),
   maxHourEt: z.number(),
-  sideFilter: z.enum(["both", "yes_only", "no_only"]),
+  sideFilter: z.string(),
   dowMaskEt: z.number(),
   minVol1mBps: z.number(),
   maxVol1mBps: z.number(),
   trendAlignHours: z.number(),
-  trendAlignMode: z.enum(["with", "against"]),
-  catalystMode: z.enum(["off", "require", "avoid"]),
+  trendAlignMode: z.string(),
+  catalystMode: z.string(),
   catalystMinutes: z.number(),
   maxSpreadCents: z.number(),
   entryWindowSeconds: z.number(),
-  prevWindowMode: z.enum(["off", "with", "against"]),
+  prevWindowMode: z.string(),
   makerJoinCents: z.number(),
   minModelProb: z.number(),
   maxModelProb: z.number(),
@@ -73,7 +73,7 @@ const SpecProposalSchema = z.object({
   maxStrikeDistanceBps: z.number(),
   leaderSeries: z.string(),
   leaderLookbackMinutes: z.number(),
-  leaderAlignMode: z.enum(["with", "against"]),
+  leaderAlignMode: z.string(),
   rationale: z.string(),
 });
 
@@ -85,7 +85,7 @@ const WorkerOutputSchema = z.object({
 const PerpSpecProposalSchema = z.object({
   name: z.string(),
   market: z.string(), // clampPerpSpec validates; avoids whole-response loss on a stray value
-  direction: z.enum(["trend_follow", "trend_fade"]),
+  direction: z.string(),
   lookbackMinutes: z.number(),
   entryThresholdPct: z.number(),
   takeProfitPct: z.number(),
@@ -93,11 +93,11 @@ const PerpSpecProposalSchema = z.object({
   maxHoldMinutes: z.number(),
   minHourEt: z.number(),
   maxHourEt: z.number(),
-  sideBias: z.enum(["both", "long_only", "short_only"]),
+  sideBias: z.string(),
   minVol1mBps: z.number(),
   maxVol1mBps: z.number(),
   trendAlignHours: z.number(),
-  trendAlignMode: z.enum(["with", "against"]),
+  trendAlignMode: z.string(),
   rationale: z.string(),
 });
 
