@@ -1107,10 +1107,17 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
             const target = byId.get(decision.candidateId);
             if (!target) continue;
             // Code-enforced small-sample guard: rejecting on a handful of
-            // trades is noise, and it was starving the perps desk of a fair
-            // trial. Convert those rejections into keep_testing.
+            // trades is noise for a fresh idea - added to stop the perps desk
+            // being starved of a fair trial. But it was ALSO silently blocking
+            // the PM from culling low-sample DUPLICATE binary specs (gated
+            // value cells are small-sample by nature), so they persisted and
+            // kept splitting the sampling windows - the exact pool-concentration
+            // problem the PM flags. Scope the guard to perps (its original
+            // purpose); trust the PM's reject on binary (its prompt already
+            // forbids rejecting under-sampled UNIQUES, and dedup is legitimate).
             const totalEvidence = (target.trainTrades ?? 0) + (target.holdoutTrades ?? 0) + (target.liveTrades ?? 0);
-            const effectiveAction = decision.action === "reject" && totalEvidence < 10 ? "keep_testing" : decision.action;
+            const effectiveAction = decision.action === "reject" && totalEvidence < 10 && target.kind === "perp"
+              ? "keep_testing" : decision.action;
             if (effectiveAction === "promote") {
               storage.updateCandidateStrategy(decision.candidateId, { status: "promoted", pmNotes: decision.reason });
               promoted += 1;
