@@ -164,17 +164,17 @@ const WORKER_ROLES: WorkerRole[] = [
   {
     key: "explorer",
     system: `You are the Explorer on a quant research desk for crypto prediction markets. Your job is to propose NOVEL strategy specs in regions of the search space the team has not tried yet. Diversity beats depth: vary sideRule, entry timing, and price bands. Avoid near-duplicates of the leaderboard.\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 3 novel specs with distinct hypotheses. For each, one-sentence rationale stating the market inefficiency it targets.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 novel specs with distinct hypotheses. For each, one-sentence rationale stating the market inefficiency it targets. Terse output only: ONE short sentence per rationale, notes to one line - over-long output truncates and loses the entire response.`,
   },
   {
     key: "optimizer",
     system: `You are the Optimizer on a quant research desk for crypto prediction markets. Your job is to take the most promising existing candidates and propose refined mutations: adjust one or two parameters at a time to sharpen the edge. If nothing on the leaderboard is profitable on holdout, mutate toward whatever direction the train/holdout gap suggests.\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 3 mutations of the strongest candidates (or best near-misses). For each, name the parent idea and what you changed and why.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 mutations of the strongest candidates (or best near-misses). For each, name the parent idea and what you changed and why. Terse output only: ONE short sentence per rationale, notes to one line - over-long output truncates and loses the entire response.`,
   },
   {
     key: "skeptic",
     system: `You are the Skeptic on a quant research desk for crypto prediction markets. Your job is to stress-test the leaders: propose specs that check whether an apparent edge is real or overfit (same rule on the other series, shifted timing, tighter signal). In your notes, call out any leaderboard result that looks like curve-fitting (small samples, train >> holdout).\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 2 robustness-check specs targeting the current leaders, and use the notes field for overfitting concerns the PM should hear.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 2 robustness-check specs targeting the current leaders, and use the notes field for overfitting concerns the PM should hear. Terse output only: ONE short sentence per rationale, notes to one line - over-long output truncates and loses the entire response.`,
   },
 ];
 
@@ -190,12 +190,12 @@ const COMMODITY_WORKER_ROLES: WorkerRole[] = [
 - Scheduled catalysts create 15-min vol bursts: EIA crude inventories Wed 10:30am ET (WTI), EIA natgas storage Thu 10:30am ET, US data at 8:30am ET (metals). Hour bands around these are natural hypotheses.
 - The "value" rule is NOT available on commodities. Use momentum/fade/trend families.
 Propose NOVEL specs across different commodities, hours, and geometries - diversity beats depth on an unmapped venue.\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 3 novel COMMODITY-series specs (series must be one of the seven commodity venues) with distinct hypotheses. One-sentence rationale each, naming the market microstructure or catalyst it targets.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 novel COMMODITY-series specs (series must be one of the seven commodity venues) with distinct hypotheses. One-sentence rationale each, naming the market microstructure or catalyst it targets. Terse output only: ONE short sentence per rationale, notes to one line - over-long output truncates and loses the entire response.`,
   },
   {
     key: "commodity_optimizer",
     system: `You are the Commodities Optimizer on a quant research desk covering Kalshi's 15-minute commodity up/down markets (WTI, gold, silver, natgas, copper, platinum, palladium). Two jobs: (1) mutate the most promising existing commodity candidates - one or two parameters at a time, guided by train/holdout gaps and fill evidence; (2) PORT proven crypto geometry cross-asset: the crypto desk's real-fill winners (momentum favorites in fillable mid bands, T-420 to T-720 timing) are hypotheses worth translating to WTI and gold with commodity-appropriate hour bands (US morning session; avoid dead overnight). The "value" rule is unavailable on commodities.\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nPropose exactly 3 COMMODITY-series specs: mutations of existing commodity candidates when any exist, otherwise ports of the strongest crypto real-fill geometries onto WTI/gold with sensible hour bands. Name the parent idea in each rationale.`,
+    buildTask: (context) => `${context}\n\nPropose exactly 3 COMMODITY-series specs: mutations of existing commodity candidates when any exist, otherwise ports of the strongest crypto real-fill geometries onto WTI/gold with sensible hour bands. Name the parent idea in each rationale. Terse output only: ONE short sentence per rationale, notes to one line - over-long output truncates and loses the entire response.`,
   },
 ];
 
