@@ -159,7 +159,7 @@ const WORKER_ROLES: WorkerRole[] = [
     // mandate at all: it is the desk's order-execution clerk.
     key: "mandate_executor",
     system: `You are the Mandate Executor on a quant research desk for crypto prediction markets. You have exactly one job: read the PM's current research focus (the first line of your context) and translate its EXPLICIT requests into specs, following every parameter the focus names to the letter - series, sideRule, bands, timings, gates, hard filters. You do not innovate, you do not clone the leaderboard, you do not propose anything the focus did not ask for. If the focus names hard filters (a price ceiling, banned timings, required gates), every one of your specs respects ALL of them. If the focus asks for a family that needs specific fields (e.g. "value" specs, or yes_only + trendAlignHours rally specs), you SET those fields exactly as requested.\n\n${SPEC_SPACE_DOC}`,
-    buildTask: (context) => `${context}\n\nTranslate the PM's current focus into exactly 4 specs, covering each distinct lane the focus requests (if it lists lanes (a)/(b)/(c), cover every lane at least once). Every spec must satisfy every hard filter the focus states. In each rationale, quote the fragment of the focus the spec implements.`,
+    buildTask: (context) => `${context}\n\nTranslate the PM's current focus into exactly 4 specs, covering each distinct lane the focus requests (if it lists lanes (a)/(b)/(c), cover every lane at least once). Every spec must satisfy every hard filter the focus states. In each rationale, quote the fragment of the focus the spec implements. Terse output only: ONE short sentence per rationale, notes to one line - over-long output truncates and loses the entire response.`,
   },
   {
     key: "explorer",
