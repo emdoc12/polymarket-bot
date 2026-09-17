@@ -914,15 +914,35 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
     // Promoted candidates keep accumulating live evidence too — they're the ones
     // whose ongoing performance matters most, and a lucky promotion needs to be
     // caught by continued out-of-sample scoring, not enshrined.
+    const testingAll = storage.getCandidateStrategies("testing");
     const survivorsAll = [
-      ...storage.getCandidateStrategies("testing"),
+      ...testingAll,
       ...storage.getCandidateStrategies("promoted"),
     ].filter((c) => c.lastTestedAt != null);
     const survivors = survivorsAll.filter((c) => c.kind !== "perp");
     const perpSurvivors = survivorsAll.filter((c) => c.kind === "perp");
+    // STRANDED-CANDIDATE RESCUE (self-sealing-bug fix). A candidate that missed
+    // its one-shot discovery scoring - the fresh loop `continue`s when a series
+    // fetch transiently returns <10 settled markets - is orphaned forever: it's
+    // no longer in `fresh` (new proposals only) and never enters `survivors`
+    // (which requires lastTestedAt != null). Over hundreds of cycles this
+    // stranded ~1,700 candidates, none scoreable, none cullable, all bloating
+    // the pool and slowing cycles. Rescue a bounded batch of never-tested
+    // testing candidates each cycle (oldest first) so a transient fetch failure
+    // no longer strands them permanently. Perp strands are rescued in the perp
+    // section below (they need candle history, not settled-market data).
+    const freshIds = new Set(fresh.map((f) => f.candidate.id));
+    const rescueBatch = Math.max(0, parseInt(storage.getSetting("pool_rescue_batch") || "500", 10));
+    const strandedBinary = testingAll
+      .filter((c) => c.lastTestedAt == null && c.kind !== "perp" && !freshIds.has(c.id))
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .slice(0, rescueBatch);
     const seriesNeeded = [...new Set([
       ...fresh.map((f) => f.spec.series),
       ...survivors.map((c) => (JSON.parse(c.spec) as KalshiStrategySpec).series),
+      ...strandedBinary.map((c) => {
+        try { return (JSON.parse(c.spec) as KalshiStrategySpec).series; } catch { return ""; }
+      }).filter(Boolean),
     ])];
     const dataBySeries = new Map<string, SettledMarketData[]>();
     for (const series of seriesNeeded) {
@@ -969,12 +989,59 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
       testedResults.push({ candidate, result });
     }
 
+    // 3a-rescue. Score the stranded never-tested binary candidates on this
+    // cycle's freshly-fetched data. Ones whose series now has data enter the
+    // normal pipeline (PM can finally see and judge them). Ones whose series
+    // STILL yields <10 settled markets and have sat past a grace window are
+    // genuinely unscoreable dead weight (e.g. a retired/illiquid series) - GC
+    // them so the pool stops accumulating orphans forever.
+    const rescueGraceMs = Math.max(0, parseInt(storage.getSetting("pool_rescue_grace_hours") || "12", 10)) * 3600_000;
+    let rescued = 0;
+    let rescueGc = 0;
+    for (const candidate of strandedBinary) {
+      if (++evalCount % 4 === 0) await new Promise((r) => setImmediate(r));
+      let spec: KalshiStrategySpec;
+      try { spec = clampSpec(JSON.parse(candidate.spec)); } catch { continue; }
+      const data = dataBySeries.get(spec.series) ?? [];
+      if (data.length < 10) {
+        if (Date.now() - Date.parse(candidate.createdAt) > rescueGraceMs) {
+          storage.updateCandidateStrategy(candidate.id, {
+            status: "rejected",
+            pmNotes: `auto-GC: unscoreable - series ${spec.series} yielded <10 settled markets across retries (stranded >${rescueGraceMs / 3600_000}h)`,
+          });
+          rescueGc += 1;
+        }
+        continue;
+      }
+      const result = evaluateSpecOnData(spec, data);
+      storage.updateCandidateStrategy(candidate.id, {
+        trainTrades: result.train.trades,
+        trainWins: result.train.wins,
+        trainNetPnl: result.train.netPnl,
+        holdoutTrades: result.holdout.trades,
+        holdoutWins: result.holdout.wins,
+        holdoutNetPnl: result.holdout.netPnl,
+        lastTestedAt: new Date().toISOString(),
+      });
+      testedResults.push({ candidate, result });
+      rescued += 1;
+    }
+
     // 3b. Perps desk: candle history fetched once per market, then discovery
     // for fresh perp specs and walk-forward accumulation for survivors.
     const perpHours = Math.min(168, Math.max(24, parseInt(storage.getSetting("perp_lab_hours") || "72", 10)));
+    // Perp strands (same self-sealing bug): a fresh perp whose candle history
+    // came back <120 bars gets `continue`d and orphaned. Rescue a bounded batch.
+    const strandedPerp = testingAll
+      .filter((c) => c.lastTestedAt == null && c.kind === "perp" && !freshIds.has(c.id))
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .slice(0, rescueBatch);
     const perpMarketsNeeded = [...new Set([
       ...freshPerp.map((f) => f.spec.market),
       ...perpSurvivors.map((c) => clampPerpSpec(JSON.parse(c.spec)).market),
+      ...strandedPerp.map((c) => {
+        try { return clampPerpSpec(JSON.parse(c.spec)).market; } catch { return ""; }
+      }).filter(Boolean),
     ])];
     const candlesByMarket = new Map<string, PerpCandle[]>();
     for (const market of perpMarketsNeeded) {
@@ -1018,6 +1085,70 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         lastEvalCloseMs: (candles[candles.length - 1]?.end_period_ts ?? 0) * 1000,
       });
       testedResults.push({ candidate, result: result as any });
+    }
+
+    // 3b-rescue. Same rescue for stranded perp candidates.
+    for (const candidate of strandedPerp) {
+      let spec: ReturnType<typeof clampPerpSpec>;
+      try { spec = clampPerpSpec(JSON.parse(candidate.spec)); } catch { continue; }
+      const candles = candlesByMarket.get(spec.market) ?? [];
+      if (candles.length < 120) {
+        if (Date.now() - Date.parse(candidate.createdAt) > rescueGraceMs) {
+          storage.updateCandidateStrategy(candidate.id, {
+            status: "rejected",
+            pmNotes: `auto-GC: unscoreable - perp market ${spec.market} yielded <120 candles across retries (stranded >${rescueGraceMs / 3600_000}h)`,
+          });
+          rescueGc += 1;
+        }
+        continue;
+      }
+      const result = evaluatePerpSpecOnCandles(spec, candles);
+      storage.updateCandidateStrategy(candidate.id, {
+        trainTrades: result.train.trades,
+        trainWins: result.train.wins,
+        trainNetPnl: result.train.netPnl,
+        holdoutTrades: result.holdout.trades,
+        holdoutWins: result.holdout.wins,
+        holdoutNetPnl: result.holdout.netPnl,
+        lastTestedAt: new Date().toISOString(),
+        lastEvalCloseMs: (candles[candles.length - 1]?.end_period_ts ?? 0) * 1000,
+      });
+      testedResults.push({ candidate, result: result as any });
+      rescued += 1;
+    }
+
+    // 3c. GC the dead tail the PM can never reach. It reviews ~40 candidates a
+    // cycle (top-25 by walk-forward P&L + 15 spotlight slots); a losing spec
+    // with an adequate out-of-sample sample ranks below both and sits in
+    // `testing` forever, re-scored every walk-forward cycle (the perf drag) and
+    // never culled. This applies the PM's OWN reject bar - decisively negative
+    // out-of-sample, not rescued by walk-forward - to that unreachable tail. It
+    // never touches promising cells: a positive holdout, or a walk-forward P&L
+    // that has turned positive, spares the candidate. Bounded per cycle so the
+    // backlog drains gradually and observably.
+    let deadGc = 0;
+    if ((storage.getSetting("pool_gc_enabled") || "1") !== "0") {
+      const gcBatch = Math.max(0, parseInt(storage.getSetting("pool_gc_batch") || "300", 10));
+      const gcMinHoldout = Math.max(1, parseInt(storage.getSetting("pool_gc_min_holdout") || "15", 10));
+      const deadTail = storage.getCandidateStrategies("testing")
+        .filter((c) => c.lastTestedAt != null
+          && (c.holdoutTrades ?? 0) >= gcMinHoldout
+          && (c.holdoutNetPnl ?? 0) < 0
+          && (c.liveNetPnl ?? 0) <= 0)
+        .sort((a, b) => Date.parse(a.lastTestedAt!) - Date.parse(b.lastTestedAt!))
+        .slice(0, gcBatch);
+      for (const c of deadTail) {
+        const ho = (c.holdoutNetPnl ?? 0).toFixed(0);
+        const wf = (c.liveNetPnl ?? 0).toFixed(0);
+        storage.updateCandidateStrategy(c.id, {
+          status: "rejected",
+          pmNotes: `auto-GC: dead tail - holdout ${c.holdoutTrades}t net $${ho}, walk-forward net $${wf} (decisively negative out-of-sample, PM-unreachable)`,
+        });
+        deadGc += 1;
+      }
+    }
+    if (rescued || rescueGc || deadGc) {
+      console.log(`${new Date().toISOString()} [agent-lab] pool hygiene: rescued ${rescued} stranded, GC'd ${rescueGc} unscoreable + ${deadGc} dead-tail`);
     }
 
     // 4. PM reviews everything under test, strongest live evidence first so the
