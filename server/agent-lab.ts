@@ -41,7 +41,7 @@ const DEFAULT_WORKER_MODEL = "claude-haiku-4-5";
 // outputs don't support min/max constraints, and clamping still tests a
 // slightly-out-of-range idea instead of discarding it.
 const SpecProposalSchema = z.object({
-  name: z.string(),
+  name: z.string().max(120),
   // Plain string, not a strict enum: the model occasionally emits a series
   // value that misses the enum by a char, and messages.parse would discard
   // the ENTIRE response over it (observed via lastWorkerDiag). clampSpec
@@ -74,16 +74,25 @@ const SpecProposalSchema = z.object({
   leaderSeries: z.string(),
   leaderLookbackMinutes: z.number(),
   leaderAlignMode: z.string(),
-  rationale: z.string(),
+  rationale: z.string().max(400),
 });
 
+// Bounds are enforced by Anthropic's constrained decoding DURING generation,
+// not just post-hoc: they physically prevent the runaway that truncates a
+// worker mid-JSON at the 16k-token cap and loses the whole response. The
+// observed failures (explorer @40185, commodity_explorer @40090 chars) were
+// the model emitting 30-40 proposals despite "propose exactly 3/4" - an
+// unbounded array. .max(8) is generous headroom over the largest legitimate
+// request (mandate_executor's 4); no real worker is ever clipped. The string
+// caps close the rarer runaway-string path and are safe (a clipped string is
+// still valid JSON, never a parse rejection).
 const WorkerOutputSchema = z.object({
-  proposals: z.array(SpecProposalSchema),
-  notes: z.string(),
+  proposals: z.array(SpecProposalSchema).max(8),
+  notes: z.string().max(1500),
 });
 
 const PerpSpecProposalSchema = z.object({
-  name: z.string(),
+  name: z.string().max(120),
   market: z.string(), // clampPerpSpec validates; avoids whole-response loss on a stray value
   direction: z.string(),
   lookbackMinutes: z.number(),
@@ -98,12 +107,12 @@ const PerpSpecProposalSchema = z.object({
   maxVol1mBps: z.number(),
   trendAlignHours: z.number(),
   trendAlignMode: z.string(),
-  rationale: z.string(),
+  rationale: z.string().max(400),
 });
 
 const PerpWorkerOutputSchema = z.object({
-  proposals: z.array(PerpSpecProposalSchema),
-  notes: z.string(),
+  proposals: z.array(PerpSpecProposalSchema).max(8),
+  notes: z.string().max(1500),
 });
 
 const PmOutputSchema = z.object({
