@@ -41,7 +41,7 @@ const DEFAULT_WORKER_MODEL = "claude-haiku-4-5";
 // outputs don't support min/max constraints, and clamping still tests a
 // slightly-out-of-range idea instead of discarding it.
 const SpecProposalSchema = z.object({
-  name: z.string().max(120),
+  name: z.string(),
   // Plain string, not a strict enum: the model occasionally emits a series
   // value that misses the enum by a char, and messages.parse would discard
   // the ENTIRE response over it (observed via lastWorkerDiag). clampSpec
@@ -74,25 +74,23 @@ const SpecProposalSchema = z.object({
   leaderSeries: z.string(),
   leaderLookbackMinutes: z.number(),
   leaderAlignMode: z.string(),
-  rationale: z.string().max(400),
+  rationale: z.string(),
 });
 
-// Bounds are enforced by Anthropic's constrained decoding DURING generation,
-// not just post-hoc: they physically prevent the runaway that truncates a
-// worker mid-JSON at the 16k-token cap and loses the whole response. The
-// observed failures (explorer @40185, commodity_explorer @40090 chars) were
-// the model emitting 30-40 proposals despite "propose exactly 3/4" - an
-// unbounded array. .max(8) is generous headroom over the largest legitimate
-// request (mandate_executor's 4); no real worker is ever clipped. The string
-// caps close the rarer runaway-string path and are safe (a clipped string is
-// still valid JSON, never a parse rejection).
+// Schema stays UNBOUNDED on purpose. messages.parse validates the zod schema
+// POST-HOC (verified v1.43.0: a .max(8) array cap produced a "too_big" parse
+// rejection that discarded the whole response - the bound is NOT enforced
+// during decoding). So any schema bound just converts a mild runaway (model
+// emits >N proposals) from a usable response into a lost one. We bound in CODE
+// instead (WORKER_PROPOSAL_CAP slice after parse): the response always parses,
+// we keep the first few proposals, and a runaway never costs the response.
 const WorkerOutputSchema = z.object({
-  proposals: z.array(SpecProposalSchema).max(8),
-  notes: z.string().max(1500),
+  proposals: z.array(SpecProposalSchema),
+  notes: z.string(),
 });
 
 const PerpSpecProposalSchema = z.object({
-  name: z.string().max(120),
+  name: z.string(),
   market: z.string(), // clampPerpSpec validates; avoids whole-response loss on a stray value
   direction: z.string(),
   lookbackMinutes: z.number(),
@@ -107,13 +105,20 @@ const PerpSpecProposalSchema = z.object({
   maxVol1mBps: z.number(),
   trendAlignHours: z.number(),
   trendAlignMode: z.string(),
-  rationale: z.string().max(400),
+  rationale: z.string(),
 });
 
 const PerpWorkerOutputSchema = z.object({
-  proposals: z.array(PerpSpecProposalSchema).max(8),
-  notes: z.string().max(1500),
+  proposals: z.array(PerpSpecProposalSchema),
+  notes: z.string(),
 });
+
+// Code-side bound on how many proposals we keep from any one worker response.
+// Enforced AFTER parse (never in the schema - see WorkerOutputSchema note), so
+// a worker that runs away and emits many proposals still yields a usable
+// response; we just take the first few. Generous over the largest legitimate
+// request (mandate_executor asks for 4); a normal worker is never clipped.
+const WORKER_PROPOSAL_CAP = 6;
 
 const PmOutputSchema = z.object({
   decisions: z.array(z.object({
@@ -358,9 +363,9 @@ async function callGlmJson(system: string, task: string): Promise<Record<string,
 // {proposals:[{...}], notes} shape - clampSpec fills/repairs every spec field
 // downstream, exactly as it does for slightly-off Claude proposals.
 function extractGlmProposals(raw: Record<string, unknown>): { proposals: Record<string, unknown>[]; notes: string } {
-  const proposals = Array.isArray(raw.proposals)
+  const proposals = (Array.isArray(raw.proposals)
     ? raw.proposals.filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x))
-    : [];
+    : []).slice(0, WORKER_PROPOSAL_CAP);
   return { proposals, notes: typeof raw.notes === "string" ? raw.notes : "" };
 }
 
@@ -784,7 +789,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         if (response.stop_reason === "refusal" || !response.parsed_output) {
           return { role: role.key, proposals: [], notes: `(${role.key} returned no usable output)` };
         }
-        return { role: role.key, proposals: response.parsed_output.proposals, notes: response.parsed_output.notes };
+        return { role: role.key, proposals: response.parsed_output.proposals.slice(0, WORKER_PROPOSAL_CAP), notes: response.parsed_output.notes };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`${new Date().toISOString()} [error] [agent-lab] worker ${role.key} failed: ${message}`);
@@ -821,7 +826,7 @@ export async function runAgentLabCycle(trigger: "manual" | "scheduled"): Promise
         if (response.stop_reason === "refusal" || !response.parsed_output) {
           return { role: role.key, proposals: [], notes: `(${role.key} returned no usable output)` };
         }
-        return { role: role.key, proposals: response.parsed_output.proposals, notes: response.parsed_output.notes };
+        return { role: role.key, proposals: response.parsed_output.proposals.slice(0, WORKER_PROPOSAL_CAP), notes: response.parsed_output.notes };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`${new Date().toISOString()} [error] [agent-lab] worker ${role.key} failed: ${message}`);
